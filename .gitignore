@@ -1,2 +1,5 @@
 *.pem
 .firecrawl/
+node_modules/
+dist/
+index.html.bak
