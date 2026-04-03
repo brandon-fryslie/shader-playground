@@ -314,21 +314,91 @@ function getOrbitCamera() {
 // When set by XR frame loop, overrides orbit camera and depth texture for all rendering
 let xrCameraOverride: XRCameraOverride | null = null;
 let xrDepthView: GPUTextureView | null = null;
+const SAMPLE_COUNT: number = 4;
+
+function getOrCreateAttachmentTexture(
+  current: GPUTexture | undefined,
+  width: number,
+  height: number,
+  format: GPUTextureFormat,
+  sampleCount: number
+): GPUTexture {
+  const matches = current &&
+    current.width === width &&
+    current.height === height &&
+    current.format === format &&
+    current.sampleCount === sampleCount;
+  if (matches) return current;
+  current?.destroy();
+  return device.createTexture({
+    size: [width, height],
+    format,
+    sampleCount,
+    usage: GPUTextureUsage.RENDER_ATTACHMENT,
+  });
+}
 
 // Helper: get a depth texture view. In XR, use the XR-provided one.
 // In desktop, manage a per-simulation depth texture that matches the canvas.
 function getDepthView(simDepthRef: DepthRef): GPUTextureView {
-  if (xrDepthView) return xrDepthView;
+  if (xrDepthView && SAMPLE_COUNT === 1) return xrDepthView;
   // Desktop path: create/resize depth texture to match canvas
-  if (!simDepthRef.tex || simDepthRef.tex.width !== canvas.width || simDepthRef.tex.height !== canvas.height) {
-    if (simDepthRef.tex) simDepthRef.tex.destroy();
-    simDepthRef.tex = device.createTexture({
-      size: [canvas.width, canvas.height],
-      format: 'depth24plus',
-      usage: GPUTextureUsage.RENDER_ATTACHMENT,
-    });
-  }
+  simDepthRef.tex = getOrCreateAttachmentTexture(simDepthRef.tex, canvas.width, canvas.height, 'depth24plus', SAMPLE_COUNT);
   return simDepthRef.tex.createView();
+}
+
+function getColorAttachment(
+  simDepthRef: DepthRef,
+  resolveTarget: GPUTextureView,
+  viewport: number[] | null
+): GPURenderPassColorAttachment {
+  if (SAMPLE_COUNT === 1) {
+    return {
+      view: resolveTarget,
+      clearValue: { r: 0.02, g: 0.02, b: 0.025, a: 1 },
+      loadOp: 'clear',
+      storeOp: 'store',
+    };
+  }
+
+  const width = viewport ? viewport[2] : canvas.width;
+  const height = viewport ? viewport[3] : canvas.height;
+  // [LAW:one-source-of-truth] MSAA color target sizing is derived from the active render target dimensions in one place.
+  simDepthRef.msaaColorTex = getOrCreateAttachmentTexture(simDepthRef.msaaColorTex, width, height, canvasFormat, SAMPLE_COUNT);
+
+  return {
+    view: simDepthRef.msaaColorTex.createView(),
+    resolveTarget,
+    clearValue: { r: 0.02, g: 0.02, b: 0.025, a: 1 },
+    loadOp: 'clear',
+    storeOp: 'discard',
+  };
+}
+
+function getDepthAttachment(simDepthRef: DepthRef, viewport: number[] | null): GPURenderPassDepthStencilAttachment {
+  if (SAMPLE_COUNT > 1 && viewport) {
+    const width = viewport[2];
+    const height = viewport[3];
+    simDepthRef.msaaDepthTex = getOrCreateAttachmentTexture(simDepthRef.msaaDepthTex, width, height, 'depth24plus', SAMPLE_COUNT);
+    return {
+      view: simDepthRef.msaaDepthTex.createView(),
+      depthClearValue: 1.0,
+      depthLoadOp: 'clear',
+      depthStoreOp: 'discard',
+    };
+  }
+  return {
+    view: getDepthView(simDepthRef),
+    depthClearValue: 1.0,
+    depthLoadOp: 'clear',
+    depthStoreOp: 'store',
+  };
+}
+
+function destroyDepthRef(depthRef: DepthRef) {
+  depthRef.tex?.destroy();
+  depthRef.msaaColorTex?.destroy();
+  depthRef.msaaDepthTex?.destroy();
 }
 
 function getCameraUniformData(aspect: number) {
@@ -450,6 +520,7 @@ function initGrid() {
     },
     primitive: { topology: 'triangle-list' },
     depthStencil: { format: 'depth24plus', depthWriteEnabled: true, depthCompare: 'less' },
+    multisample: { count: SAMPLE_COUNT },
   });
 
   gridBGs = [0, 1].map(vi => device.createBindGroup({ layout: gridBGL, entries: [
@@ -537,6 +608,7 @@ function createBoidsSimulation() {
     },
     primitive: { topology: 'triangle-list' },
     depthStencil: { format: 'depth24plus', depthWriteEnabled: true, depthCompare: 'less' },
+    multisample: { count: SAMPLE_COUNT },
   });
 
   // Create bind groups for ping-pong
@@ -594,23 +666,12 @@ function createBoidsSimulation() {
     },
 
     render(encoder: GPUCommandEncoder, textureView: GPUTextureView, viewport: number[] | null, viewIndex = 0) {
-      const dv = getDepthView(depthRef);
       const aspect = viewport ? (viewport[2] / viewport[3]) : (canvas.width / canvas.height);
       device.queue.writeBuffer(cameraBuffer, viewIndex * CAMERA_STRIDE, getCameraUniformData(aspect));
 
       const pass = encoder.beginRenderPass({
-        colorAttachments: [{
-          view: textureView,
-          clearValue: { r: 0.02, g: 0.02, b: 0.025, a: 1 },
-          loadOp: 'clear',
-          storeOp: 'store',
-        }],
-        depthStencilAttachment: {
-          view: dv,
-          depthClearValue: 1.0,
-          depthLoadOp: 'clear',
-          depthStoreOp: 'store',
-        },
+        colorAttachments: [getColorAttachment(depthRef, textureView, viewport)],
+        depthStencilAttachment: getDepthAttachment(depthRef, viewport),
       });
 
       if (viewport) {
@@ -630,7 +691,7 @@ function createBoidsSimulation() {
     destroy() {
       bufferA.destroy(); bufferB.destroy();
       paramsBuffer.destroy(); cameraBuffer.destroy();
-      if (depthRef.tex) depthRef.tex.destroy();
+      destroyDepthRef(depthRef);
     }
   };
 }
@@ -722,6 +783,7 @@ function createPhysicsSimulation() {
       }]
     },
     primitive: { topology: 'triangle-list' },
+    multisample: { count: SAMPLE_COUNT },
   });
 
   const computeBG = [
@@ -771,7 +833,6 @@ function createPhysicsSimulation() {
     },
 
     render(encoder: GPUCommandEncoder, textureView: GPUTextureView, viewport: number[] | null, viewIndex = 0) {
-      const dv = getDepthView(depthRef);
       const aspect = viewport ? (viewport[2] / viewport[3]) : (canvas.width / canvas.height);
       const m = state.mouse;
       device.queue.writeBuffer(cameraBuffer, viewIndex * CAMERA_STRIDE, getCameraUniformData(aspect));
@@ -780,18 +841,8 @@ function createPhysicsSimulation() {
       ]));
 
       const pass = encoder.beginRenderPass({
-        colorAttachments: [{
-          view: textureView,
-          clearValue: { r: 0.02, g: 0.02, b: 0.025, a: 1 },
-          loadOp: 'clear',
-          storeOp: 'store',
-        }],
-        depthStencilAttachment: {
-          view: dv,
-          depthClearValue: 1.0,
-          depthLoadOp: 'clear',
-          depthStoreOp: 'store',
-        },
+        colorAttachments: [getColorAttachment(depthRef, textureView, viewport)],
+        depthStencilAttachment: getDepthAttachment(depthRef, viewport),
       });
 
       if (viewport) {
@@ -811,6 +862,7 @@ function createPhysicsSimulation() {
     destroy() {
       bufferA.destroy(); bufferB.destroy();
       paramsBuffer.destroy(); cameraBuffer.destroy(); attractorBuffer.destroy();
+      destroyDepthRef(depthRef);
     }
   };
 }
@@ -1005,6 +1057,7 @@ function createFluidSimulation() {
     },
     primitive: { topology: 'triangle-list' },
     depthStencil: { format: 'depth24plus', depthWriteEnabled: true, depthCompare: 'less' },
+    multisample: { count: SAMPLE_COUNT },
   });
   // renderBGs[viewIndex] — fluid has no particle ping-pong for rendering
   const renderBGs: GPUBindGroup[] = [0, 1].map(vi => device.createBindGroup({ layout: renderBGL, entries: [
@@ -1098,23 +1151,12 @@ function createFluidSimulation() {
     },
 
     render(encoder: GPUCommandEncoder, textureView: GPUTextureView, viewport: number[] | null, viewIndex = 0) {
-      const dv = getDepthView(depthRef);
       const aspect = viewport ? (viewport[2] / viewport[3]) : (canvas.width / canvas.height);
       device.queue.writeBuffer(cameraBuffer, viewIndex * CAMERA_STRIDE, getCameraUniformData(aspect));
 
       const pass = encoder.beginRenderPass({
-        colorAttachments: [{
-          view: textureView,
-          clearValue: { r: 0.02, g: 0.02, b: 0.025, a: 1 },
-          loadOp: 'clear',
-          storeOp: 'store',
-        }],
-        depthStencilAttachment: {
-          view: dv,
-          depthClearValue: 1.0,
-          depthLoadOp: 'clear',
-          depthStoreOp: 'store',
-        },
+        colorAttachments: [getColorAttachment(depthRef, textureView, viewport)],
+        depthStencilAttachment: getDepthAttachment(depthRef, viewport),
       });
 
       if (viewport) {
@@ -1138,7 +1180,7 @@ function createFluidSimulation() {
       dyeA.destroy(); dyeB.destroy();
       paramsBuffer.destroy(); fluidRenderParamsBuffer.destroy();
       cameraBuffer.destroy();
-      if (depthRef.tex) depthRef.tex.destroy();
+      destroyDepthRef(depthRef);
     }
   };
 }
@@ -1220,6 +1262,7 @@ function createParametricSimulation() {
     },
     primitive: { topology: 'triangle-list', cullMode: 'none' },
     depthStencil: { format: 'depth24plus', depthWriteEnabled: true, depthCompare: 'less' },
+    multisample: { count: SAMPLE_COUNT },
   });
   // renderBGs[viewIndex]
   const renderBGs: GPUBindGroup[] = [0, 1].map(vi => device.createBindGroup({ layout: renderBGL, entries: [
@@ -1261,7 +1304,6 @@ function createParametricSimulation() {
     render(encoder: GPUCommandEncoder, textureView: GPUTextureView, viewport: number[] | null, viewIndex = 0) {
       if (currentIndexCount === 0) return;
 
-      const dv = getDepthView(depthRef);
       const aspect = viewport ? (viewport[2] / viewport[3]) : (canvas.width / canvas.height);
       device.queue.writeBuffer(cameraBuffer, viewIndex * CAMERA_STRIDE, getCameraUniformData(aspect));
 
@@ -1269,18 +1311,8 @@ function createParametricSimulation() {
       device.queue.writeBuffer(modelBuffer, 0, model as Float32Array<ArrayBuffer>);
 
       const pass = encoder.beginRenderPass({
-        colorAttachments: [{
-          view: textureView,
-          clearValue: { r: 0.02, g: 0.02, b: 0.025, a: 1 },
-          loadOp: 'clear',
-          storeOp: 'store',
-        }],
-        depthStencilAttachment: {
-          view: dv,
-          depthClearValue: 1.0,
-          depthLoadOp: 'clear',
-          depthStoreOp: 'store',
-        },
+        colorAttachments: [getColorAttachment(depthRef, textureView, viewport)],
+        depthStencilAttachment: getDepthAttachment(depthRef, viewport),
       });
 
       if (viewport) {
@@ -1301,7 +1333,7 @@ function createParametricSimulation() {
     destroy() {
       vertexBuffer.destroy(); indexBuffer.destroy();
       computeParamsBuffer.destroy(); cameraBuffer.destroy(); modelBuffer.destroy();
-      if (depthRef.tex) depthRef.tex.destroy();
+      destroyDepthRef(depthRef);
     }
   };
 }

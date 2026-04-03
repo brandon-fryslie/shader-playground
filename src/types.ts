@@ -142,4 +142,6 @@ export interface XRCameraOverride {
 
 export interface DepthRef {
   tex?: GPUTexture;
+  msaaColorTex?: GPUTexture;
+  msaaDepthTex?: GPUTexture;
 }
