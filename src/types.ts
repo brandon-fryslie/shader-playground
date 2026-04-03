@@ -26,6 +26,7 @@ export interface PhysicsParams {
   G: number;
   softening: number;
   damping: number;
+  coreOrbit: number;
   distribution: Distribution;
 }
 

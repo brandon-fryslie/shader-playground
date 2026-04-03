@@ -26,7 +26,7 @@ const DEFAULTS: ModeParamsMap = {
     maxSpeed: 2.0, maxForce: 0.05, visualRange: 100
   },
   physics: {
-    count: 2000, G: 1.0, softening: 0.5, damping: 0.999, distribution: 'disk'
+    count: 2000, G: 1.0, softening: 0.5, damping: 1.0, coreOrbit: 0.28, distribution: 'disk'
   },
   fluid: {
     resolution: 256, viscosity: 0.1, diffusionRate: 0.001, forceStrength: 100, volumeScale: 1.5,
@@ -52,9 +52,9 @@ const PRESETS: Record<SimMode, Record<string, Record<string, number | string>>> 
   },
   physics: {
     'Default':  { ...DEFAULTS.physics },
-    'Galaxy':   { count: 3000, G: 0.5, softening: 1.0, damping: 0.998, distribution: 'disk' },
-    'Collapse': { count: 2000, G: 10.0, softening: 0.1, damping: 0.995, distribution: 'shell' },
-    'Gentle':   { count: 1000, G: 0.1, softening: 2.0, damping: 0.9999, distribution: 'random' },
+    'Galaxy':   { count: 3000, G: 0.5, softening: 1.0, damping: 1.0, coreOrbit: 0.32, distribution: 'disk' },
+    'Collapse': { count: 2000, G: 10.0, softening: 0.1, damping: 0.998, coreOrbit: 0.14, distribution: 'shell' },
+    'Gentle':   { count: 1000, G: 0.1, softening: 2.0, damping: 1.0, coreOrbit: 0.2, distribution: 'random' },
   },
   fluid: {
     'Default':   { ...DEFAULTS.fluid },
@@ -91,6 +91,7 @@ const PARAM_DEFS: Record<SimMode, ParamSection[]> = {
       { key: 'G', label: 'Gravity (G)', min: 0.01, max: 100.0, step: 0.01 },
       { key: 'softening', label: 'Softening', min: 0.01, max: 10.0, step: 0.01 },
       { key: 'damping', label: 'Damping', min: 0.9, max: 1.0, step: 0.001 },
+      { key: 'coreOrbit', label: 'Core Friction', min: 0.0, max: 1.5, step: 0.01 },
     ]},
     { section: 'Initial State', params: [
       { key: 'distribution', label: 'Distribution', type: 'dropdown', options: ['random', 'disk', 'shell'] },
@@ -810,23 +811,116 @@ function createBoidsSimulation() {
 
 function createPhysicsSimulation() {
   const count = state.physics.count;
-  const bodyBytes = count * 32; // pos(12) + mass(4) + vel(12) + pad(4) = 32
+  const bodyBytes = count * 48; // pos(12) + mass(4) + vel(12) + pad(4) + home(12) + pad(4) = 48
 
-  const initData = new Float32Array(count * 8);
+  // [LAW:one-source-of-truth] N-body orbit shaping constants live together so position thickness and velocity tilt stay in sync.
+  const ORBITAL_TILT = 0.45;
+  const DISK_THICKNESS = 0.35;
+  const VERTICAL_DRIFT = 0.18;
+  // [LAW:one-source-of-truth] Massive-body seeding lives here so orbital structure and tracer distribution share one initialization model.
+  const BIG_BODY_COUNT = Math.min(count, Math.max(1, Math.round(count * 0.05)));
+  const MEDIUM_BODY_COUNT = Math.min(count - BIG_BODY_COUNT, Math.max(1, Math.round(count * 0.2)));
+  const MASSIVE_BODY_COUNT = BIG_BODY_COUNT + MEDIUM_BODY_COUNT;
+  const TRACER_MASS = 0.0;
+  const CORE_BODY_MASS = 42.0;
+  const BIG_BODY_MASS_MIN = 14.0;
+  const BIG_BODY_MASS_MAX = 30.0;
+  const MEDIUM_BODY_MASS_MIN = 2.5;
+  const MEDIUM_BODY_MASS_MAX = 9.0;
+  const BIG_BODY_RADIUS_MIN = 0.2;
+  const BIG_BODY_RADIUS_MAX = 0.85;
+  const MEDIUM_BODY_RADIUS_MIN = 0.95;
+  const MEDIUM_BODY_RADIUS_MAX = 1.85;
+  const BIG_BODY_HEIGHT = 0.12;
+  const MEDIUM_BODY_HEIGHT = 0.2;
+  const BIG_BODY_SWIRL = 0.9;
+  const MEDIUM_BODY_SWIRL = 0.6;
+
+  const initData = new Float32Array(count * 12);
   const dist = state.physics.distribution;
+  const orbitalNormal = normalize3([0.18, 1.0, -0.12]);
+  const orbitalTangent = normalize3(cross3([0, 1, 0], orbitalNormal));
+  const orbitalBitangent = cross3(orbitalNormal, orbitalTangent);
   for (let i = 0; i < count; i++) {
-    const off = i * 8;
+    const off = i * 12;
     let x, y, z, vx = 0, vy = 0, vz = 0;
-    if (dist === 'disk') {
+    let mass = TRACER_MASS;
+    const isCoreBody = i === 0;
+    const isBigBody = i < BIG_BODY_COUNT;
+    const isMediumBody = i >= BIG_BODY_COUNT && i < MASSIVE_BODY_COUNT;
+    if (isCoreBody) {
+      // [LAW:one-source-of-truth] The dominant well is seeded once here so orbital structure does not depend on emergent drift.
+      x = 0;
+      y = 0;
+      z = 0;
+      vx = 0;
+      vy = 0;
+      vz = 0;
+      mass = CORE_BODY_MASS;
+    } else if (isBigBody || isMediumBody) {
+      const bodyIndex = isBigBody ? i - 1 : i - BIG_BODY_COUNT;
+      const bodyCount = isBigBody ? Math.max(1, BIG_BODY_COUNT - 1) : MEDIUM_BODY_COUNT;
+      const bodyProgress = bodyCount > 1 ? bodyIndex / (bodyCount - 1) : 0.5;
+      const radiusMin = isBigBody ? BIG_BODY_RADIUS_MIN : MEDIUM_BODY_RADIUS_MIN;
+      const radiusMax = isBigBody ? BIG_BODY_RADIUS_MAX : MEDIUM_BODY_RADIUS_MAX;
+      const radiusJitter = isBigBody ? 0.05 : 0.1;
+      const radius = radiusMin + (radiusMax - radiusMin) * bodyProgress + (Math.random() - 0.5) * radiusJitter;
+      const heightScale = isBigBody ? BIG_BODY_HEIGHT : MEDIUM_BODY_HEIGHT;
+      const heightOffset = (Math.random() - 0.5) * heightScale;
+      const angleOffset = isBigBody ? Math.PI * 0.18 : Math.PI / Math.max(3, MEDIUM_BODY_COUNT);
+      const angle = (bodyIndex / Math.max(1, bodyCount)) * Math.PI * 2 + angleOffset;
+      const orbitOffset = [
+        orbitalTangent[0] * Math.cos(angle) * radius + orbitalBitangent[0] * Math.sin(angle) * radius + orbitalNormal[0] * heightOffset,
+        orbitalTangent[1] * Math.cos(angle) * radius + orbitalBitangent[1] * Math.sin(angle) * radius + orbitalNormal[1] * heightOffset,
+        orbitalTangent[2] * Math.cos(angle) * radius + orbitalBitangent[2] * Math.sin(angle) * radius + orbitalNormal[2] * heightOffset,
+      ];
+      x = orbitOffset[0];
+      y = orbitOffset[1];
+      z = orbitOffset[2];
+
+      const swirl = isBigBody ? BIG_BODY_SWIRL : MEDIUM_BODY_SWIRL;
+      const speed = swirl / Math.sqrt(radius + 0.05);
+      const orbitVelocity = [
+        (-Math.sin(angle) * orbitalTangent[0] + Math.cos(angle) * orbitalBitangent[0]) * speed,
+        (-Math.sin(angle) * orbitalTangent[1] + Math.cos(angle) * orbitalBitangent[1]) * speed,
+        (-Math.sin(angle) * orbitalTangent[2] + Math.cos(angle) * orbitalBitangent[2]) * speed,
+      ];
+      vx = orbitVelocity[0];
+      vy = orbitVelocity[1];
+      vz = orbitVelocity[2];
+      mass = isBigBody
+        ? BIG_BODY_MASS_MIN + Math.pow(Math.random(), 0.4) * (BIG_BODY_MASS_MAX - BIG_BODY_MASS_MIN)
+        : MEDIUM_BODY_MASS_MIN + Math.pow(Math.random(), 0.7) * (MEDIUM_BODY_MASS_MAX - MEDIUM_BODY_MASS_MIN);
+    } else if (dist === 'disk') {
       const angle = Math.random() * Math.PI * 2;
       const r = Math.random() * 2;
-      x = Math.cos(angle) * r;
-      y = (Math.random() - 0.5) * 0.1;
-      z = Math.sin(angle) * r;
-      // Orbital velocity
+      const normal = normalize3([
+        (Math.random() - 0.5) * ORBITAL_TILT,
+        1.0,
+        (Math.random() - 0.5) * ORBITAL_TILT,
+      ]);
+      const tangent = normalize3(cross3([0, 1, 0], normal));
+      const bitangent = cross3(normal, tangent);
+      const heightOffset = (Math.random() - 0.5) * DISK_THICKNESS * (0.35 + r * 0.4);
+      const orbitOffset = [
+        tangent[0] * Math.cos(angle) * r + bitangent[0] * Math.sin(angle) * r + normal[0] * heightOffset,
+        tangent[1] * Math.cos(angle) * r + bitangent[1] * Math.sin(angle) * r + normal[1] * heightOffset,
+        tangent[2] * Math.cos(angle) * r + bitangent[2] * Math.sin(angle) * r + normal[2] * heightOffset,
+      ];
+      x = orbitOffset[0];
+      y = orbitOffset[1];
+      z = orbitOffset[2];
+
       const speed = 0.5 / Math.sqrt(r + 0.1);
-      vx = -Math.sin(angle) * speed;
-      vz = Math.cos(angle) * speed;
+      const orbitVelocity = [
+        (-Math.sin(angle) * tangent[0] + Math.cos(angle) * bitangent[0]) * speed,
+        (-Math.sin(angle) * tangent[1] + Math.cos(angle) * bitangent[1]) * speed,
+        (-Math.sin(angle) * tangent[2] + Math.cos(angle) * bitangent[2]) * speed,
+      ];
+      const drift = heightOffset * VERTICAL_DRIFT;
+      vx = orbitVelocity[0] + normal[0] * drift;
+      vy = orbitVelocity[1] + normal[1] * drift;
+      vz = orbitVelocity[2] + normal[2] * drift;
     } else if (dist === 'shell') {
       const theta = Math.random() * Math.PI * 2;
       const phi = Math.acos(2 * Math.random() - 1);
@@ -834,14 +928,27 @@ function createPhysicsSimulation() {
       x = r * Math.sin(phi) * Math.cos(theta);
       y = r * Math.sin(phi) * Math.sin(theta);
       z = r * Math.cos(phi);
+      const radial = normalize3([x, y, z]);
+      const tangent = normalize3(cross3(radial, [0.3, 1.0, -0.2]));
+      const bitangent = cross3(radial, tangent);
+      const swirl = 0.18 + Math.random() * 0.08;
+      vx = (tangent[0] + bitangent[0] * 0.35) * swirl;
+      vy = (tangent[1] + bitangent[1] * 0.35) * swirl;
+      vz = (tangent[2] + bitangent[2] * 0.35) * swirl;
     } else {
       x = (Math.random() - 0.5) * 4;
       y = (Math.random() - 0.5) * 4;
       z = (Math.random() - 0.5) * 4;
+      vx = (Math.random() - 0.5) * 0.12;
+      vy = (Math.random() - 0.5) * 0.12;
+      vz = (Math.random() - 0.5) * 0.12;
     }
     initData[off] = x; initData[off + 1] = y; initData[off + 2] = z;
-    initData[off + 3] = 0.5 + Math.random() * 2.0; // mass
+    initData[off + 3] = mass;
     initData[off + 4] = vx; initData[off + 5] = vy; initData[off + 6] = vz;
+    initData[off + 8] = x;
+    initData[off + 9] = y;
+    initData[off + 10] = z;
   }
 
   const bufferA = device.createBuffer({ size: bodyBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST, mappedAtCreation: true });
@@ -849,7 +956,7 @@ function createPhysicsSimulation() {
   bufferA.unmap();
   const bufferB = device.createBuffer({ size: bodyBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
 
-  const paramsBuffer = device.createBuffer({ size: 48, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST }); // dt, G, soft, damp, count, pad*3, attractor*4
+  const paramsBuffer = device.createBuffer({ size: 48, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST }); // dt, G, soft, damp, count, sourceCount, coreOrbit, pad, target.xyz, interaction
   const cameraBuffer = device.createBuffer({ size: CAMERA_STRIDE * 2, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
 
   const computeModule = device.createShaderModule({ code: SHADER_NBODY_COMPUTE_EDIT || SHADER_NBODY_COMPUTE });
@@ -868,14 +975,10 @@ function createPhysicsSimulation() {
     compute: { module: computeModule, entryPoint: 'main' }
   });
 
-  // Attractor uniform for render shader (x, y, z, active = 16 bytes)
-  const attractorBuffer = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-
   const renderBGL = device.createBindGroupLayout({
     entries: [
       { binding: 0, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: 'read-only-storage' } },
       { binding: 1, visibility: GPUShaderStage.VERTEX, buffer: { type: 'uniform' } },
-      { binding: 2, visibility: GPUShaderStage.VERTEX, buffer: { type: 'uniform' } },
     ]
   });
 
@@ -918,7 +1021,6 @@ function createPhysicsSimulation() {
     [bufferA, bufferB].map(buf => device.createBindGroup({ layout: renderBGL, entries: [
       { binding: 0, resource: { buffer: buf } },
       { binding: 1, resource: { buffer: cameraBuffer, offset: vi * CAMERA_STRIDE, size: CAMERA_SIZE } },
-      { binding: 2, resource: { buffer: attractorBuffer } },
     ]}))
   );
 
@@ -934,7 +1036,11 @@ function createPhysicsSimulation() {
       const u32 = new Uint32Array(paramsData);
       f32[0] = 0.016; f32[1] = p.G * 0.001; f32[2] = p.softening; f32[3] = p.damping;
       u32[4] = count;
-      f32[8] = m.worldX; f32[9] = m.worldY; f32[10] = m.worldZ;
+      u32[5] = MASSIVE_BODY_COUNT;
+      f32[6] = p.coreOrbit;
+      f32[8] = m.down ? m.worldX : 0.0;
+      f32[9] = m.down ? m.worldY : 0.0;
+      f32[10] = m.down ? m.worldZ : 0.0;
       f32[11] = m.down ? 1.0 : 0.0;
       device.queue.writeBuffer(paramsBuffer, 0, new Uint8Array(paramsData));
 
@@ -948,11 +1054,7 @@ function createPhysicsSimulation() {
 
     render(encoder: GPUCommandEncoder, textureView: GPUTextureView, viewport: number[] | null, viewIndex = 0) {
       const aspect = viewport ? (viewport[2] / viewport[3]) : (canvas.width / canvas.height);
-      const m = state.mouse;
       device.queue.writeBuffer(cameraBuffer, viewIndex * CAMERA_STRIDE, getCameraUniformData(aspect));
-      device.queue.writeBuffer(attractorBuffer, 0, new Float32Array([
-        m.worldX, m.worldY, m.worldZ, m.down ? 1.0 : 0.0
-      ]));
 
       const pass = encoder.beginRenderPass({
         colorAttachments: [getColorAttachment(depthRef, textureView, viewport)],
@@ -976,7 +1078,7 @@ function createPhysicsSimulation() {
 
     destroy() {
       bufferA.destroy(); bufferB.destroy();
-      paramsBuffer.destroy(); cameraBuffer.destroy(); attractorBuffer.destroy();
+      paramsBuffer.destroy(); cameraBuffer.destroy();
       destroyDepthRef(depthRef);
     }
   };
@@ -1962,6 +2064,7 @@ function describeParam(_mode: string, key: string, val: number | string): string
     G: () => n > 5 ? `strong gravity (G=${val})` : n < 0.5 ? `weak gravity (G=${val})` : `G=${val}`,
     softening: () => `softening ${val}`,
     damping: () => n < 0.995 ? `high damping (${val})` : `damping ${val}`,
+    coreOrbit: () => n < 0.1 ? `minimal core friction (${val})` : n > 0.8 ? `strong core friction (${val})` : `core friction ${val}`,
     distribution: () => `${val} distribution`,
     resolution: () => `${val}x${val} grid`,
     viscosity: () => n > 0.5 ? `thick fluid (viscosity ${val})` : n < 0.05 ? `thin fluid (viscosity ${val})` : `viscosity ${val}`,
