@@ -1,5 +1,6 @@
 *.pem
 .firecrawl/
+.idea/
 node_modules/
 dist/
 index.html.bak
