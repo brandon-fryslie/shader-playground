@@ -27,7 +27,11 @@ jobs:
           node-version: 22
           cache: npm
 
-      - run: npm ci
+      # npm ci requires the lockfile to be in sync with node_modules for the current
+      # platform. Vite 8 uses rolldown which has platform-native bindings — the lockfile
+      # generated on macOS arm64 doesn't include the Linux x64 native packages CI needs.
+      # npm install resolves correctly for the runner's platform without failing on this.
+      - run: npm install
 
       - run: npm run build
         env:
