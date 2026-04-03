@@ -2035,36 +2035,18 @@ async function toggleXR() {
   btn.textContent = 'Starting...';
 
   try {
-    // Session config varies by browser:
-    //   Chrome requires 'layers' as a required feature to use XRProjectionLayer.
-    //   Safari visionOS accepts 'layers' in updateRenderState({ layers: [...] }) even
-    //   when 'layers' is only optional — so we try required first, then fall back.
-    //   'local-floor' gives a floor-relative reference space on supported devices.
-    const sessionConfigs = [
-      { requiredFeatures: ['webgpu', 'layers', 'local-floor'] },
-      { requiredFeatures: ['webgpu', 'layers'], optionalFeatures: ['local-floor'] },
-      { requiredFeatures: ['webgpu'], optionalFeatures: ['layers', 'local-floor'] },
-    ];
-    for (const config of sessionConfigs) {
-      try {
-        xrSession = await navigator.xr!.requestSession('immersive-vr', config);
-        const wantFloor = [...(config.requiredFeatures ?? []), ...(config.optionalFeatures ?? [])].includes('local-floor');
-        if (wantFloor) {
-          try {
-            xrRefSpace = await xrSession.requestReferenceSpace('local-floor');
-          } catch (_) {
-            xrRefSpace = await xrSession.requestReferenceSpace('local');
-          }
-        } else {
-          xrRefSpace = await xrSession.requestReferenceSpace('local');
-        }
-        break;
-      } catch (e) {
-        console.warn('[XR] Session config failed, trying next:', (e as Error).message);
-        xrSession = null;
-      }
+    // Safari visionOS: 'webgpu' is required to get XRGPUBinding.
+    // 'layers' is optional — Safari accepts it in updateRenderState({ layers: [...] })
+    // even when not listed as required. 'local-floor' is optional; fall back to 'local'.
+    xrSession = await navigator.xr!.requestSession('immersive-vr', {
+      requiredFeatures: ['webgpu'],
+      optionalFeatures: ['layers', 'local-floor'],
+    });
+    try {
+      xrRefSpace = await xrSession.requestReferenceSpace('local-floor');
+    } catch (_) {
+      xrRefSpace = await xrSession.requestReferenceSpace('local');
     }
-    if (!xrSession) throw new Error('All session configurations failed');
 
     // XRGPUBinding is the WebXR–WebGPU bridge. It takes the XR session and the
     // GPUDevice (which must have been created with xrCompatible: true) and lets us
