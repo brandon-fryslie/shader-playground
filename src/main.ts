@@ -2035,84 +2035,68 @@ async function toggleXR() {
   btn.textContent = 'Starting...';
 
   try {
-    console.log('[XR] Requesting session...');
+    // Session config varies by browser:
+    //   Chrome requires 'layers' as a required feature to use XRProjectionLayer.
+    //   Safari visionOS accepts 'layers' in updateRenderState({ layers: [...] }) even
+    //   when 'layers' is only optional — so we try required first, then fall back.
+    //   'local-floor' gives a floor-relative reference space on supported devices.
     const sessionConfigs = [
       { requiredFeatures: ['webgpu', 'layers', 'local-floor'] },
       { requiredFeatures: ['webgpu', 'layers'], optionalFeatures: ['local-floor'] },
       { requiredFeatures: ['webgpu'], optionalFeatures: ['layers', 'local-floor'] },
-      { optionalFeatures: ['webgpu', 'layers', 'local-floor'] },
-      {},
     ];
-    let refSpaceType = 'local';
-    for (let ci = 0; ci < sessionConfigs.length; ci++) {
+    for (const config of sessionConfigs) {
       try {
-        console.log('[XR] Trying session config', ci, JSON.stringify(sessionConfigs[ci]));
-        xrSession = await navigator.xr!.requestSession('immersive-vr', sessionConfigs[ci]);
-        // Figure out which ref space we got
-        const features = sessionConfigs[ci].requiredFeatures || [];
-        const optFeatures = sessionConfigs[ci].optionalFeatures || [];
-        if (features.includes('local-floor') || optFeatures.includes('local-floor')) {
+        xrSession = await navigator.xr!.requestSession('immersive-vr', config);
+        const wantFloor = [...(config.requiredFeatures ?? []), ...(config.optionalFeatures ?? [])].includes('local-floor');
+        if (wantFloor) {
           try {
             xrRefSpace = await xrSession.requestReferenceSpace('local-floor');
-            refSpaceType = 'local-floor';
           } catch (_) {
             xrRefSpace = await xrSession.requestReferenceSpace('local');
           }
         } else {
           xrRefSpace = await xrSession.requestReferenceSpace('local');
         }
-        console.log('[XR] Session created with config', ci, ', refSpace:', refSpaceType);
         break;
       } catch (e) {
-        console.warn('[XR] Config', ci, 'failed:', (e as Error).message);
+        console.warn('[XR] Session config failed, trying next:', (e as Error).message);
         xrSession = null;
       }
     }
     if (!xrSession) throw new Error('All session configurations failed');
 
-    // Check if layers feature was actually granted
-    console.log('[XR] Session enabledFeatures:', xrSession.enabledFeatures);
-
-    console.log('[XR] Creating XRGPUBinding...');
+    // XRGPUBinding is the WebXR–WebGPU bridge. It takes the XR session and the
+    // GPUDevice (which must have been created with xrCompatible: true) and lets us
+    // create GPU-backed projection layers and retrieve per-eye GPUTextureViews each frame.
     xrBinding = new XRGPUBinding(xrSession, device);
-    console.log('[XR] XRGPUBinding created');
 
-    // Inspect what the binding actually supports
-    console.log('[XR] XRGPUBinding methods:', Object.getOwnPropertyNames(Object.getPrototypeOf(xrBinding)));
-    console.log('[XR] XRGPUBinding has createProjectionLayer:', typeof xrBinding.createProjectionLayer);
-    console.log('[XR] XRGPUBinding has getPreferredColorFormat:', typeof xrBinding.getPreferredColorFormat);
-    console.log('[XR] XRGPUBinding has createQuadLayer:', typeof (xrBinding as unknown as Record<string, unknown>).createQuadLayer);
-    if (xrBinding.getPreferredColorFormat) {
-      console.log('[XR] Preferred color format:', xrBinding.getPreferredColorFormat());
-    }
-
-    console.log('[XR] Creating projection layer, canvasFormat:', canvasFormat);
-    // Try multiple configurations — Safari visionOS is picky about formats
+    // getPreferredColorFormat() returns the texture format the XR compositor expects.
+    // nativeProjectionScaleFactor is the device's native render resolution multiplier —
+    // passing it to scaleFactor renders at full resolution instead of a default lower res.
     const preferredFormat = xrBinding.getPreferredColorFormat();
-    const nsf = xrBinding.nativeProjectionScaleFactor;
-    console.log('[XR] nativeProjectionScaleFactor:', nsf);
+    const scaleFactor = xrBinding.nativeProjectionScaleFactor;
+
+    // Try creating the projection layer with native scale, fall back to default scale.
+    // Depth is managed per-frame (see xrFrame) so we don't request depthStencilFormat here.
     const layerConfigs: XRGPUProjectionLayerInit[] = [
-      { colorFormat: preferredFormat, scaleFactor: nsf },
-      { colorFormat: preferredFormat, scaleFactor: nsf, depthStencilFormat: 'depth24plus' },
+      { colorFormat: preferredFormat, scaleFactor },
       { colorFormat: preferredFormat },
-      { colorFormat: preferredFormat, depthStencilFormat: 'depth24plus' },
     ];
-    for (let ci = 0; ci < layerConfigs.length; ci++) {
+    for (const config of layerConfigs) {
       try {
-        console.log('[XR] Trying layer config', ci, ':', JSON.stringify(layerConfigs[ci]));
-        xrLayer = xrBinding.createProjectionLayer(layerConfigs[ci]);
-        console.log('[XR] Projection layer created with config', ci);
+        xrLayer = xrBinding.createProjectionLayer(config);
         break;
-      } catch (e2) {
-        console.warn('[XR] Config', ci, 'failed:', (e2 as Error).message);
+      } catch (e) {
+        console.warn('[XR] Projection layer config failed, trying next:', (e as Error).message);
         xrLayer = null;
       }
     }
     if (!xrLayer) throw new Error('All projection layer configurations failed');
 
-    // Safari with 'webgpu' feature accepts layers[] even without explicit 'layers' feature
+    // Assign our GPU projection layer as the sole render target for this session.
+    // This replaces the default baseLayer (canvas-backed) with our GPU texture layer.
     xrSession.updateRenderState({ layers: [xrLayer] });
-    console.log('[XR] Render state updated');
 
     btn.textContent = 'Exit VR';
     state.xrEnabled = true;
@@ -2120,7 +2104,6 @@ async function toggleXR() {
     xrSession.requestAnimationFrame(xrFrame);
 
     xrSession.addEventListener('end', () => {
-      console.log('[XR] Session ended');
       xrSession = null;
       xrRefSpace = null;
       xrBinding = null;
@@ -2131,7 +2114,6 @@ async function toggleXR() {
     });
   } catch (e) {
     console.error('[XR] Failed to start session:', e);
-    console.error('[XR] Error stack:', (e as Error).stack);
     btn.textContent = `XR Error: ${(e as Error).message}`;
     if (xrSession) { try { xrSession.end(); } catch (_) {} }
     xrSession = null;
@@ -2139,74 +2121,41 @@ async function toggleXR() {
   }
 }
 
-let xrFrameCount = 0;
-
 function xrFrame(_time: DOMHighResTimeStamp, xrFrameData: XRFrame) {
   if (!xrSession) return;
   xrSession.requestAnimationFrame(xrFrame);
-  xrFrameCount++;
 
   try {
     const pose = xrFrameData.getViewerPose(xrRefSpace!);
-    if (!pose) {
-      if (xrFrameCount < 5) console.log('[XR] Frame', xrFrameCount, ': no pose');
-      return;
-    }
+    if (!pose) return;
 
     const sim = simulations[state.mode];
-    if (!sim) {
-      if (xrFrameCount < 5) console.log('[XR] Frame', xrFrameCount, ': no simulation');
-      return;
-    }
-
-    if (xrFrameCount <= 3) {
-      console.log('[XR] Frame', xrFrameCount, ': views=', pose.views.length);
-      for (let i = 0; i < pose.views.length; i++) {
-        const v = pose.views[i];
-        console.log('[XR]   view', i, 'eye:', v.eye, 'projMatrix[0]:', v.projectionMatrix[0]);
-      }
-    }
+    if (!sim) return;
 
     const encoder = device.createCommandEncoder();
+
+    // Compute runs once per frame — both eyes share the same simulation state.
     if (!state.paused) sim.compute(encoder);
 
-    for (let vi = 0; vi < pose.views.length; vi++) {
-      const view = pose.views[vi];
-      if (xrFrameCount <= 3) console.log('[XR]   getViewSubImage for view', vi);
-
-      // Safari uses getViewSubImage(layer, view), Chrome uses getSubImage(layer, view)
+    // Render once per eye. pose.views is typically [left, right] on stereo devices.
+    for (const view of pose.views) {
+      // getViewSubImage (Safari) / getSubImage (Chrome) returns the per-eye render target
+      // for this frame. The returned GPUTexture is owned by the XR compositor — we must
+      // not hold references to it across frames.
       const binding = xrBinding!;
       const subImage = binding.getViewSubImage
         ? binding.getViewSubImage(xrLayer!, view)
         : binding.getSubImage!(xrLayer!, view);
-      if (!subImage) {
-        if (xrFrameCount <= 3) console.log('[XR]   subImage is null!');
-        continue;
-      }
+      if (!subImage) continue;
 
-      if (xrFrameCount <= 3) {
-        const ct = subImage.colorTexture;
-        const dt = subImage.depthStencilTexture;
-        console.log('[XR]   color texture:', ct.width, 'x', ct.height, 'format:', ct.format, 'usage:', ct.usage);
-        console.log('[XR]   depth texture:', dt ? (dt.width + 'x' + dt.height + ' format:' + dt.format) : 'none');
-        console.log('[XR]   viewport:', subImage.viewport.x, subImage.viewport.y, subImage.viewport.width, subImage.viewport.height);
-      }
-
-      const viewMatrix = new Float32Array(view.transform.inverse.matrix);
-      const projMatrix = new Float32Array(view.projectionMatrix);
-      const pos = view.transform.position;
-      xrCameraOverride = {
-        viewMatrix,
-        projMatrix,
-        eye: [pos.x, pos.y, pos.z],
-      };
-
-      // Use getViewDescriptor() for correct texture view (array slice, mip level)
+      // getViewDescriptor() returns the correct GPUTextureViewDescriptor for this eye,
+      // including the array layer index when the compositor uses a texture array
+      // (one texture, two slices) instead of two separate textures.
       const viewDesc = subImage.getViewDescriptor ? subImage.getViewDescriptor() : {};
-      if (xrFrameCount <= 3) console.log('[XR]   viewDescriptor:', JSON.stringify(viewDesc));
-
       const textureView = subImage.colorTexture.createView(viewDesc);
 
+      // Use the XR-provided depth buffer if available; otherwise create a matching one.
+      // Some Safari configurations don't provide depthStencilTexture on the subImage.
       if (subImage.depthStencilTexture) {
         xrDepthView = subImage.depthStencilTexture.createView(viewDesc);
       } else {
@@ -2222,26 +2171,28 @@ function xrFrame(_time: DOMHighResTimeStamp, xrFrameData: XRFrame) {
         xrDepthView = xrFallbackDepth.createView();
       }
 
-      // Pass viewport unclamped — texture array slices are sized for the full viewport
-      const vp = subImage.viewport;
-      const viewport = [vp.x, vp.y, vp.width, vp.height];
-      if (xrFrameCount <= 3) {
-        console.log('[XR]   viewport:', viewport);
-        console.log('[XR]   eye pos:', pos.x.toFixed(4), pos.y.toFixed(4), pos.z.toFixed(4));
-      }
+      // Override the orbit camera with this eye's XR-provided matrices.
+      // getCameraUniformData() reads xrCameraOverride when set, so the simulation's
+      // render function needs no XR-specific code — it just writes to the camera uniform.
+      const pos = view.transform.position;
+      xrCameraOverride = {
+        viewMatrix: new Float32Array(view.transform.inverse.matrix),
+        projMatrix: new Float32Array(view.projectionMatrix),
+        eye: [pos.x, pos.y, pos.z],
+      };
 
-      sim.render(encoder, textureView, viewport);
+      // subImage.viewport is relative to the texture (or array slice) for this eye.
+      const { x, y, width, height } = subImage.viewport;
+      sim.render(encoder, textureView, [x, y, width, height]);
     }
 
+    // Clear overrides before submit — desktop frame loop must not inherit XR state.
     xrCameraOverride = null;
     xrDepthView = null;
 
-    if (xrFrameCount <= 3) console.log('[XR] Submitting command buffer, frame', xrFrameCount);
     device.queue.submit([encoder.finish()]);
-    if (xrFrameCount <= 3) console.log('[XR] Frame', xrFrameCount, 'complete');
   } catch (e) {
-    console.error('[XR] Frame error at frame', xrFrameCount, ':', e);
-    console.error('[XR] Stack:', (e as Error).stack);
+    console.error('[XR] Frame error:', e);
   }
 }
 
