@@ -148,14 +148,17 @@ const COLOR_THEMES: Record<string, ThemeColors> = {
   'Atom One':      { primary: '#61AFEF', secondary: '#C678DD', accent: '#62F062', bg: '#282C34', fg: '#ABB2BF' },
   'Flexoki':       { primary: '#205EA6', secondary: '#24837B', accent: '#65800B', bg: '#100F0F', fg: '#FFFCF0' },
 };
+const DEFAULT_THEME = 'Dracula';
+const THEME_FADE_MS = 12000;
+const DEFAULT_CLEAR_COLOR: GPUColor = { r: 0.02, g: 0.02, b: 0.025, a: 1 };
 
 function hexToRgb(hex: string): number[] {
   const n = parseInt(hex.slice(1), 16);
   return [(n >> 16 & 255) / 255, (n >> 8 & 255) / 255, (n & 255) / 255];
 }
 
-function getThemeColors(): RGBThemeColors {
-  const t = COLOR_THEMES[state.colorTheme] || COLOR_THEMES['Dracula'];
+function getThemeColorsForName(themeName: string): RGBThemeColors {
+  const t = COLOR_THEMES[themeName] || COLOR_THEMES[DEFAULT_THEME];
   return {
     primary: hexToRgb(t.primary),
     secondary: hexToRgb(t.secondary),
@@ -164,6 +167,61 @@ function getThemeColors(): RGBThemeColors {
     fg: hexToRgb(t.fg),
     clearColor: { r: hexToRgb(t.bg)[0], g: hexToRgb(t.bg)[1], b: hexToRgb(t.bg)[2], a: 1 },
   };
+}
+
+function mixRgb(a: number[], b: number[], t: number): number[] {
+  return a.map((value, index) => value + (b[index] - value) * t);
+}
+
+function mixThemeColors(from: RGBThemeColors, to: RGBThemeColors, t: number): RGBThemeColors {
+  const bg = mixRgb(from.bg, to.bg, t);
+  return {
+    primary: mixRgb(from.primary, to.primary, t),
+    secondary: mixRgb(from.secondary, to.secondary, t),
+    accent: mixRgb(from.accent, to.accent, t),
+    bg,
+    fg: mixRgb(from.fg, to.fg, t),
+    clearColor: { r: bg[0], g: bg[1], b: bg[2], a: 1 },
+  };
+}
+
+// [LAW:one-source-of-truth] Selected theme name is canonical; animated render colors derive from this transition state.
+const themeTransition = {
+  from: getThemeColorsForName(DEFAULT_THEME),
+  to: getThemeColorsForName(DEFAULT_THEME),
+  startedAtMs: 0,
+};
+
+let currentThemeColors = getThemeColorsForName(DEFAULT_THEME);
+
+function computeThemeColors(now: number): RGBThemeColors {
+  const progress = Math.max(0, Math.min(1, (now - themeTransition.startedAtMs) / THEME_FADE_MS));
+  return mixThemeColors(themeTransition.from, themeTransition.to, progress);
+}
+
+function getThemeColors(): RGBThemeColors {
+  return currentThemeColors;
+}
+
+function refreshThemeColors(now: number): void {
+  currentThemeColors = computeThemeColors(now);
+}
+
+function syncThemeTransition(themeName: string): void {
+  const colors = getThemeColorsForName(themeName);
+  themeTransition.from = colors;
+  themeTransition.to = colors;
+  themeTransition.startedAtMs = 0;
+  currentThemeColors = colors;
+}
+
+function startThemeTransition(themeName: string, now = performance.now()): void {
+  const nextColors = getThemeColorsForName(themeName);
+  const currentColors = computeThemeColors(now);
+  themeTransition.from = currentColors;
+  themeTransition.to = nextColors;
+  themeTransition.startedAtMs = now;
+  currentThemeColors = currentColors;
 }
 
 // Dynamic access to mode-specific params — casts for TypeScript's correlated types limitation
@@ -373,7 +431,7 @@ function getColorAttachment(
   if (renderSampleCount === 1) {
     return {
       view: resolveTarget,
-      clearValue: { r: 0.02, g: 0.02, b: 0.025, a: 1 },
+      clearValue: DEFAULT_CLEAR_COLOR,
       loadOp: 'clear',
       storeOp: 'store',
     };
@@ -387,7 +445,7 @@ function getColorAttachment(
   return {
     view: simDepthRef.msaaColorTex.createView(),
     resolveTarget,
-    clearValue: { r: 0.02, g: 0.02, b: 0.025, a: 1 },
+    clearValue: DEFAULT_CLEAR_COLOR,
     loadOp: 'clear',
     storeOp: 'discard',
   };
@@ -1650,14 +1708,11 @@ function buildThemeSelector() {
     btn.style.borderLeftWidth = '3px';
     btn.style.borderLeftColor = theme.primary;
     btn.addEventListener('click', () => {
+      if (state.colorTheme === name) return;
       state.colorTheme = name;
+      startThemeTransition(name);
       container.querySelectorAll<HTMLButtonElement>('.preset-btn').forEach(b =>
         b.classList.toggle('active', b.dataset.theme === name));
-      // Reset all simulations to pick up new colors
-      for (const mode of Object.keys(simulations) as SimMode[]) {
-        if (simulations[mode]) { simulations[mode]!.destroy(); simulations[mode] = undefined; }
-      }
-      ensureSimulation();
       updateAll();
     });
     container.appendChild(btn);
@@ -2329,9 +2384,10 @@ async function toggleXR() {
   }
 }
 
-function xrFrame(_time: DOMHighResTimeStamp, xrFrameData: XRFrame) {
+function xrFrame(time: DOMHighResTimeStamp, xrFrameData: XRFrame) {
   if (!xrSession) return;
   xrSession.requestAnimationFrame(xrFrame);
+  refreshThemeColors(time);
 
   try {
     const pose = xrFrameData.getViewerPose(xrRefSpace!);
@@ -2461,6 +2517,7 @@ function frame(now: DOMHighResTimeStamp) {
   if (state.xrEnabled) return; // XR has its own loop
 
   requestAnimationFrame(frame);
+  refreshThemeColors(now);
   resizeCanvas();
 
   // FPS calculation
@@ -2522,6 +2579,7 @@ function loadState() {
     if (parsed.fluid) Object.assign(state.fluid, parsed.fluid);
     if (parsed.parametric) Object.assign(state.parametric, parsed.parametric);
     if (parsed.camera) Object.assign(state.camera, parsed.camera);
+    syncThemeTransition(state.colorTheme);
   } catch (e) { /* ignore parse errors — start fresh */ }
 }
 
@@ -2569,6 +2627,7 @@ async function main() {
 
   initGrid();
   loadState();
+  syncThemeTransition(state.colorTheme);
   buildControls();
   buildThemeSelector();
   setupTabs();
