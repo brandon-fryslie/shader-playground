@@ -184,6 +184,13 @@ const state: AppState = {
 
 const FLUID_GRID_RES = 96; // tessellation resolution for 3D fluid mesh
 
+// Camera uniform buffer layout for stereo XR rendering.
+// Each view's 192-byte Camera struct is placed at a 256-byte aligned offset so
+// both eyes can coexist in one buffer. writeBuffer calls go to different offsets,
+// so neither overwrites the other before the command buffer executes.
+const CAMERA_SIZE = 192;   // sizeof(Camera) in WGSL
+const CAMERA_STRIDE = 256; // >= CAMERA_SIZE, multiple of minUniformBufferOffsetAlignment
+
 
 // All shape equations baked into one shader — shapeId uniform selects which runs.
 // p1–p4 are per-shape parameters passed as uniforms (no recompilation on change).
@@ -411,13 +418,13 @@ async function initWebGPU(): Promise<boolean> {
 // ═══ SHARED GRID RENDERER ═══
 
 let gridPipeline!: GPURenderPipeline;
-let gridBG!: GPUBindGroup;
+let gridBGs!: GPUBindGroup[];
 let gridCameraBuffer!: GPUBuffer;
 let gridTimeBuffer!: GPUBuffer;
 let gridTime = 0;
 
 function initGrid() {
-  gridCameraBuffer = device.createBuffer({ size: 192, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+  gridCameraBuffer = device.createBuffer({ size: CAMERA_STRIDE * 2, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
   gridTimeBuffer = device.createBuffer({ size: 4, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
   const gridModule = device.createShaderModule({ code: SHADER_GRID });
 
@@ -445,18 +452,18 @@ function initGrid() {
     depthStencil: { format: 'depth24plus', depthWriteEnabled: true, depthCompare: 'less' },
   });
 
-  gridBG = device.createBindGroup({ layout: gridBGL, entries: [
-    { binding: 0, resource: { buffer: gridCameraBuffer } },
+  gridBGs = [0, 1].map(vi => device.createBindGroup({ layout: gridBGL, entries: [
+    { binding: 0, resource: { buffer: gridCameraBuffer, offset: vi * CAMERA_STRIDE, size: CAMERA_SIZE } },
     { binding: 1, resource: { buffer: gridTimeBuffer } },
-  ]});
+  ]}));
 }
 
-function renderGrid(pass: GPURenderPassEncoder, aspect: number): void {
+function renderGrid(pass: GPURenderPassEncoder, aspect: number, viewIndex = 0): void {
   gridTime += 0.016;
-  device.queue.writeBuffer(gridCameraBuffer, 0, getCameraUniformData(aspect));
+  device.queue.writeBuffer(gridCameraBuffer, viewIndex * CAMERA_STRIDE, getCameraUniformData(aspect));
   device.queue.writeBuffer(gridTimeBuffer, 0, new Float32Array([gridTime]));
   pass.setPipeline(gridPipeline);
-  pass.setBindGroup(0, gridBG);
+  pass.setBindGroup(0, gridBGs[viewIndex]);
   pass.draw(6);
 }
 
@@ -496,7 +503,7 @@ function createBoidsSimulation() {
   // SimParams: dt, sepR, aliR, cohR, maxSpeed, maxForce, visualRange, count, boundSize,
   //            attractorX, attractorY, attractorZ, attractorActive = 13 values → 64 bytes
   const paramsBuffer = device.createBuffer({ size: 64, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-  const cameraBuffer = device.createBuffer({ size: 192, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+  const cameraBuffer = device.createBuffer({ size: CAMERA_STRIDE * 2, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
 
   const computeModule = device.createShaderModule({ code: SHADER_BOIDS_COMPUTE_EDIT || SHADER_BOIDS_COMPUTE });
   const renderModule = device.createShaderModule({ code: SHADER_BOIDS_RENDER_EDIT || SHADER_BOIDS_RENDER });
@@ -546,16 +553,13 @@ function createBoidsSimulation() {
     ]}),
   ];
 
-  const renderBG = [
-    device.createBindGroup({ layout: renderBGL, entries: [
-      { binding: 0, resource: { buffer: bufferA } },
-      { binding: 1, resource: { buffer: cameraBuffer } },
-    ]}),
-    device.createBindGroup({ layout: renderBGL, entries: [
-      { binding: 0, resource: { buffer: bufferB } },
-      { binding: 1, resource: { buffer: cameraBuffer } },
-    ]}),
-  ];
+  // renderBGs[viewIndex][pingPong] — per-eye camera offset × per-frame particle buffer
+  const renderBGs: GPUBindGroup[][] = [0, 1].map(vi =>
+    [bufferA, bufferB].map(buf => device.createBindGroup({ layout: renderBGL, entries: [
+      { binding: 0, resource: { buffer: buf } },
+      { binding: 1, resource: { buffer: cameraBuffer, offset: vi * CAMERA_STRIDE, size: CAMERA_SIZE } },
+    ]}))
+  );
 
   let pingPong = 0;
   const depthRef: DepthRef = {};
@@ -589,10 +593,10 @@ function createBoidsSimulation() {
       pingPong = 1 - pingPong;
     },
 
-    render(encoder: GPUCommandEncoder, textureView: GPUTextureView, viewport: number[] | null) {
+    render(encoder: GPUCommandEncoder, textureView: GPUTextureView, viewport: number[] | null, viewIndex = 0) {
       const dv = getDepthView(depthRef);
       const aspect = viewport ? (viewport[2] / viewport[3]) : (canvas.width / canvas.height);
-      device.queue.writeBuffer(cameraBuffer, 0, getCameraUniformData(aspect));
+      device.queue.writeBuffer(cameraBuffer, viewIndex * CAMERA_STRIDE, getCameraUniformData(aspect));
 
       const pass = encoder.beginRenderPass({
         colorAttachments: [{
@@ -613,10 +617,10 @@ function createBoidsSimulation() {
         pass.setViewport(viewport[0], viewport[1], viewport[2], viewport[3], 0, 1);
       }
 
-      renderGrid(pass, aspect);
+      renderGrid(pass, aspect, viewIndex);
 
       pass.setPipeline(renderPipeline);
-      pass.setBindGroup(0, renderBG[pingPong]);
+      pass.setBindGroup(0, renderBGs[viewIndex][pingPong]);
       pass.draw(3, count);
       pass.end();
     },
@@ -675,7 +679,7 @@ function createPhysicsSimulation() {
   const bufferB = device.createBuffer({ size: bodyBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
 
   const paramsBuffer = device.createBuffer({ size: 48, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST }); // dt, G, soft, damp, count, pad*3, attractor*4
-  const cameraBuffer = device.createBuffer({ size: 192, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+  const cameraBuffer = device.createBuffer({ size: CAMERA_STRIDE * 2, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
 
   const computeModule = device.createShaderModule({ code: SHADER_NBODY_COMPUTE_EDIT || SHADER_NBODY_COMPUTE });
   const renderModule = device.createShaderModule({ code: SHADER_NBODY_RENDER_EDIT || SHADER_NBODY_RENDER });
@@ -733,18 +737,14 @@ function createPhysicsSimulation() {
     ]}),
   ];
 
-  const renderBG = [
-    device.createBindGroup({ layout: renderBGL, entries: [
-      { binding: 0, resource: { buffer: bufferA } },
-      { binding: 1, resource: { buffer: cameraBuffer } },
+  // renderBGs[viewIndex][pingPong]
+  const renderBGs: GPUBindGroup[][] = [0, 1].map(vi =>
+    [bufferA, bufferB].map(buf => device.createBindGroup({ layout: renderBGL, entries: [
+      { binding: 0, resource: { buffer: buf } },
+      { binding: 1, resource: { buffer: cameraBuffer, offset: vi * CAMERA_STRIDE, size: CAMERA_SIZE } },
       { binding: 2, resource: { buffer: attractorBuffer } },
-    ]}),
-    device.createBindGroup({ layout: renderBGL, entries: [
-      { binding: 0, resource: { buffer: bufferB } },
-      { binding: 1, resource: { buffer: cameraBuffer } },
-      { binding: 2, resource: { buffer: attractorBuffer } },
-    ]}),
-  ];
+    ]}))
+  );
 
   let pingPong = 0;
   const depthRef: DepthRef = {};
@@ -770,11 +770,11 @@ function createPhysicsSimulation() {
       pingPong = 1 - pingPong;
     },
 
-    render(encoder: GPUCommandEncoder, textureView: GPUTextureView, viewport: number[] | null) {
+    render(encoder: GPUCommandEncoder, textureView: GPUTextureView, viewport: number[] | null, viewIndex = 0) {
       const dv = getDepthView(depthRef);
       const aspect = viewport ? (viewport[2] / viewport[3]) : (canvas.width / canvas.height);
       const m = state.mouse;
-      device.queue.writeBuffer(cameraBuffer, 0, getCameraUniformData(aspect));
+      device.queue.writeBuffer(cameraBuffer, viewIndex * CAMERA_STRIDE, getCameraUniformData(aspect));
       device.queue.writeBuffer(attractorBuffer, 0, new Float32Array([
         m.worldX, m.worldY, m.worldZ, m.down ? 1.0 : 0.0
       ]));
@@ -798,10 +798,10 @@ function createPhysicsSimulation() {
         pass.setViewport(viewport[0], viewport[1], viewport[2], viewport[3], 0, 1);
       }
 
-      renderGrid(pass, aspect);
+      renderGrid(pass, aspect, viewIndex);
 
       pass.setPipeline(renderPipeline);
-      pass.setBindGroup(0, renderBG[pingPong]);
+      pass.setBindGroup(0, renderBGs[viewIndex][pingPong]);
       pass.draw(6, count);
       pass.end();
     },
@@ -834,7 +834,7 @@ function createFluidSimulation() {
   const dyeA = device.createBuffer({ size: dyeBytes, usage: BUF });
   const dyeB = device.createBuffer({ size: dyeBytes, usage: BUF });
   const paramsBuffer = device.createBuffer({ size: 48, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-  const cameraBuffer = device.createBuffer({ size: 192, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+  const cameraBuffer = device.createBuffer({ size: CAMERA_STRIDE * 2, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
 
   // Seed initial dye with theme-colored splats
   const initDye = new Float32Array(cellCount * 4);
@@ -1006,11 +1006,12 @@ function createFluidSimulation() {
     primitive: { topology: 'triangle-list' },
     depthStencil: { format: 'depth24plus', depthWriteEnabled: true, depthCompare: 'less' },
   });
-  const renderBG = device.createBindGroup({ layout: renderBGL, entries: [
+  // renderBGs[viewIndex] — fluid has no particle ping-pong for rendering
+  const renderBGs: GPUBindGroup[] = [0, 1].map(vi => device.createBindGroup({ layout: renderBGL, entries: [
     { binding: 0, resource: { buffer: dyeA } },
     { binding: 1, resource: { buffer: fluidRenderParamsBuffer } },
-    { binding: 2, resource: { buffer: cameraBuffer } },
-  ]});
+    { binding: 2, resource: { buffer: cameraBuffer, offset: vi * CAMERA_STRIDE, size: CAMERA_SIZE } },
+  ]}));
 
   const workgroups = Math.ceil(res / 8);
   const depthRef: DepthRef = {};
@@ -1096,10 +1097,10 @@ function createFluidSimulation() {
       // Canonical data is now in A buffers for rendering
     },
 
-    render(encoder: GPUCommandEncoder, textureView: GPUTextureView, viewport: number[] | null) {
+    render(encoder: GPUCommandEncoder, textureView: GPUTextureView, viewport: number[] | null, viewIndex = 0) {
       const dv = getDepthView(depthRef);
       const aspect = viewport ? (viewport[2] / viewport[3]) : (canvas.width / canvas.height);
-      device.queue.writeBuffer(cameraBuffer, 0, getCameraUniformData(aspect));
+      device.queue.writeBuffer(cameraBuffer, viewIndex * CAMERA_STRIDE, getCameraUniformData(aspect));
 
       const pass = encoder.beginRenderPass({
         colorAttachments: [{
@@ -1120,10 +1121,10 @@ function createFluidSimulation() {
         pass.setViewport(viewport[0], viewport[1], viewport[2], viewport[3], 0, 1);
       }
 
-      renderGrid(pass, aspect);
+      renderGrid(pass, aspect, viewIndex);
 
       pass.setPipeline(renderPipeline);
-      pass.setBindGroup(0, renderBG);
+      pass.setBindGroup(0, renderBGs[viewIndex]);
       pass.draw(6, FLUID_GRID_RES * FLUID_GRID_RES);
       pass.end();
     },
@@ -1156,7 +1157,7 @@ function createParametricSimulation() {
 
   // Params: uRes, vRes, scale, twist, time, shapeId, p1-p4, pokeX/Y/Z, pokeActive = 14 values → 64 bytes
   const computeParamsBuffer = device.createBuffer({ size: 64, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-  const cameraBuffer = device.createBuffer({ size: 192, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+  const cameraBuffer = device.createBuffer({ size: CAMERA_STRIDE * 2, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
   const modelBuffer = device.createBuffer({ size: 64, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
 
   let time = 0;
@@ -1220,11 +1221,12 @@ function createParametricSimulation() {
     primitive: { topology: 'triangle-list', cullMode: 'none' },
     depthStencil: { format: 'depth24plus', depthWriteEnabled: true, depthCompare: 'less' },
   });
-  const renderBG = device.createBindGroup({ layout: renderBGL, entries: [
+  // renderBGs[viewIndex]
+  const renderBGs: GPUBindGroup[] = [0, 1].map(vi => device.createBindGroup({ layout: renderBGL, entries: [
     { binding: 0, resource: { buffer: vertexBuffer } },
-    { binding: 1, resource: { buffer: cameraBuffer } },
+    { binding: 1, resource: { buffer: cameraBuffer, offset: vi * CAMERA_STRIDE, size: CAMERA_SIZE } },
     { binding: 2, resource: { buffer: modelBuffer } },
-  ]});
+  ]}));
 
   const depthRef: DepthRef = {};
 
@@ -1256,12 +1258,12 @@ function createParametricSimulation() {
       pass.end();
     },
 
-    render(encoder: GPUCommandEncoder, textureView: GPUTextureView, viewport: number[] | null) {
+    render(encoder: GPUCommandEncoder, textureView: GPUTextureView, viewport: number[] | null, viewIndex = 0) {
       if (currentIndexCount === 0) return;
 
       const dv = getDepthView(depthRef);
       const aspect = viewport ? (viewport[2] / viewport[3]) : (canvas.width / canvas.height);
-      device.queue.writeBuffer(cameraBuffer, 0, getCameraUniformData(aspect));
+      device.queue.writeBuffer(cameraBuffer, viewIndex * CAMERA_STRIDE, getCameraUniformData(aspect));
 
       const model = mat4.rotateX(mat4.rotateY(mat4.identity(), time), time * 0.3);
       device.queue.writeBuffer(modelBuffer, 0, model as Float32Array<ArrayBuffer>);
@@ -1285,10 +1287,10 @@ function createParametricSimulation() {
         pass.setViewport(viewport[0], viewport[1], viewport[2], viewport[3], 0, 1);
       }
 
-      renderGrid(pass, aspect);
+      renderGrid(pass, aspect, viewIndex);
 
       pass.setPipeline(renderPipeline);
-      pass.setBindGroup(0, renderBG);
+      pass.setBindGroup(0, renderBGs[viewIndex]);
       pass.setIndexBuffer(indexBuffer, 'uint32');
       pass.drawIndexed(currentIndexCount);
       pass.end();
@@ -2132,20 +2134,22 @@ function xrFrame(_time: DOMHighResTimeStamp, xrFrameData: XRFrame) {
     const sim = simulations[state.mode];
     if (!sim) return;
 
+    const encoder = device.createCommandEncoder();
+
     // Compute runs once per frame — both eyes share the same simulation state.
-    if (!state.paused) {
-      const computeEncoder = device.createCommandEncoder();
-      sim.compute(computeEncoder);
-      device.queue.submit([computeEncoder.finish()]);
-    }
+    if (!state.paused) sim.compute(encoder);
 
     // Render once per eye. pose.views is typically [left, right] on stereo devices.
-    for (const view of pose.views) {
-      const encoder = device.createCommandEncoder();
+    //
+    // Each eye writes its camera data to a different 256-byte-aligned offset in the
+    // camera buffer (viewIndex * CAMERA_STRIDE), so both writeBuffer calls coexist
+    // in the queue without overwriting each other before the command buffer executes.
+    // Each eye's render pass binds the camera buffer at its own offset via renderBGs[viewIndex].
+    for (let viewIndex = 0; viewIndex < pose.views.length; viewIndex++) {
+      const view = pose.views[viewIndex];
 
-      // getViewSubImage (Safari) / getSubImage (Chrome) returns the per-eye render target
-      // for this frame. The returned GPUTexture is owned by the XR compositor — we must
-      // not hold references to it across frames.
+      // getViewSubImage (Safari) / getSubImage (Chrome) returns the per-eye render target.
+      // The returned GPUTexture is owned by the XR compositor — don't hold refs across frames.
       const binding = xrBinding!;
       const subImage = binding.getViewSubImage
         ? binding.getViewSubImage(xrLayer!, view)
@@ -2153,13 +2157,11 @@ function xrFrame(_time: DOMHighResTimeStamp, xrFrameData: XRFrame) {
       if (!subImage) continue;
 
       // getViewDescriptor() returns the correct GPUTextureViewDescriptor for this eye,
-      // including the array layer index when the compositor uses a texture array
-      // (one texture, two slices) instead of two separate textures.
+      // including the array layer index when the compositor uses a texture array.
       const viewDesc = subImage.getViewDescriptor ? subImage.getViewDescriptor() : {};
       const textureView = subImage.colorTexture.createView(viewDesc);
 
       // Use the XR-provided depth buffer if available; otherwise create a matching one.
-      // Some Safari configurations don't provide depthStencilTexture on the subImage.
       if (subImage.depthStencilTexture) {
         xrDepthView = subImage.depthStencilTexture.createView(viewDesc);
       } else {
@@ -2175,9 +2177,7 @@ function xrFrame(_time: DOMHighResTimeStamp, xrFrameData: XRFrame) {
         xrDepthView = xrFallbackDepth.createView();
       }
 
-      // Override the orbit camera with this eye's XR-provided matrices.
-      // getCameraUniformData() reads xrCameraOverride when set, so the simulation's
-      // render function needs no XR-specific code — it just writes to the camera uniform.
+      // Set the per-eye camera override so getCameraUniformData() uses XR matrices.
       const pos = view.transform.position;
       xrCameraOverride = {
         viewMatrix: new Float32Array(view.transform.inverse.matrix),
@@ -2185,19 +2185,16 @@ function xrFrame(_time: DOMHighResTimeStamp, xrFrameData: XRFrame) {
         eye: [pos.x, pos.y, pos.z],
       };
 
-      // subImage.viewport is relative to the texture (or array slice) for this eye.
       const { x, y, width, height } = subImage.viewport;
-      sim.render(encoder, textureView, [x, y, width, height]);
-
-      // [LAW:dataflow-not-control-flow] Each eye follows the same write->encode->submit path; only the per-eye matrices and targets vary.
-      device.queue.submit([encoder.finish()]);
-
-      xrCameraOverride = null;
-      xrDepthView = null;
+      sim.render(encoder, textureView, [x, y, width, height], viewIndex);
     }
-  } catch (e) {
+
+    // Clear overrides after all eyes are encoded — desktop frame loop must not inherit XR state.
     xrCameraOverride = null;
     xrDepthView = null;
+
+    device.queue.submit([encoder.finish()]);
+  } catch (e) {
     console.error('[XR] Frame error:', e);
   }
 }

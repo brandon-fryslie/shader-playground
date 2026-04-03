@@ -5,7 +5,8 @@ export type DyeMode = 'rainbow' | 'single' | 'temperature';
 
 export interface Simulation {
   compute(encoder: GPUCommandEncoder): void;
-  render(encoder: GPUCommandEncoder, textureView: GPUTextureView, viewport: number[] | null): void;
+  // viewIndex selects which per-view camera data slot to use (0 = left/desktop, 1 = right).
+  render(encoder: GPUCommandEncoder, textureView: GPUTextureView, viewport: number[] | null, viewIndex?: number): void;
   getCount(): string | number;
   destroy(): void;
 }
