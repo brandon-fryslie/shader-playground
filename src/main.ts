@@ -26,15 +26,19 @@ const DEFAULTS: ModeParamsMap = {
     maxSpeed: 2.0, maxForce: 0.05, visualRange: 100
   },
   physics: {
-    count: 500, G: 1.0, softening: 0.5, damping: 0.999, distribution: 'random'
+    count: 2000, G: 1.0, softening: 0.5, damping: 0.999, distribution: 'disk'
   },
   fluid: {
     resolution: 256, viscosity: 0.1, diffusionRate: 0.001, forceStrength: 100,
     dyeMode: 'rainbow', jacobiIterations: 40
   },
   parametric: {
-    shape: 'torus', uRes: 64, vRes: 64, scale: 1.0, twist: 0.0, rotationSpeed: 0.5,
-    p1: 1.0, p2: 0.4, p3: 0, p4: 0
+    shape: 'torus', scale: 1.0,
+    p1Min: 0.7,    p1Max: 1.3,  p1Rate: 0.3,
+    p2Min: 0.2,    p2Max: 0.55, p2Rate: 0.5,
+    p3Min: 0.15,   p3Max: 0.45, p3Rate: 0.7,
+    p4Min: 0.5,    p4Max: 2.0,  p4Rate: 0.4,
+    twistMin: 0.0, twistMax: 0.4, twistRate: 0.15,
   }
 };
 
@@ -59,11 +63,11 @@ const PRESETS: Record<SimMode, Record<string, Record<string, number | string>>> 
     'Ink Drop':  { resolution: 256, viscosity: 0.3, diffusionRate: 0.0, forceStrength: 50, dyeMode: 'single', jacobiIterations: 40 },
   },
   parametric: {
-    'Default':       { shape: 'torus', uRes: 64, vRes: 64, scale: 1.0, twist: 0.0, rotationSpeed: 0.5, p1: 1.0, p2: 0.4, p3: 0, p4: 0 },
-    'Fat Ring':      { shape: 'torus', uRes: 96, vRes: 96, scale: 1.0, twist: 0.0, rotationSpeed: 0.3, p1: 0.8, p2: 0.7, p3: 0, p4: 0 },
-    'Twisted Mobius': { shape: 'mobius', uRes: 128, vRes: 32, scale: 1.5, twist: 2.0, rotationSpeed: 0.4, p1: 1.5, p2: 3.0, p3: 0, p4: 0 },
-    'Spiky Trefoil': { shape: 'trefoil', uRes: 128, vRes: 32, scale: 1.2, twist: 0.0, rotationSpeed: 0.6, p1: 0.1, p2: 0.4, p3: 0, p4: 0 },
-    'Egg':           { shape: 'sphere', uRes: 64, vRes: 64, scale: 1.0, twist: 0.0, rotationSpeed: 0.3, p1: 1.0, p2: 1.5, p3: 0, p4: 0 },
+    'Default':       { shape: 'torus',   scale: 1.0, p1Min: 0.7,  p1Max: 1.3,  p1Rate: 0.3,  p2Min: 0.2,  p2Max: 0.55, p2Rate: 0.5,  p3Min: 0.15, p3Max: 0.45, p3Rate: 0.7,  p4Min: 0.5, p4Max: 2.0, p4Rate: 0.4,  twistMin: 0,   twistMax: 0.4, twistRate: 0.15 },
+    'Rippling Ring': { shape: 'torus',   scale: 1.0, p1Min: 0.5,  p1Max: 1.5,  p1Rate: 0.5,  p2Min: 0.15, p2Max: 0.7,  p2Rate: 0.7,  p3Min: 0.3,  p3Max: 0.8,  p3Rate: 1.0,  p4Min: 1.0, p4Max: 3.0, p4Rate: 0.6,  twistMin: 0,   twistMax: 1.0, twistRate: 0.2  },
+    'Wild Möbius':   { shape: 'mobius',  scale: 1.5, p1Min: 0.8,  p1Max: 2.0,  p1Rate: 0.3,  p2Min: 1.0,  p2Max: 3.0,  p2Rate: 0.15, p3Min: 0.2,  p3Max: 0.6,  p3Rate: 0.8,  p4Min: 0.5, p4Max: 2.5, p4Rate: 0.5,  twistMin: 1.0, twistMax: 4.0, twistRate: 0.1  },
+    'Trefoil Pulse': { shape: 'trefoil', scale: 1.2, p1Min: 0.08, p1Max: 0.35, p1Rate: 0.9,  p2Min: 0.25, p2Max: 0.55, p2Rate: 0.4,  p3Min: 0.3,  p3Max: 0.9,  p3Rate: 1.2,  p4Min: 1.0, p4Max: 4.0, p4Rate: 0.7,  twistMin: 0,   twistMax: 0.5, twistRate: 0.2  },
+    'Klein Chaos':   { shape: 'klein',   scale: 1.2, p1Min: 0.5,  p1Max: 1.5,  p1Rate: 0.4,  p2Min: 0,    p2Max: 0,    p2Rate: 0,    p3Min: 0.2,  p3Max: 0.6,  p3Rate: 0.9,  p4Min: 0.8, p4Max: 3.5, p4Rate: 0.5,  twistMin: 0,   twistMax: 0.8, twistRate: 0.15 },
   },
 };
 
@@ -109,14 +113,25 @@ const PARAM_DEFS: Record<SimMode, ParamSection[]> = {
   parametric: [
     { section: 'Shape', params: [
       { key: 'shape', label: 'Equation', type: 'dropdown', options: ['torus', 'klein', 'mobius', 'sphere', 'trefoil'] },
-      { key: 'uRes', label: 'U Segments', min: 8, max: 256, step: 8 },
-      { key: 'vRes', label: 'V Segments', min: 8, max: 256, step: 8 },
     ]},
     { section: 'Shape Parameters', id: 'shape-params-section', params: [], dynamic: true },
     { section: 'Transform', params: [
       { key: 'scale', label: 'Scale', min: 0.1, max: 5.0, step: 0.1 },
-      { key: 'twist', label: 'Twist', min: 0.0, max: 6.28, step: 0.01 },
-      { key: 'rotationSpeed', label: 'Rotation', min: 0.0, max: 5.0, step: 0.1 },
+    ]},
+    { section: 'Twist', params: [
+      { key: 'twistMin',  label: 'Min',  min: 0.0, max: 12.56, step: 0.05 },
+      { key: 'twistMax',  label: 'Max',  min: 0.0, max: 12.56, step: 0.05 },
+      { key: 'twistRate', label: 'Rate', min: 0.0, max: 3.0,   step: 0.05 },
+    ]},
+    { section: 'Wave Amplitude', params: [
+      { key: 'p3Min',  label: 'Min',  min: 0.0, max: 2.0, step: 0.05 },
+      { key: 'p3Max',  label: 'Max',  min: 0.0, max: 2.0, step: 0.05 },
+      { key: 'p3Rate', label: 'Rate', min: 0.0, max: 3.0, step: 0.05 },
+    ]},
+    { section: 'Wave Frequency', params: [
+      { key: 'p4Min',  label: 'Min',  min: 0.0, max: 5.0, step: 0.1  },
+      { key: 'p4Max',  label: 'Max',  min: 0.0, max: 5.0, step: 0.1  },
+      { key: 'p4Rate', label: 'Rate', min: 0.0, max: 3.0, step: 0.05 },
     ]},
   ],
 };
@@ -200,15 +215,15 @@ const SHAPE_IDS: Record<ShapeName, number> = { torus: 0, klein: 1, mobius: 2, sp
 
 // Per-shape parameter definitions: label + default value for p1–p4
 const SHAPE_PARAMS: Partial<Record<ShapeName, Record<string, ShapeParamDef>>> = {
-  torus:   { p1: { label: 'Major Radius', val: 1.0, min: 0.2, max: 3.0, step: 0.05 },
-             p2: { label: 'Minor Radius', val: 0.4, min: 0.05, max: 1.5, step: 0.05 } },
-  klein:   { p1: { label: 'Bulge', val: 1.0, min: 0.2, max: 3.0, step: 0.05 } },
-  mobius:  { p1: { label: 'Width', val: 1.0, min: 0.1, max: 3.0, step: 0.05 },
-             p2: { label: 'Half-Twists', val: 1.0, min: 0.5, max: 5.0, step: 0.5 } },
-  sphere:  { p1: { label: 'XY Stretch', val: 1.0, min: 0.1, max: 3.0, step: 0.05 },
-             p2: { label: 'Z Stretch', val: 1.0, min: 0.1, max: 3.0, step: 0.05 } },
-  trefoil: { p1: { label: 'Tube Radius', val: 0.3, min: 0.05, max: 1.0, step: 0.05 },
-             p2: { label: 'Knot Scale', val: 0.3, min: 0.1, max: 1.0, step: 0.05 } },
+  torus:   { p1: { label: 'Major Radius', animMin: 0.7,  animMax: 1.3,  animRate: 0.3,  min: 0.2,  max: 2.5, step: 0.05 },
+             p2: { label: 'Minor Radius', animMin: 0.2,  animMax: 0.6,  animRate: 0.5,  min: 0.05, max: 1.2, step: 0.05 } },
+  klein:   { p1: { label: 'Bulge',        animMin: 0.7,  animMax: 1.5,  animRate: 0.4,  min: 0.2,  max: 3.0, step: 0.05 } },
+  mobius:  { p1: { label: 'Width',        animMin: 0.5,  animMax: 1.8,  animRate: 0.35, min: 0.1,  max: 3.0, step: 0.05 },
+             p2: { label: 'Half-Twists',  animMin: 1.0,  animMax: 3.0,  animRate: 0.15, min: 0.5,  max: 5.0, step: 0.5  } },
+  sphere:  { p1: { label: 'XY Stretch',  animMin: 0.6,  animMax: 1.5,  animRate: 0.4,  min: 0.1,  max: 3.0, step: 0.05 },
+             p2: { label: 'Z Stretch',   animMin: 0.5,  animMax: 1.8,  animRate: 0.6,  min: 0.1,  max: 3.0, step: 0.05 } },
+  trefoil: { p1: { label: 'Tube Radius', animMin: 0.08, animMax: 0.35, animRate: 0.6,  min: 0.05, max: 1.0, step: 0.05 },
+             p2: { label: 'Knot Scale',  animMin: 0.25, animMax: 0.5,  animRate: 0.35, min: 0.1,  max: 1.0, step: 0.05 } },
 };
 
 
@@ -314,7 +329,8 @@ function getOrbitCamera() {
 // When set by XR frame loop, overrides orbit camera and depth texture for all rendering
 let xrCameraOverride: XRCameraOverride | null = null;
 let xrDepthView: GPUTextureView | null = null;
-const SAMPLE_COUNT: number = 4;
+const DESKTOP_SAMPLE_COUNT: number = 4;
+const XR_SAMPLE_COUNT: number = 1;
 
 function getOrCreateAttachmentTexture(
   current: GPUTexture | undefined,
@@ -341,9 +357,9 @@ function getOrCreateAttachmentTexture(
 // Helper: get a depth texture view. In XR, use the XR-provided one.
 // In desktop, manage a per-simulation depth texture that matches the canvas.
 function getDepthView(simDepthRef: DepthRef): GPUTextureView {
-  if (xrDepthView && SAMPLE_COUNT === 1) return xrDepthView;
+  if (xrDepthView && renderSampleCount === 1) return xrDepthView;
   // Desktop path: create/resize depth texture to match canvas
-  simDepthRef.tex = getOrCreateAttachmentTexture(simDepthRef.tex, canvas.width, canvas.height, 'depth24plus', SAMPLE_COUNT);
+  simDepthRef.tex = getOrCreateAttachmentTexture(simDepthRef.tex, canvas.width, canvas.height, 'depth24plus', renderSampleCount);
   return simDepthRef.tex.createView();
 }
 
@@ -352,7 +368,7 @@ function getColorAttachment(
   resolveTarget: GPUTextureView,
   viewport: number[] | null
 ): GPURenderPassColorAttachment {
-  if (SAMPLE_COUNT === 1) {
+  if (renderSampleCount === 1) {
     return {
       view: resolveTarget,
       clearValue: { r: 0.02, g: 0.02, b: 0.025, a: 1 },
@@ -364,7 +380,7 @@ function getColorAttachment(
   const width = viewport ? viewport[2] : canvas.width;
   const height = viewport ? viewport[3] : canvas.height;
   // [LAW:one-source-of-truth] MSAA color target sizing is derived from the active render target dimensions in one place.
-  simDepthRef.msaaColorTex = getOrCreateAttachmentTexture(simDepthRef.msaaColorTex, width, height, canvasFormat, SAMPLE_COUNT);
+  simDepthRef.msaaColorTex = getOrCreateAttachmentTexture(simDepthRef.msaaColorTex, width, height, renderTargetFormat, renderSampleCount);
 
   return {
     view: simDepthRef.msaaColorTex.createView(),
@@ -376,10 +392,10 @@ function getColorAttachment(
 }
 
 function getDepthAttachment(simDepthRef: DepthRef, viewport: number[] | null): GPURenderPassDepthStencilAttachment {
-  if (SAMPLE_COUNT > 1 && viewport) {
+  if (renderSampleCount > 1 && viewport) {
     const width = viewport[2];
     const height = viewport[3];
-    simDepthRef.msaaDepthTex = getOrCreateAttachmentTexture(simDepthRef.msaaDepthTex, width, height, 'depth24plus', SAMPLE_COUNT);
+    simDepthRef.msaaDepthTex = getOrCreateAttachmentTexture(simDepthRef.msaaDepthTex, width, height, 'depth24plus', renderSampleCount);
     return {
       view: simDepthRef.msaaDepthTex.createView(),
       depthClearValue: 1.0,
@@ -393,6 +409,13 @@ function getDepthAttachment(simDepthRef: DepthRef, viewport: number[] | null): G
     depthLoadOp: 'clear',
     depthStoreOp: 'store',
   };
+}
+
+function getRenderViewport(viewport: number[] | null): number[] | null {
+  if (!viewport) return null;
+  if (renderSampleCount === 1) return viewport;
+  // [LAW:one-source-of-truth] XR compositor viewport offsets apply only to the compositor-owned target; MSAA eye textures are sized to the eye rect itself.
+  return [0, 0, viewport[2], viewport[3]];
 }
 
 function destroyDepthRef(depthRef: DepthRef) {
@@ -436,6 +459,8 @@ let device!: GPUDevice;
 let canvas!: HTMLCanvasElement;
 let context!: GPUCanvasContext;
 let canvasFormat!: GPUTextureFormat;
+let renderTargetFormat!: GPUTextureFormat;
+let renderSampleCount = DESKTOP_SAMPLE_COUNT;
 
 async function initWebGPU(): Promise<boolean> {
   const fallbackEl = document.getElementById('fallback')!;
@@ -478,9 +503,28 @@ async function initWebGPU(): Promise<boolean> {
   canvas = document.getElementById('gpu-canvas') as HTMLCanvasElement;
   context = canvas.getContext('webgpu') as GPUCanvasContext;
   canvasFormat = navigator.gpu.getPreferredCanvasFormat();
+  renderTargetFormat = renderTargetFormat || canvasFormat;
+  renderSampleCount = renderSampleCount || DESKTOP_SAMPLE_COUNT;
   context.configure({ device, format: canvasFormat, alphaMode: 'opaque' });
 
   return true;
+}
+
+function destroyAllSimulations() {
+  for (const mode of Object.keys(simulations) as SimMode[]) {
+    simulations[mode]?.destroy();
+    delete simulations[mode];
+  }
+}
+
+function syncRenderConfig(nextFormat: GPUTextureFormat, nextSampleCount: number) {
+  if (renderTargetFormat === nextFormat && renderSampleCount === nextSampleCount) return;
+  // [LAW:one-source-of-truth] All render pipelines and attachments derive from one active render config.
+  renderTargetFormat = nextFormat;
+  renderSampleCount = nextSampleCount;
+  destroyAllSimulations();
+  initGrid();
+  ensureSimulation();
 }
 
 
@@ -494,6 +538,8 @@ let gridTimeBuffer!: GPUBuffer;
 let gridTime = 0;
 
 function initGrid() {
+  gridCameraBuffer?.destroy();
+  gridTimeBuffer?.destroy();
   gridCameraBuffer = device.createBuffer({ size: CAMERA_STRIDE * 2, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
   gridTimeBuffer = device.createBuffer({ size: 4, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
   const gridModule = device.createShaderModule({ code: SHADER_GRID });
@@ -511,7 +557,7 @@ function initGrid() {
     fragment: {
       module: gridModule, entryPoint: 'fs_main',
       targets: [{
-        format: canvasFormat,
+        format: renderTargetFormat,
         blend: {
           color: { srcFactor: 'src-alpha', dstFactor: 'one-minus-src-alpha', operation: 'add' },
           alpha: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha', operation: 'add' },
@@ -520,7 +566,7 @@ function initGrid() {
     },
     primitive: { topology: 'triangle-list' },
     depthStencil: { format: 'depth24plus', depthWriteEnabled: true, depthCompare: 'less' },
-    multisample: { count: SAMPLE_COUNT },
+    multisample: { count: renderSampleCount },
   });
 
   gridBGs = [0, 1].map(vi => device.createBindGroup({ layout: gridBGL, entries: [
@@ -604,11 +650,11 @@ function createBoidsSimulation() {
     vertex: { module: renderModule, entryPoint: 'vs_main' },
     fragment: {
       module: renderModule, entryPoint: 'fs_main',
-      targets: [{ format: canvasFormat }]
+      targets: [{ format: renderTargetFormat }]
     },
     primitive: { topology: 'triangle-list' },
     depthStencil: { format: 'depth24plus', depthWriteEnabled: true, depthCompare: 'less' },
-    multisample: { count: SAMPLE_COUNT },
+    multisample: { count: renderSampleCount },
   });
 
   // Create bind groups for ping-pong
@@ -674,8 +720,9 @@ function createBoidsSimulation() {
         depthStencilAttachment: getDepthAttachment(depthRef, viewport),
       });
 
-      if (viewport) {
-        pass.setViewport(viewport[0], viewport[1], viewport[2], viewport[3], 0, 1);
+      const renderViewport = getRenderViewport(viewport);
+      if (renderViewport) {
+        pass.setViewport(renderViewport[0], renderViewport[1], renderViewport[2], renderViewport[3], 0, 1);
       }
 
       renderGrid(pass, aspect, viewIndex);
@@ -775,7 +822,7 @@ function createPhysicsSimulation() {
     fragment: {
       module: renderModule, entryPoint: 'fs_main',
       targets: [{
-        format: canvasFormat,
+        format: renderTargetFormat,
         blend: {
           color: { srcFactor: 'src-alpha', dstFactor: 'one', operation: 'add' },
           alpha: { srcFactor: 'one', dstFactor: 'one', operation: 'add' },
@@ -783,7 +830,11 @@ function createPhysicsSimulation() {
       }]
     },
     primitive: { topology: 'triangle-list' },
-    multisample: { count: SAMPLE_COUNT },
+    // Additive-blended particles don't write depth but must declare the format
+    // to match the render pass's depth attachment — omitting this causes a WebGPU
+    // validation error that silently kills the entire render pass.
+    depthStencil: { format: 'depth24plus', depthWriteEnabled: false, depthCompare: 'always' },
+    multisample: { count: renderSampleCount },
   });
 
   const computeBG = [
@@ -845,8 +896,9 @@ function createPhysicsSimulation() {
         depthStencilAttachment: getDepthAttachment(depthRef, viewport),
       });
 
-      if (viewport) {
-        pass.setViewport(viewport[0], viewport[1], viewport[2], viewport[3], 0, 1);
+      const renderViewport = getRenderViewport(viewport);
+      if (renderViewport) {
+        pass.setViewport(renderViewport[0], renderViewport[1], renderViewport[2], renderViewport[3], 0, 1);
       }
 
       renderGrid(pass, aspect, viewIndex);
@@ -1053,11 +1105,11 @@ function createFluidSimulation() {
     vertex: { module: renderModule, entryPoint: 'vs_main' },
     fragment: {
       module: renderModule, entryPoint: 'fs_main',
-      targets: [{ format: canvasFormat }]
+      targets: [{ format: renderTargetFormat }]
     },
     primitive: { topology: 'triangle-list' },
     depthStencil: { format: 'depth24plus', depthWriteEnabled: true, depthCompare: 'less' },
-    multisample: { count: SAMPLE_COUNT },
+    multisample: { count: renderSampleCount },
   });
   // renderBGs[viewIndex] — fluid has no particle ping-pong for rendering
   const renderBGs: GPUBindGroup[] = [0, 1].map(vi => device.createBindGroup({ layout: renderBGL, entries: [
@@ -1159,8 +1211,9 @@ function createFluidSimulation() {
         depthStencilAttachment: getDepthAttachment(depthRef, viewport),
       });
 
-      if (viewport) {
-        pass.setViewport(viewport[0], viewport[1], viewport[2], viewport[3], 0, 1);
+      const renderViewport = getRenderViewport(viewport);
+      if (renderViewport) {
+        pass.setViewport(renderViewport[0], renderViewport[1], renderViewport[2], renderViewport[3], 0, 1);
       }
 
       renderGrid(pass, aspect, viewIndex);
@@ -1188,46 +1241,37 @@ function createFluidSimulation() {
 // --- 5d: PARAMETRIC SHAPES ---
 
 function createParametricSimulation() {
-  // Pre-allocate at max resolution so uRes/vRes changes don't need buffer recreation
-  const MAX_RES = 256;
-  const maxVertices = MAX_RES * MAX_RES;
-  const vertexBytes = maxVertices * 32; // vec3f pos (12) + pad(4) + vec3f normal (12) + pad(4)
-  const maxIndices = (MAX_RES - 1) * (MAX_RES - 1) * 6;
+  // Fixed 256×256 resolution — no dynamic resizing needed
+  const URES = 256;
+  const VRES = 256;
+  const vertexBytes = URES * VRES * 32; // pos(12)+glow(4)+normal(12)+pad(4) = 32 bytes
+  const indexCount  = (URES - 1) * (VRES - 1) * 6;
 
   const vertexBuffer = device.createBuffer({ size: vertexBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.VERTEX });
-  const indexBuffer = device.createBuffer({ size: maxIndices * 4, usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST });
+  const indexBuffer  = device.createBuffer({ size: indexCount * 4, usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST });
 
-  // Params: uRes, vRes, scale, twist, time, shapeId, p1-p4, pokeX/Y/Z, pokeActive = 14 values → 64 bytes
-  const computeParamsBuffer = device.createBuffer({ size: 64, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-  const cameraBuffer = device.createBuffer({ size: CAMERA_STRIDE * 2, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-  const modelBuffer = device.createBuffer({ size: 64, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-
-  let time = 0;
-  let lastURes = 0, lastVRes = 0;
-  let currentIndexCount = 0;
-
-  // Regenerate index buffer on CPU when resolution changes (cheap, no pipeline rebuild)
-  function updateIndexBuffer(uRes: number, vRes: number) {
-    if (uRes === lastURes && vRes === lastVRes) return;
-    lastURes = uRes; lastVRes = vRes;
-
-    currentIndexCount = (uRes - 1) * (vRes - 1) * 6;
-    const indices = new Uint32Array(currentIndexCount);
-    let idx = 0;
-    for (let vi = 0; vi < vRes - 1; vi++) {
-      for (let ui = 0; ui < uRes - 1; ui++) {
-        const tl = vi * uRes + ui;
-        const tr = vi * uRes + ui + 1;
-        const bl = (vi + 1) * uRes + ui;
-        const br = (vi + 1) * uRes + ui + 1;
-        indices[idx++] = tl; indices[idx++] = bl; indices[idx++] = tr;
-        indices[idx++] = tr; indices[idx++] = bl; indices[idx++] = br;
+  // Generate index buffer once at creation
+  {
+    const indices = new Uint32Array(indexCount);
+    let i = 0;
+    for (let vi = 0; vi < VRES - 1; vi++) {
+      for (let ui = 0; ui < URES - 1; ui++) {
+        const tl = vi * URES + ui, tr = tl + 1;
+        const bl = (vi + 1) * URES + ui, br = bl + 1;
+        indices[i++] = tl; indices[i++] = bl; indices[i++] = tr;
+        indices[i++] = tr; indices[i++] = bl; indices[i++] = br;
       }
     }
     device.queue.writeBuffer(indexBuffer, 0, indices);
   }
 
-  // Single compute pipeline (all shapes in one shader, selected by uniform)
+  const computeParamsBuffer = device.createBuffer({ size: 64, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+  const cameraBuffer = device.createBuffer({ size: CAMERA_STRIDE * 2, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+  const modelBuffer  = device.createBuffer({ size: 64, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+
+  let time = 0;     // always advances; used only for param oscillation phase
+  let animTime = 0; // advances only when any rate > 0; drives rotation + waves
+
   const computeModule = device.createShaderModule({ code: SHADER_PARAMETRIC_COMPUTE_EDIT || SHADER_PARAMETRIC_COMPUTE });
   const computeBGL = device.createBindGroupLayout({
     entries: [
@@ -1244,7 +1288,6 @@ function createParametricSimulation() {
     { binding: 1, resource: { buffer: computeParamsBuffer } },
   ]});
 
-  // Render pipeline
   const renderModule = device.createShaderModule({ code: SHADER_PARAMETRIC_RENDER_EDIT || SHADER_PARAMETRIC_RENDER });
   const renderBGL = device.createBindGroupLayout({
     entries: [
@@ -1258,13 +1301,12 @@ function createParametricSimulation() {
     vertex: { module: renderModule, entryPoint: 'vs_main' },
     fragment: {
       module: renderModule, entryPoint: 'fs_main',
-      targets: [{ format: canvasFormat }]
+      targets: [{ format: renderTargetFormat }]
     },
     primitive: { topology: 'triangle-list', cullMode: 'none' },
     depthStencil: { format: 'depth24plus', depthWriteEnabled: true, depthCompare: 'less' },
-    multisample: { count: SAMPLE_COUNT },
+    multisample: { count: renderSampleCount },
   });
-  // renderBGs[viewIndex]
   const renderBGs: GPUBindGroup[] = [0, 1].map(vi => device.createBindGroup({ layout: renderBGL, entries: [
     { binding: 0, resource: { buffer: vertexBuffer } },
     { binding: 1, resource: { buffer: cameraBuffer, offset: vi * CAMERA_STRIDE, size: CAMERA_SIZE } },
@@ -1276,20 +1318,29 @@ function createParametricSimulation() {
   return {
     compute(encoder: GPUCommandEncoder) {
       const p = state.parametric;
-      time += 0.016 * p.rotationSpeed;
+      time += 0.016; // always advances; used for param oscillation phase
+      const maxRate = Math.max(p.p1Rate, p.p2Rate, p.p3Rate, p.p4Rate, p.twistRate);
+      animTime += 0.016 * (maxRate > 0 ? 1 : 0); // frozen when all rates = 0
 
-      const uRes = p.uRes;
-      const vRes = p.vRes;
-      updateIndexBuffer(uRes, vRes);
+      // Sinusoidal oscillation — natural ease-in-out at each extreme.
+      // Phase offsets stagger the peaks so params don't all sync up.
+      const osc = (mn: number, mx: number, rate: number, phase: number) =>
+        mn + (mx - mn) * (0.5 + 0.5 * Math.sin(time * rate + phase));
+
+      const p1    = osc(p.p1Min,    p.p1Max,    p.p1Rate,    0);
+      const p2    = osc(p.p2Min,    p.p2Max,    p.p2Rate,    Math.PI * 0.7);
+      const p3    = osc(p.p3Min,    p.p3Max,    p.p3Rate,    Math.PI * 1.3);
+      const p4    = osc(p.p4Min,    p.p4Max,    p.p4Rate,    Math.PI * 0.4);
+      const twist = osc(p.twistMin, p.twistMax, p.twistRate, Math.PI * 0.9);
 
       const m = state.mouse;
       const paramsData = new ArrayBuffer(64);
       const u32 = new Uint32Array(paramsData);
       const f32 = new Float32Array(paramsData);
-      u32[0] = uRes; u32[1] = vRes;
-      f32[2] = p.scale; f32[3] = p.twist; f32[4] = time;
+      u32[0] = URES; u32[1] = VRES;
+      f32[2] = p.scale; f32[3] = twist; f32[4] = animTime;
       u32[5] = SHAPE_IDS[p.shape] || 0;
-      f32[6] = p.p1; f32[7] = p.p2; f32[8] = p.p3; f32[9] = p.p4;
+      f32[6] = p1; f32[7] = p2; f32[8] = p3; f32[9] = p4;
       f32[10] = m.worldX; f32[11] = m.worldY; f32[12] = m.worldZ;
       f32[13] = m.down ? 1.0 : 0.0;
       device.queue.writeBuffer(computeParamsBuffer, 0, new Uint8Array(paramsData));
@@ -1297,17 +1348,16 @@ function createParametricSimulation() {
       const pass = encoder.beginComputePass();
       pass.setPipeline(computePipeline);
       pass.setBindGroup(0, computeBG);
-      pass.dispatchWorkgroups(Math.ceil(uRes / 8), Math.ceil(vRes / 8));
+      pass.dispatchWorkgroups(Math.ceil(URES / 8), Math.ceil(VRES / 8));
       pass.end();
     },
 
     render(encoder: GPUCommandEncoder, textureView: GPUTextureView, viewport: number[] | null, viewIndex = 0) {
-      if (currentIndexCount === 0) return;
-
       const aspect = viewport ? (viewport[2] / viewport[3]) : (canvas.width / canvas.height);
       device.queue.writeBuffer(cameraBuffer, viewIndex * CAMERA_STRIDE, getCameraUniformData(aspect));
 
-      const model = mat4.rotateX(mat4.rotateY(mat4.identity(), time), time * 0.3);
+      // Slow tumble: Y-axis at 0.1 speed, X-axis at 0.03 (different rates = non-repeating path)
+      const model = mat4.rotateX(mat4.rotateY(mat4.identity(), animTime * 0.1), animTime * 0.03);
       device.queue.writeBuffer(modelBuffer, 0, model as Float32Array<ArrayBuffer>);
 
       const pass = encoder.beginRenderPass({
@@ -1315,8 +1365,9 @@ function createParametricSimulation() {
         depthStencilAttachment: getDepthAttachment(depthRef, viewport),
       });
 
-      if (viewport) {
-        pass.setViewport(viewport[0], viewport[1], viewport[2], viewport[3], 0, 1);
+      const renderViewport = getRenderViewport(viewport);
+      if (renderViewport) {
+        pass.setViewport(renderViewport[0], renderViewport[1], renderViewport[2], renderViewport[3], 0, 1);
       }
 
       renderGrid(pass, aspect, viewIndex);
@@ -1324,11 +1375,11 @@ function createParametricSimulation() {
       pass.setPipeline(renderPipeline);
       pass.setBindGroup(0, renderBGs[viewIndex]);
       pass.setIndexBuffer(indexBuffer, 'uint32');
-      pass.drawIndexed(currentIndexCount);
+      pass.drawIndexed(indexCount);
       pass.end();
     },
 
-    getCount() { return `${state.parametric.uRes}x${state.parametric.vRes} (${state.parametric.shape})`; },
+    getCount() { return `256×256 (${state.parametric.shape})`; },
 
     destroy() {
       vertexBuffer.destroy(); indexBuffer.destroy();
@@ -1455,32 +1506,36 @@ function buildParamRow(container: HTMLElement, mode: SimMode, param: ParamDef) {
   return row;
 }
 
-// Set shape-specific param defaults when switching shapes
+// Set shape-specific animated param ranges when switching shapes.
+// Wave/twist params are global and not reset on shape change.
 function applyShapeDefaults(shape: string) {
   const sp = SHAPE_PARAMS[shape as ShapeName] ?? {};
-  state.parametric.p1 = sp.p1 ? sp.p1.val : 0;
-  state.parametric.p2 = sp.p2 ? sp.p2.val : 0;
-  state.parametric.p3 = sp.p3 ? sp.p3.val : 0;
-  state.parametric.p4 = sp.p4 ? sp.p4.val : 0;
+  const p = state.parametric;
+  if (sp.p1) { p.p1Min = sp.p1.animMin; p.p1Max = sp.p1.animMax; p.p1Rate = sp.p1.animRate; }
+  else        { p.p1Min = 0; p.p1Max = 0; p.p1Rate = 0; }
+  if (sp.p2) { p.p2Min = sp.p2.animMin; p.p2Max = sp.p2.animMax; p.p2Rate = sp.p2.animRate; }
+  else        { p.p2Min = 0; p.p2Max = 0; p.p2Rate = 0; }
 }
 
-// Rebuild the dynamic "Shape Parameters" section based on current shape
+// Rebuild the dynamic "Shape Parameters" section based on current shape.
+// Each parameter renders as a labelled group with Min / Max / Rate sliders.
 function rebuildShapeParams() {
   const container = document.getElementById('shape-params-section');
   if (!container) return;
 
-  // Remove all rows but keep the title
-  while (container.children.length > 1) {
-    container.removeChild(container.lastChild!);
-  }
+  while (container.children.length > 1) container.removeChild(container.lastChild!);
 
   const shape = state.parametric.shape;
   const sp = SHAPE_PARAMS[shape] ?? {};
 
-  for (const [key, def] of Object.entries(sp)) {
-    buildParamRow(container, 'parametric', {
-      key, label: def.label, min: def.min, max: def.max, step: def.step
-    });
+  for (const [pKey, def] of Object.entries(sp)) {
+    const subLabel = document.createElement('div');
+    subLabel.className = 'anim-param-label';
+    subLabel.textContent = def.label;
+    container.appendChild(subLabel);
+    buildParamRow(container, 'parametric', { key: `${pKey}Min`,  label: 'Min',  min: def.min, max: def.max, step: def.step });
+    buildParamRow(container, 'parametric', { key: `${pKey}Max`,  label: 'Max',  min: def.min, max: def.max, step: def.step });
+    buildParamRow(container, 'parametric', { key: `${pKey}Rate`, label: 'Rate', min: 0.0,     max: 3.0,     step: 0.05    });
   }
 }
 
@@ -1662,12 +1717,47 @@ function screenToFluidUV(mx: number, my: number) {
   ];
 }
 
+function worldToFluidUV(worldPoint: number[]) {
+  return [
+    Math.max(0, Math.min(1, (worldPoint[0] + 2) / 4)),
+    Math.max(0, Math.min(1, (worldPoint[2] + 2) / 4)),
+  ];
+}
+
+function intersectRayWithPlane(origin: number[], dir: number[], planeY: number) {
+  if (Math.abs(dir[1]) < 0.0001) return null;
+  const t = (planeY - origin[1]) / dir[1];
+  if (t < 0) return null;
+  return [
+    origin[0] + dir[0] * t,
+    origin[1] + dir[1] * t,
+    origin[2] + dir[2] * t,
+  ];
+}
+
+function closestPointOnRayToOrigin(origin: number[], dir: number[]) {
+  const denom = dot3(dir, dir) || 1;
+  const t = Math.max(0, -dot3(origin, dir) / denom);
+  return [
+    origin[0] + dir[0] * t,
+    origin[1] + dir[1] * t,
+    origin[2] + dir[2] * t,
+  ];
+}
+
+function setSimulationInteractionInactive() {
+  state.mouse.down = false;
+  state.mouse.dx = 0;
+  state.mouse.dy = 0;
+}
+
 function setupMouseControls() {
   const c = canvas;
   let dragging = false;
   let interacting = false; // ctrl/meta held = sim interaction mode
 
   c.addEventListener('pointerdown', (e) => {
+    if (state.xrEnabled) return;
     dragging = true;
     interacting = e.ctrlKey || e.metaKey;
     const rect = c.getBoundingClientRect();
@@ -1696,6 +1786,7 @@ function setupMouseControls() {
   });
 
   c.addEventListener('pointermove', (e) => {
+    if (state.xrEnabled) return;
     if (!dragging) return;
     const rect = c.getBoundingClientRect();
     const mx = (e.clientX - rect.left) / rect.width;
@@ -1737,6 +1828,7 @@ function setupMouseControls() {
   });
 
   c.addEventListener('pointerup', () => {
+    if (state.xrEnabled) return;
     dragging = false;
     interacting = false;
     state.mouse.down = false;
@@ -1747,6 +1839,7 @@ function setupMouseControls() {
   c.addEventListener('contextmenu', (e) => e.preventDefault());
 
   c.addEventListener('wheel', (e) => {
+    if (state.xrEnabled) return;
     state.camera.distance *= (1 + e.deltaY * 0.001);
     state.camera.distance = Math.max(0.5, Math.min(50, state.camera.distance));
     e.preventDefault();
@@ -1810,11 +1903,12 @@ function describeParam(_mode: string, key: string, val: number | string): string
     dyeMode: () => `${val} dye`,
     jacobiIterations: () => `${val} solver iterations`,
     shape: () => `${val} shape`,
-    uRes: () => `${val} U segments`,
-    vRes: () => `${val} V segments`,
-    scale: () => `scale ${val}`,
-    twist: () => n > 0 ? `twist ${n.toFixed(2)} rad` : null,
-    rotationSpeed: () => n > 2 ? `fast rotation (${val})` : n === 0 ? `no rotation` : `rotation speed ${val}`,
+    scale: () => n !== 1 ? `scale ${val}` : null,
+    p1Min: () => null, p1Max: () => null, p1Rate: () => null,
+    p2Min: () => null, p2Max: () => null, p2Rate: () => null,
+    p3Min: () => null, p3Max: () => null, p3Rate: () => null,
+    p4Min: () => null, p4Max: () => null, p4Rate: () => null,
+    twistMin: () => null, twistMax: () => null, twistRate: () => null,
   };
 
   const fn = descriptions[key] as (() => string | null) | undefined;
@@ -2040,6 +2134,71 @@ let xrRefSpace: XRReferenceSpace | null = null;
 let xrBinding: XRGPUBinding | null = null;
 let xrLayer: XRProjectionLayer | null = null;
 let xrFallbackDepth: GPUTexture | null = null;
+let xrInteractionSource: XRInputSource | null = null;
+let xrInteractionHasSample = false;
+
+function setXRInteractionSource(inputSource: XRInputSource | null) {
+  xrInteractionSource = inputSource;
+  xrInteractionHasSample = false;
+  setSimulationInteractionInactive();
+}
+
+function getXRTargetRayDirection(transform: XRRigidTransform) {
+  const m = transform.matrix;
+  return normalize3([-m[8], -m[9], -m[10]]);
+}
+
+function updateXRSimulationInteraction(frame: XRFrame) {
+  const source = xrInteractionSource;
+  if (!source || !xrRefSpace) {
+    setSimulationInteractionInactive();
+    return;
+  }
+
+  const pose = frame.getPose(source.targetRaySpace, xrRefSpace);
+  if (!pose) {
+    setSimulationInteractionInactive();
+    xrInteractionHasSample = false;
+    return;
+  }
+
+  const origin = [
+    pose.transform.position.x,
+    pose.transform.position.y,
+    pose.transform.position.z,
+  ];
+  const dir = getXRTargetRayDirection(pose.transform);
+  const worldPoint = state.mode === 'fluid'
+    ? intersectRayWithPlane(origin, dir, 0)
+    : closestPointOnRayToOrigin(origin, dir);
+
+  if (!worldPoint) {
+    setSimulationInteractionInactive();
+    xrInteractionHasSample = false;
+    return;
+  }
+
+  // [LAW:one-source-of-truth] Vision Pro pinch reuses the existing state.mouse interaction channel so simulations read one canonical input representation.
+  state.mouse.down = true;
+  state.mouse.worldX = worldPoint[0];
+  state.mouse.worldY = worldPoint[1];
+  state.mouse.worldZ = worldPoint[2];
+
+  if (state.mode === 'fluid') {
+    const uv = worldToFluidUV(worldPoint);
+    state.mouse.dx = xrInteractionHasSample ? (uv[0] - state.mouse.x) * 10 : 0;
+    state.mouse.dy = xrInteractionHasSample ? (uv[1] - state.mouse.y) * 10 : 0;
+    state.mouse.x = uv[0];
+    state.mouse.y = uv[1];
+  } else {
+    state.mouse.dx = 0;
+    state.mouse.dy = 0;
+    state.mouse.x = worldPoint[0];
+    state.mouse.y = worldPoint[1];
+  }
+
+  xrInteractionHasSample = true;
+}
 
 function setupXRButton() {
   const btn = document.getElementById('btn-xr') as HTMLButtonElement;
@@ -2109,11 +2268,14 @@ async function toggleXR() {
     // nativeProjectionScaleFactor is the device's native render resolution multiplier —
     // passing it to scaleFactor renders at full resolution instead of a default lower res.
     const preferredFormat = xrBinding.getPreferredColorFormat();
+    syncRenderConfig(preferredFormat, XR_SAMPLE_COUNT);
     const scaleFactor = xrBinding.nativeProjectionScaleFactor;
 
     // Try creating the projection layer with native scale, fall back to default scale.
     // Depth is managed per-frame (see xrFrame) so we don't request depthStencilFormat here.
     const layerConfigs: XRGPUProjectionLayerInit[] = [
+      { colorFormat: preferredFormat, scaleFactor, textureType: 'texture-array' },
+      { colorFormat: preferredFormat, textureType: 'texture-array' },
       { colorFormat: preferredFormat, scaleFactor },
       { colorFormat: preferredFormat },
     ];
@@ -2131,6 +2293,14 @@ async function toggleXR() {
     // Assign our GPU projection layer as the sole render target for this session.
     // This replaces the default baseLayer (canvas-backed) with our GPU texture layer.
     xrSession.updateRenderState({ layers: [xrLayer] });
+    xrSession.addEventListener('selectstart', (event) => {
+      setXRInteractionSource((event as XRInputSourceEvent).inputSource);
+    });
+    xrSession.addEventListener('selectend', (event) => {
+      const inputSource = (event as XRInputSourceEvent).inputSource;
+      const sameSource = xrInteractionSource === inputSource;
+      setXRInteractionSource(sameSource ? null : xrInteractionSource);
+    });
 
     btn.textContent = 'Exit VR';
     state.xrEnabled = true;
@@ -2143,6 +2313,8 @@ async function toggleXR() {
       xrBinding = null;
       xrLayer = null;
       state.xrEnabled = false;
+      syncRenderConfig(canvasFormat, DESKTOP_SAMPLE_COUNT);
+      setXRInteractionSource(null);
       btn.textContent = 'Enter VR';
       requestAnimationFrame(frame);
     });
@@ -2165,6 +2337,8 @@ function xrFrame(_time: DOMHighResTimeStamp, xrFrameData: XRFrame) {
 
     const sim = simulations[state.mode];
     if (!sim) return;
+
+    updateXRSimulationInteraction(xrFrameData);
 
     const encoder = device.createCommandEncoder();
 

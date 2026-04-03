@@ -25,6 +25,7 @@ interface XRSystem {
 
 interface XRSession extends EventTarget {
   readonly enabledFeatures?: readonly string[];
+  readonly inputSources: readonly XRInputSource[];
   requestReferenceSpace(type: string): Promise<XRReferenceSpace>;
   requestAnimationFrame(callback: XRFrameRequestCallback): number;
   updateRenderState(init?: XRRenderStateInit): void;
@@ -35,11 +36,30 @@ type XRFrameRequestCallback = (time: DOMHighResTimeStamp, frame: XRFrame) => voi
 
 interface XRFrame {
   getViewerPose(referenceSpace: XRReferenceSpace): XRViewerPose | null;
+  getPose(space: XRSpace, baseSpace: XRSpace): XRPose | null;
   readonly session: XRSession;
 }
 
-interface XRReferenceSpace extends EventTarget {
+interface XRSpace extends EventTarget {}
+
+interface XRReferenceSpace extends XRSpace {
   getOffsetReferenceSpace(originOffset: XRRigidTransform): XRReferenceSpace;
+}
+
+interface XRPose {
+  readonly transform: XRRigidTransform;
+}
+
+interface XRInputSource {
+  readonly handedness: 'none' | 'left' | 'right';
+  readonly targetRayMode: 'gaze' | 'tracked-pointer' | 'screen';
+  readonly targetRaySpace: XRSpace;
+  readonly gripSpace?: XRSpace;
+}
+
+interface XRInputSourceEvent extends Event {
+  readonly frame: XRFrame;
+  readonly inputSource: XRInputSource;
 }
 
 interface XRViewerPose {
@@ -89,6 +109,7 @@ interface XRGPUProjectionLayerInit {
   colorFormat?: GPUTextureFormat;
   depthStencilFormat?: GPUTextureFormat;
   scaleFactor?: number;
+  textureType?: 'texture' | 'texture-array';
 }
 
 interface XRGPUSubImage {

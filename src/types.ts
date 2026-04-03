@@ -40,15 +40,13 @@ export interface FluidParams {
 
 export interface ParametricParams {
   shape: ShapeName;
-  uRes: number;
-  vRes: number;
   scale: number;
-  twist: number;
-  rotationSpeed: number;
-  p1: number;
-  p2: number;
-  p3: number;
-  p4: number;
+  // Each param oscillates: value = min + (max-min) * (0.5 + 0.5 * sin(t * rate + phase))
+  p1Min: number; p1Max: number; p1Rate: number;
+  p2Min: number; p2Max: number; p2Rate: number;
+  p3Min: number; p3Max: number; p3Rate: number;  // wave amplitude
+  p4Min: number; p4Max: number; p4Rate: number;  // wave frequency
+  twistMin: number; twistMax: number; twistRate: number;
 }
 
 export type ModeParamsMap = {
@@ -128,8 +126,10 @@ export interface ParamSection {
 
 export interface ShapeParamDef {
   label: string;
-  val: number;
-  min: number;
+  animMin: number;  // default animation range min
+  animMax: number;  // default animation range max
+  animRate: number; // default animation rate
+  min: number;      // slider bound for Min/Max controls
   max: number;
   step: number;
 }

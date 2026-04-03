@@ -7,8 +7,8 @@ struct Params {
   shapeId: u32,
   p1: f32,
   p2: f32,
-  p3: f32,
-  p4: f32,
+  p3: f32,  // wave amplitude
+  p4: f32,  // wave frequency multiplier
   pokeX: f32,
   pokeY: f32,
   pokeZ: f32,
@@ -17,7 +17,9 @@ struct Params {
 
 struct Vertex {
   pos: vec3f,
+  glow: f32,    // wave displacement magnitude — sits in the vec3f padding slot
   normal: vec3f,
+  _pad: f32,
 }
 
 @group(0) @binding(0) var<storage, read_write> vertices: array<Vertex>;
@@ -37,8 +39,8 @@ fn torusShape(u: f32, v: f32) -> vec3f {
 fn kleinShape(u: f32, v: f32) -> vec3f {
   let cosU = cos(u); let sinU = sin(u);
   let cosV = cos(v); let sinV = sin(v);
-  let a = params.p1; // overall scale
-  var x: f32; var y: f32; var z: f32;
+  let a = params.p1;
+  var x: f32; var z: f32;
   if (u < 3.14159) {
     x = 3.0*cosU*(1.0+sinU) + (2.0*a)*(1.0-cosU*0.5)*cosU*cosV;
     z = -8.0*sinU - (2.0*a)*(1.0-cosU*0.5)*sinU*cosV;
@@ -46,14 +48,14 @@ fn kleinShape(u: f32, v: f32) -> vec3f {
     x = 3.0*cosU*(1.0+sinU) + (2.0*a)*(1.0-cosU*0.5)*cos(v+3.14159);
     z = -8.0*sinU;
   }
-  y = -(2.0*a)*(1.0-cosU*0.5)*sinV;
+  let y = -(2.0*a)*(1.0-cosU*0.5)*sinV;
   return vec3f(x, y, z) * 0.1;
 }
 
 // Shape 2: Möbius strip — p1=width, p2=halfTwists
 fn mobiusShape(u: f32, v: f32) -> vec3f {
-  let w = params.p1;  // strip width
-  let tw = params.p2; // number of half-twists
+  let w = params.p1;
+  let tw = params.p2;
   let vv = (v / 6.283185 - 0.5) * w;
   let halfU = u * tw * 0.5;
   return vec3f(
@@ -63,7 +65,7 @@ fn mobiusShape(u: f32, v: f32) -> vec3f {
   );
 }
 
-// Shape 3: Sphere — p1=xStretch, p2=yStretch
+// Shape 3: Sphere — p1=xStretch, p2=zStretch
 fn sphereShape(u: f32, v: f32) -> vec3f {
   return vec3f(
     sin(v) * cos(u) * params.p1,
@@ -102,17 +104,27 @@ fn evalShape(u: f32, v: f32) -> vec3f {
   }
 }
 
-fn computeNormal(u: f32, v: f32) -> vec3f {
+// Three interfering traveling waves — amplitude=p3, frequency=p4
+fn waveDelta(u: f32, v: f32) -> f32 {
+  let t = params.time;
+  let a = params.p3;
+  let f = max(params.p4, 0.3);
+  let w1 = sin(u * 3.0 * f + v * 2.0 * f + t * 1.8) * 0.12;
+  let w2 = cos(u * 5.0 * f - v * 4.0 * f + t * 2.3) * 0.07;
+  let w3 = sin(u * 2.0 * f + v * 7.0 * f - t * 1.5) * 0.05;
+  return (w1 + w2 + w3) * a;
+}
+
+// Scaled + wave-displaced position for a UV coordinate.
+// Normal of the base shape is computed via finite differences and used as
+// the displacement direction so waves are always surface-normal aligned.
+fn evalFull(u: f32, v: f32) -> vec3f {
   let eps = 0.001;
-  let p = evalShape(u, v);
+  let p  = evalShape(u, v);
   let pu = evalShape(u + eps, v);
   let pv = evalShape(u, v + eps);
-  let du = pu - p;
-  let dv = pv - p;
-  let n = cross(du, dv);
-  let len = length(n);
-  if (len < 0.0001) { return vec3f(0.0, 1.0, 0.0); }
-  return n / len;
+  let bn = normalize(cross(pu - p, pv - p));
+  return (p + bn * waveDelta(u, v)) * params.scale;
 }
 
 @compute @workgroup_size(8, 8)
@@ -125,12 +137,23 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
   let v = f32(vi) / f32(params.vRes) * 6.283185;
   let idx = vi * params.uRes + ui;
 
-  // Apply twist deformation in UV space
   let twistAngle = params.twist * f32(vi) / f32(params.vRes);
   let tu = u + twistAngle;
 
-  var pos = evalShape(tu, v) * params.scale;
-  var normal = computeNormal(tu, v);
+  // Displaced position
+  var pos = evalFull(tu, v);
+
+  // Normal of the displaced surface via finite differences of evalFull
+  let feps = 0.005;
+  let dpu = evalFull(tu + feps, v) - pos;
+  let dpv = evalFull(tu, v + feps) - pos;
+  let nc = cross(dpu, dpv);
+  let nlen = length(nc);
+  var normal = select(vec3f(0.0, 1.0, 0.0), nc / nlen, nlen > 0.0001);
+
+  // Glow: wave displacement magnitude, scaled so default amp gives visible emission
+  let disp = waveDelta(tu, v);
+  let glow = abs(disp) * 5.0;
 
   // Poke deformation: push vertices outward near the interaction point
   if (params.pokeActive > 0.5) {
@@ -142,5 +165,5 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
     pos += normal * strength;
   }
 
-  vertices[idx] = Vertex(pos, normal);
+  vertices[idx] = Vertex(pos, glow, normal, 0.0);
 }

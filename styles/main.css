@@ -186,6 +186,17 @@ body {
   text-align: right;
 }
 
+/* ═══ ANIMATED PARAM SUB-LABEL ═══ */
+.anim-param-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text);
+  margin-top: 8px;
+  margin-bottom: 2px;
+  letter-spacing: 0.3px;
+  opacity: 0.85;
+}
+
 /* ═══ DROPDOWN ═══ */
 .control-row select {
   flex: 1;
