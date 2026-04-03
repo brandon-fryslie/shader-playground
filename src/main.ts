@@ -2132,13 +2132,17 @@ function xrFrame(_time: DOMHighResTimeStamp, xrFrameData: XRFrame) {
     const sim = simulations[state.mode];
     if (!sim) return;
 
-    const encoder = device.createCommandEncoder();
-
     // Compute runs once per frame — both eyes share the same simulation state.
-    if (!state.paused) sim.compute(encoder);
+    if (!state.paused) {
+      const computeEncoder = device.createCommandEncoder();
+      sim.compute(computeEncoder);
+      device.queue.submit([computeEncoder.finish()]);
+    }
 
     // Render once per eye. pose.views is typically [left, right] on stereo devices.
     for (const view of pose.views) {
+      const encoder = device.createCommandEncoder();
+
       // getViewSubImage (Safari) / getSubImage (Chrome) returns the per-eye render target
       // for this frame. The returned GPUTexture is owned by the XR compositor — we must
       // not hold references to it across frames.
@@ -2184,14 +2188,16 @@ function xrFrame(_time: DOMHighResTimeStamp, xrFrameData: XRFrame) {
       // subImage.viewport is relative to the texture (or array slice) for this eye.
       const { x, y, width, height } = subImage.viewport;
       sim.render(encoder, textureView, [x, y, width, height]);
-    }
 
-    // Clear overrides before submit — desktop frame loop must not inherit XR state.
+      // [LAW:dataflow-not-control-flow] Each eye follows the same write->encode->submit path; only the per-eye matrices and targets vary.
+      device.queue.submit([encoder.finish()]);
+
+      xrCameraOverride = null;
+      xrDepthView = null;
+    }
+  } catch (e) {
     xrCameraOverride = null;
     xrDepthView = null;
-
-    device.queue.submit([encoder.finish()]);
-  } catch (e) {
     console.error('[XR] Frame error:', e);
   }
 }
