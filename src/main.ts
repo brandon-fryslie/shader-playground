@@ -2042,11 +2042,29 @@ async function toggleXR() {
       requiredFeatures: ['webgpu'],
       optionalFeatures: ['layers', 'local-floor'],
     });
+    let gotFloor = false;
     try {
       xrRefSpace = await xrSession.requestReferenceSpace('local-floor');
+      gotFloor = true;
     } catch (_) {
       xrRefSpace = await xrSession.requestReferenceSpace('local');
     }
+
+    // The simulation geometry is centered at the world origin in a ~[-2, 2]³ cube.
+    // Without an offset, the user spawns inside it. We push the reference space back
+    // 5 units along -Z (the WebGL "forward" axis) so the simulation appears 5m ahead.
+    //
+    // With local-floor, the reference space origin is on the floor and the user's eyes
+    // are ~1.6m up. We also lift the reference space by that amount so the simulation
+    // center sits at roughly eye level rather than at the user's feet.
+    const offsetY = gotFloor ? 1.6 : 0;
+    // XRRigidTransform exists as a global constructor at runtime on visionOS but
+    // TypeScript's DOM lib only declares the interface, not the constructor value.
+    type XRRigidTransformCtor = new (position: DOMPointInit, orientation?: DOMPointInit) => XRRigidTransform;
+    const RigidTransform = (globalThis as unknown as { XRRigidTransform: XRRigidTransformCtor }).XRRigidTransform;
+    xrRefSpace = xrRefSpace!.getOffsetReferenceSpace(
+      new RigidTransform({ x: 0, y: offsetY, z: -5 })
+    );
 
     // XRGPUBinding is the WebXR–WebGPU bridge. It takes the XR session and the
     // GPUDevice (which must have been created with xrCompatible: true) and lets us
