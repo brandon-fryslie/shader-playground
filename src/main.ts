@@ -205,6 +205,8 @@ const FLUID_GRID_RES = 96; // tessellation resolution for 3D fluid mesh
 // so neither overwrites the other before the command buffer executes.
 const CAMERA_SIZE = 192;   // sizeof(Camera) in WGSL
 const CAMERA_STRIDE = 256; // >= CAMERA_SIZE, multiple of minUniformBufferOffsetAlignment
+// [LAW:one-source-of-truth] Desktop projection range is owned here so every pass sees the same far-plane budget.
+const DESKTOP_CAMERA_FAR = 160.0;
 
 
 // All shape equations baked into one shader — shapeId uniform selects which runs.
@@ -437,7 +439,7 @@ function getCameraUniformData(aspect: number) {
     // Desktop: use orbit camera
     const cam = getOrbitCamera();
     const fovRad = state.camera.fov * Math.PI / 180;
-    const proj = mat4.perspective(fovRad, aspect, 0.01, 100.0);
+    const proj = mat4.perspective(fovRad, aspect, 0.01, DESKTOP_CAMERA_FAR);
     data.set(cam.view, 0);
     data.set(proj, 16);
     data.set(cam.eye, 32);
@@ -581,7 +583,7 @@ function renderGrid(pass: GPURenderPassEncoder, aspect: number, viewIndex = 0): 
   device.queue.writeBuffer(gridTimeBuffer, 0, new Float32Array([gridTime]));
   pass.setPipeline(gridPipeline);
   pass.setBindGroup(0, gridBGs[viewIndex]);
-  pass.draw(6);
+  pass.draw(30);
 }
 
 
