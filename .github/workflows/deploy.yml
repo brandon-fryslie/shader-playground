@@ -3,24 +3,32 @@ name: Deploy to GitHub Pages
 on:
   push:
     branches: [master]
-
-permissions:
-  contents: read
-  pages: write
-  id-token: write
+    tags: ['v*']
+  pull_request:
 
 concurrency:
-  group: pages
-  cancel-in-progress: true
+  group: pages-deploy
+  cancel-in-progress: false
 
 jobs:
   deploy:
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Compute version slot
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            echo "slot=pr-${{ github.event.pull_request.number }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "slot=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
+          fi
 
       - uses: actions/setup-node@v4
         with:
@@ -33,15 +41,13 @@ jobs:
       # npm install resolves correctly for the runner's platform without failing on this.
       - run: npm install
 
-      - run: npm run build
+      - name: Build with explicit base URL
         env:
-          VITE_BASE: /shader-playground/
+          VITE_BASE: /${{ github.event.repository.name }}/${{ steps.version.outputs.slot }}/
+        run: npm run build
 
-      - uses: actions/configure-pages@v5
-
-      - uses: actions/upload-pages-artifact@v3
+      - uses: brandon-fryslie/gh-pages-multiplexer@v1
         with:
-          path: dist/
-
-      - uses: actions/deploy-pages@v4
-        id: deployment
+          source-dir: dist
+          version: ${{ steps.version.outputs.slot }}
+          base-path-mode: none
