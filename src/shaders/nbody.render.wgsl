@@ -41,26 +41,35 @@ fn vs_main(@builtin(vertex_index) vid: u32, @builtin(instance_index) iid: u32) -
   let viewPos = camera.view * vec4f(body.pos, 1.0);
   // [LAW:single-enforcer] Mass-to-appearance compression is owned here so physics mass stays authoritative while visuals remain legible.
   let massVisual = clamp(sqrt(max(body.mass, 0.02)) / 3.4, 0.14, 1.0);
-  let baseSize = mix(0.015, 0.042, massVisual);
-  let size = baseSize;
-  let offset = quadPos[vid] * size;
+  // [LAW:dataflow-not-control-flow] Constant-pixel-size billboard: scale world offset by view-space depth so the
+  // perspective divide produces a fixed NDC offset. Stars stay sharp pinpoints regardless of camera distance.
+  let depth = max(abs(viewPos.z), 0.05);
+  let pixelScale = 0.0065 * depth * mix(1.0, 3.4, massVisual);
+  let offset = quadPos[vid] * pixelScale;
   let billboarded = viewPos + vec4f(offset, 0.0, 0.0);
 
   var out: VSOut;
   out.pos = camera.proj * billboarded;
   out.uv = quadPos[vid];
 
-  // Color: primary → secondary by mass.
+  // Color: primary → secondary by mass; heaviest bodies pick up accent.
   let massTint = clamp(pow(massVisual, 0.8), 0.0, 1.0);
-  out.color = mix(camera.primary, camera.secondary, massTint);
+  let baseCol = mix(camera.primary, camera.secondary, massTint);
+  let heavyTint = smoothstep(0.7, 1.0, massVisual);
+  out.color = mix(baseCol, mix(baseCol, camera.accent, 0.55), heavyTint);
   return out;
 }
 
 @fragment
 fn fs_main(@location(0) uv: vec2f, @location(1) color: vec3f) -> @location(0) vec4f {
   let dist = length(uv);
-  let alpha = smoothstep(1.0, 0.55, dist);
-  if (alpha < 0.01) { discard; }
-  let g = exp(-dist * 3.6);
-  return vec4f(color * (0.26 + g * 0.52), alpha * 0.78);
+  if (dist > 0.85) { discard; }
+  // [LAW:dataflow-not-control-flow] Toned-down additive: per-particle peak is low enough that dense clusters
+  // don't blow out, but a single particle still reads as a bright pinpoint. Bloom carries the wide glow externally.
+  let core = exp(-dist * 22.0) * 1.8;
+  let halo = exp(-dist * 5.0) * 0.45;
+  let intensity = core + halo;
+  let whiteShift = clamp(core * 0.06, 0.0, 0.3);
+  let tinted = mix(color, vec3f(1.0), whiteShift);
+  return vec4f(tinted * intensity, 1.0);
 }

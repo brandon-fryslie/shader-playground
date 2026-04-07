@@ -100,5 +100,7 @@ fn fs_main(
   // Wave displacement emission: peaks glow in accent color
   let emission = min(glow, 1.0) * camera.accent * 0.7;
 
-  return vec4f(shadedColor + rimGlow + emission, 1.0);
+  // HDR boost: rim and emission carry more punch since bloom captures their spillover.
+  let composed = shadedColor + rimGlow * 2.5 + emission * 3.0;
+  return vec4f(composed * 3.2, 1.0);
 }

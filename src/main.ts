@@ -7,6 +7,8 @@ import SHADER_BOIDS_RENDER from './shaders/boids.render.wgsl?raw';
 import SHADER_NBODY_COMPUTE from './shaders/nbody.compute.wgsl?raw';
 import SHADER_NBODY_REDUCE from './shaders/nbody.reduce.wgsl?raw';
 import SHADER_NBODY_RENDER from './shaders/nbody.render.wgsl?raw';
+import SHADER_NBODY_CLASSIC_COMPUTE from './shaders/nbody.classic.compute.wgsl?raw';
+import SHADER_NBODY_CLASSIC_RENDER from './shaders/nbody.classic.render.wgsl?raw';
 import SHADER_FLUID_FORCES_ADVECT from './shaders/fluid.forces.wgsl?raw';
 import SHADER_FLUID_DIFFUSE from './shaders/fluid.diffuse.wgsl?raw';
 import SHADER_FLUID_PRESSURE from './shaders/fluid.pressure.wgsl?raw';
@@ -16,6 +18,10 @@ import SHADER_FLUID_RENDER from './shaders/fluid.render.wgsl?raw';
 import SHADER_PARAMETRIC_COMPUTE from './shaders/parametric.compute.wgsl?raw';
 import SHADER_PARAMETRIC_RENDER from './shaders/parametric.render.wgsl?raw';
 import SHADER_GRID from './shaders/grid.wgsl?raw';
+import SHADER_POST_FADE from './shaders/post.fade.wgsl?raw';
+import SHADER_POST_DOWNSAMPLE from './shaders/post.downsample.wgsl?raw';
+import SHADER_POST_UPSAMPLE from './shaders/post.upsample.wgsl?raw';
+import SHADER_POST_COMPOSITE from './shaders/post.composite.wgsl?raw';
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // SECTION 1: CONSTANTS, DEFAULTS, PRESETS
@@ -27,10 +33,14 @@ const DEFAULTS: ModeParamsMap = {
     maxSpeed: 2.0, maxForce: 0.05, visualRange: 100
   },
   physics: {
-    count: 2000, G: 1.0, softening: 0.5, damping: 1.0, coreOrbit: 0.28, distribution: 'disk',
+    count: 10000, G: 1.0, softening: 0.5, damping: 1.0, coreOrbit: 0.28, distribution: 'disk',
     interactionStrength: 1.0,
     diskVertDamp: 0.35, diskRadDamp: 0.12, diskTangGain: 0.18, diskTangSpeed: 0.5,
     diskVertSpring: 0.0, diskAlignGain: 0.0,
+  },
+  physics_classic: {
+    // Verbatim defaults from the original shader-playground for fair A/B comparison.
+    count: 500, G: 1.0, softening: 0.5, damping: 0.999, distribution: 'random',
   },
   fluid: {
     resolution: 256, viscosity: 0.1, diffusionRate: 0.001, forceStrength: 100, volumeScale: 1.5,
@@ -63,6 +73,12 @@ const PRESETS: Record<SimMode, Record<string, Record<string, number | string>>> 
     'Gentle':   { count: 1000, G: 0.1, softening: 2.0, damping: 1.0, coreOrbit: 0.2, distribution: 'random',
                   interactionStrength: 1.0, diskVertDamp: 0.2, diskRadDamp: 0.08, diskTangGain: 0.12, diskTangSpeed: 0.4, diskVertSpring: 0.0, diskAlignGain: 0.0 },
   },
+  physics_classic: {
+    'Default':  { ...DEFAULTS.physics_classic },
+    'Galaxy':   { count: 3000, G: 0.5, softening: 1.0, damping: 0.998, distribution: 'disk' },
+    'Collapse': { count: 2000, G: 10.0, softening: 0.1, damping: 0.995, distribution: 'shell' },
+    'Gentle':   { count: 1000, G: 0.1, softening: 2.0, damping: 0.9999, distribution: 'random' },
+  },
   fluid: {
     'Default':   { ...DEFAULTS.fluid },
     'Thick':     { resolution: 256, viscosity: 0.8, diffusionRate: 0.005, forceStrength: 200, volumeScale: 1.8, dyeMode: 'rainbow', jacobiIterations: 40 },
@@ -94,7 +110,7 @@ const PARAM_DEFS: Record<SimMode, ParamSection[]> = {
   ],
   physics: [
     { section: 'Simulation', params: [
-      { key: 'count', label: 'Bodies', min: 10, max: 10000, step: 10, requiresReset: true },
+      { key: 'count', label: 'Bodies', min: 10, max: 50000, step: 10, requiresReset: true },
       { key: 'G', label: 'Gravity (G)', min: 0.01, max: 100.0, step: 0.01 },
       { key: 'softening', label: 'Softening', min: 0.01, max: 10.0, step: 0.01 },
       { key: 'damping', label: 'Damping', min: 0.9, max: 1.0, step: 0.001 },
@@ -111,6 +127,17 @@ const PARAM_DEFS: Record<SimMode, ParamSection[]> = {
       { key: 'diskTangSpeed', label: 'Orbit Speed', min: 0.0, max: 2.0, step: 0.01 },
       { key: 'diskVertSpring', label: 'Plane Spring', min: 0.0, max: 2.0, step: 0.001 },
       { key: 'diskAlignGain', label: 'Flow Align', min: 0.0, max: 2.0, step: 0.001 },
+    ]},
+  ],
+  physics_classic: [
+    { section: 'Simulation', params: [
+      { key: 'count', label: 'Bodies', min: 10, max: 10000, step: 10, requiresReset: true },
+      { key: 'G', label: 'Gravity (G)', min: 0.01, max: 100.0, step: 0.01 },
+      { key: 'softening', label: 'Softening', min: 0.01, max: 10.0, step: 0.01 },
+      { key: 'damping', label: 'Damping', min: 0.9, max: 1.0, step: 0.001 },
+    ]},
+    { section: 'Initial State', params: [
+      { key: 'distribution', label: 'Distribution', type: 'dropdown', options: ['random', 'disk', 'shell'], requiresReset: true },
     ]},
   ],
   fluid: [
@@ -254,10 +281,22 @@ const state: AppState = {
   paused: false,
   boids: { ...DEFAULTS.boids },
   physics: { ...DEFAULTS.physics },
+  physics_classic: { ...DEFAULTS.physics_classic },
   fluid: { ...DEFAULTS.fluid },
   parametric: { ...DEFAULTS.parametric },
   camera: { distance: 5.0, fov: 60, rotX: 0.3, rotY: 0.0, panX: 0, panY: 0 },
   mouse: { down: false, x: 0, y: 0, dx: 0, dy: 0, worldX: 0, worldY: 0, worldZ: 0 },
+  fx: {
+    bloomIntensity: 0.7,
+    bloomThreshold: 4.0,
+    bloomRadius: 1.0,
+    trailPersistence: 0.0,
+    exposure: 1.0,
+    vignette: 0.35,
+    chromaticAberration: 0.25,
+    grading: 0.5,
+    timeScale: 1.0,
+  },
 };
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -406,85 +445,213 @@ function getOrbitCamera() {
   };
 }
 
-// When set by XR frame loop, overrides orbit camera and depth texture for all rendering
+// When set by XR frame loop, overrides orbit camera for all rendering
 let xrCameraOverride: XRCameraOverride | null = null;
-let xrDepthView: GPUTextureView | null = null;
-const DESKTOP_SAMPLE_COUNT: number = 4;
-const XR_SAMPLE_COUNT: number = 1;
 
-function getOrCreateAttachmentTexture(
-  current: GPUTexture | undefined,
-  width: number,
-  height: number,
-  format: GPUTextureFormat,
-  sampleCount: number
-): GPUTexture {
-  const matches = current &&
-    current.width === width &&
-    current.height === height &&
-    current.format === format &&
-    current.sampleCount === sampleCount;
-  if (matches) return current;
-  current?.destroy();
-  return device.createTexture({
+// ---------- HDR / Bloom / Post-FX shared state ----------
+// [LAW:one-source-of-truth] HDR scene textures, bloom mip chain, and post pipelines are owned here. Sims never see them directly.
+type PostFxState = {
+  scene: GPUTexture[];     // ping-pong [0,1]
+  sceneIdx: number;
+  depth: GPUTexture | null;
+  bloomMips: GPUTexture[]; // 5 mips, halved each level
+  width: number;
+  height: number;
+  needsClear: boolean;     // forces a one-frame clear after resize / sim swap
+  linSampler: GPUSampler | null;
+  // pipelines
+  fadePipeline: GPURenderPipeline | null;
+  downsamplePipeline: GPURenderPipeline | null;
+  upsamplePipelineAdditive: GPURenderPipeline | null;
+  upsamplePipelineReplace: GPURenderPipeline | null;
+  compositePipelines: Map<string, GPURenderPipeline>;
+  // bind group layouts
+  fadeBGL: GPUBindGroupLayout | null;
+  downsampleBGL: GPUBindGroupLayout | null;
+  upsampleBGL: GPUBindGroupLayout | null;
+  compositeBGL: GPUBindGroupLayout | null;
+  // per-frame uniform buffers (one each, rewritten per pass)
+  fadeUBO: GPUBuffer | null;
+  downsampleUBO: GPUBuffer[];   // one per mip level (so we can encode all in one frame)
+  upsampleUBO: GPUBuffer[];
+  compositeUBO: GPUBuffer | null;
+};
+const postFx: PostFxState = {
+  scene: [],
+  sceneIdx: 0,
+  depth: null,
+  bloomMips: [],
+  width: 0,
+  height: 0,
+  needsClear: true,
+  linSampler: null,
+  fadePipeline: null,
+  downsamplePipeline: null,
+  upsamplePipelineAdditive: null,
+  upsamplePipelineReplace: null,
+  compositePipelines: new Map(),
+  fadeBGL: null,
+  downsampleBGL: null,
+  upsampleBGL: null,
+  compositeBGL: null,
+  fadeUBO: null,
+  downsampleUBO: [],
+  upsampleUBO: [],
+  compositeUBO: null,
+};
+const HDR_FORMAT: GPUTextureFormat = 'rgba16float';
+const BLOOM_LEVELS = 3; // 5 mips made the largest blur radius half-screen, fusing dense clusters into a giant white blob.
+
+function initPostFx(): void {
+  postFx.linSampler = device.createSampler({
+    magFilter: 'linear', minFilter: 'linear',
+    addressModeU: 'clamp-to-edge', addressModeV: 'clamp-to-edge',
+  });
+
+  // Bind group layouts
+  postFx.fadeBGL = device.createBindGroupLayout({ entries: [
+    { binding: 0, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
+    { binding: 1, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'filtering' } },
+    { binding: 2, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
+  ]});
+  postFx.downsampleBGL = device.createBindGroupLayout({ entries: [
+    { binding: 0, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
+    { binding: 1, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'filtering' } },
+    { binding: 2, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
+  ]});
+  postFx.upsampleBGL = device.createBindGroupLayout({ entries: [
+    { binding: 0, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
+    { binding: 1, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'filtering' } },
+    { binding: 2, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
+  ]});
+  postFx.compositeBGL = device.createBindGroupLayout({ entries: [
+    { binding: 0, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
+    { binding: 1, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
+    { binding: 2, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'filtering' } },
+    { binding: 3, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
+  ]});
+
+  const fadeMod = device.createShaderModule({ code: SHADER_POST_FADE });
+  const downMod = device.createShaderModule({ code: SHADER_POST_DOWNSAMPLE });
+  const upMod = device.createShaderModule({ code: SHADER_POST_UPSAMPLE });
+
+  postFx.fadePipeline = device.createRenderPipeline({
+    layout: device.createPipelineLayout({ bindGroupLayouts: [postFx.fadeBGL] }),
+    vertex: { module: fadeMod, entryPoint: 'vs_main' },
+    fragment: { module: fadeMod, entryPoint: 'fs_main', targets: [{ format: HDR_FORMAT }] },
+    primitive: { topology: 'triangle-list' },
+  });
+  postFx.downsamplePipeline = device.createRenderPipeline({
+    layout: device.createPipelineLayout({ bindGroupLayouts: [postFx.downsampleBGL] }),
+    vertex: { module: downMod, entryPoint: 'vs_main' },
+    fragment: { module: downMod, entryPoint: 'fs_main', targets: [{ format: HDR_FORMAT }] },
+    primitive: { topology: 'triangle-list' },
+  });
+  postFx.upsamplePipelineAdditive = device.createRenderPipeline({
+    layout: device.createPipelineLayout({ bindGroupLayouts: [postFx.upsampleBGL] }),
+    vertex: { module: upMod, entryPoint: 'vs_main' },
+    fragment: { module: upMod, entryPoint: 'fs_main', targets: [{
+      format: HDR_FORMAT,
+      blend: {
+        color: { srcFactor: 'one', dstFactor: 'one', operation: 'add' },
+        alpha: { srcFactor: 'one', dstFactor: 'one', operation: 'add' },
+      },
+    }] },
+    primitive: { topology: 'triangle-list' },
+  });
+  postFx.upsamplePipelineReplace = device.createRenderPipeline({
+    layout: device.createPipelineLayout({ bindGroupLayouts: [postFx.upsampleBGL] }),
+    vertex: { module: upMod, entryPoint: 'vs_main' },
+    fragment: { module: upMod, entryPoint: 'fs_main', targets: [{ format: HDR_FORMAT }] },
+    primitive: { topology: 'triangle-list' },
+  });
+
+  // Allocate UBOs
+  postFx.fadeUBO = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+  postFx.downsampleUBO = [];
+  postFx.upsampleUBO = [];
+  for (let i = 0; i < BLOOM_LEVELS; i++) {
+    postFx.downsampleUBO.push(device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST }));
+    postFx.upsampleUBO.push(device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST }));
+  }
+  postFx.compositeUBO = device.createBuffer({ size: 64, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+}
+
+function ensureCompositePipeline(format: GPUTextureFormat): GPURenderPipeline {
+  let p = postFx.compositePipelines.get(format);
+  if (p) return p;
+  const mod = device.createShaderModule({ code: SHADER_POST_COMPOSITE });
+  p = device.createRenderPipeline({
+    layout: device.createPipelineLayout({ bindGroupLayouts: [postFx.compositeBGL!] }),
+    vertex: { module: mod, entryPoint: 'vs_main' },
+    fragment: { module: mod, entryPoint: 'fs_main', targets: [{ format }] },
+    primitive: { topology: 'triangle-list' },
+  });
+  postFx.compositePipelines.set(format, p);
+  return p;
+}
+
+function ensureHdrTargets(width: number, height: number): void {
+  if (postFx.width === width && postFx.height === height && postFx.scene.length === 2) return;
+  // destroy old
+  for (const t of postFx.scene) t.destroy();
+  for (const t of postFx.bloomMips) t.destroy();
+  postFx.depth?.destroy();
+  postFx.scene = [];
+  postFx.bloomMips = [];
+
+  postFx.width = width;
+  postFx.height = height;
+  for (let i = 0; i < 2; i++) {
+    postFx.scene.push(device.createTexture({
+      size: [width, height],
+      format: HDR_FORMAT,
+      usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
+    }));
+  }
+  postFx.depth = device.createTexture({
     size: [width, height],
-    format,
-    sampleCount,
+    format: 'depth24plus',
     usage: GPUTextureUsage.RENDER_ATTACHMENT,
   });
-}
-
-// Helper: get a depth texture view. In XR, use the XR-provided one.
-// In desktop, manage a per-simulation depth texture that matches the canvas.
-function getDepthView(simDepthRef: DepthRef): GPUTextureView {
-  if (xrDepthView && renderSampleCount === 1) return xrDepthView;
-  // Desktop path: create/resize depth texture to match canvas
-  simDepthRef.tex = getOrCreateAttachmentTexture(simDepthRef.tex, canvas.width, canvas.height, 'depth24plus', renderSampleCount);
-  return simDepthRef.tex.createView();
-}
-
-function getColorAttachment(
-  simDepthRef: DepthRef,
-  resolveTarget: GPUTextureView,
-  viewport: number[] | null
-): GPURenderPassColorAttachment {
-  if (renderSampleCount === 1) {
-    return {
-      view: resolveTarget,
-      clearValue: DEFAULT_CLEAR_COLOR,
-      loadOp: 'clear',
-      storeOp: 'store',
-    };
+  let w = Math.max(1, Math.floor(width / 2));
+  let h = Math.max(1, Math.floor(height / 2));
+  for (let i = 0; i < BLOOM_LEVELS; i++) {
+    postFx.bloomMips.push(device.createTexture({
+      size: [w, h],
+      format: HDR_FORMAT,
+      usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
+    }));
+    w = Math.max(1, Math.floor(w / 2));
+    h = Math.max(1, Math.floor(h / 2));
   }
+  postFx.needsClear = true;
+}
 
-  const width = viewport ? viewport[2] : canvas.width;
-  const height = viewport ? viewport[3] : canvas.height;
-  // [LAW:one-source-of-truth] MSAA color target sizing is derived from the active render target dimensions in one place.
-  simDepthRef.msaaColorTex = getOrCreateAttachmentTexture(simDepthRef.msaaColorTex, width, height, renderTargetFormat, renderSampleCount);
+// Sims call this to get the current HDR scene texture view (the render target).
+function getCurrentSceneView(): GPUTextureView {
+  return postFx.scene[postFx.sceneIdx].createView();
+}
 
+// [LAW:dataflow-not-control-flow] All sims always render into HDR offscreen; loadOp is data-driven from postFx.needsClear / trail persistence.
+function getColorAttachment(
+  _simDepthRef: DepthRef,
+  _resolveTarget: GPUTextureView,  // ignored — sims always render to HDR scene
+  _viewport: number[] | null
+): GPURenderPassColorAttachment {
+  const trails = state.fx.trailPersistence > 0.001;
+  const useLoad = trails && !postFx.needsClear;
   return {
-    view: simDepthRef.msaaColorTex.createView(),
-    resolveTarget,
+    view: getCurrentSceneView(),
     clearValue: DEFAULT_CLEAR_COLOR,
-    loadOp: 'clear',
-    storeOp: 'discard',
+    loadOp: useLoad ? 'load' : 'clear',
+    storeOp: 'store',
   };
 }
 
-function getDepthAttachment(simDepthRef: DepthRef, viewport: number[] | null): GPURenderPassDepthStencilAttachment {
-  if (renderSampleCount > 1 && viewport) {
-    const width = viewport[2];
-    const height = viewport[3];
-    simDepthRef.msaaDepthTex = getOrCreateAttachmentTexture(simDepthRef.msaaDepthTex, width, height, 'depth24plus', renderSampleCount);
-    return {
-      view: simDepthRef.msaaDepthTex.createView(),
-      depthClearValue: 1.0,
-      depthLoadOp: 'clear',
-      depthStoreOp: 'discard',
-    };
-  }
+function getDepthAttachment(_simDepthRef: DepthRef, _viewport: number[] | null): GPURenderPassDepthStencilAttachment {
   return {
-    view: getDepthView(simDepthRef),
+    view: postFx.depth!.createView(),
     depthClearValue: 1.0,
     depthLoadOp: 'clear',
     depthStoreOp: 'store',
@@ -492,16 +659,11 @@ function getDepthAttachment(simDepthRef: DepthRef, viewport: number[] | null): G
 }
 
 function getRenderViewport(viewport: number[] | null): number[] | null {
-  if (!viewport) return null;
-  if (renderSampleCount === 1) return viewport;
-  // [LAW:one-source-of-truth] XR compositor viewport offsets apply only to the compositor-owned target; MSAA eye textures are sized to the eye rect itself.
-  return [0, 0, viewport[2], viewport[3]];
+  return viewport;
 }
 
-function destroyDepthRef(depthRef: DepthRef) {
-  depthRef.tex?.destroy();
-  depthRef.msaaColorTex?.destroy();
-  depthRef.msaaDepthTex?.destroy();
+function destroyDepthRef(_depthRef: DepthRef) {
+  // Depth and color targets are now shared/global; nothing per-sim to destroy.
 }
 
 function getCameraUniformData(aspect: number) {
@@ -540,7 +702,7 @@ let canvas!: HTMLCanvasElement;
 let context!: GPUCanvasContext;
 let canvasFormat!: GPUTextureFormat;
 let renderTargetFormat!: GPUTextureFormat;
-let renderSampleCount = DESKTOP_SAMPLE_COUNT;
+let renderSampleCount = 1;
 
 async function initWebGPU(): Promise<boolean> {
   const fallbackEl = document.getElementById('fallback')!;
@@ -580,31 +742,36 @@ async function initWebGPU(): Promise<boolean> {
     }
   });
 
+  // Capture validation errors and render them into a visible overlay div for diagnosis.
+  device.onuncapturederror = (ev: GPUUncapturedErrorEvent) => {
+    console.error('[WebGPU]', ev.error.message);
+    let overlay = document.getElementById('gpu-error-overlay');
+    if (!overlay) {
+      overlay = document.createElement('div');
+      overlay.id = 'gpu-error-overlay';
+      overlay.style.cssText = 'position:fixed;top:60px;left:10px;right:10px;max-height:60vh;overflow:auto;background:rgba(20,0,0,0.92);color:#ff8080;font:11px monospace;padding:10px;border:1px solid #ff4040;border-radius:4px;z-index:9999;white-space:pre-wrap;';
+      document.body.appendChild(overlay);
+    }
+    const stamp = new Date().toLocaleTimeString();
+    overlay.textContent = `[${stamp}] ${ev.error.message}\n\n` + overlay.textContent;
+  };
+
   canvas = document.getElementById('gpu-canvas') as HTMLCanvasElement;
   context = canvas.getContext('webgpu') as GPUCanvasContext;
   canvasFormat = navigator.gpu.getPreferredCanvasFormat();
-  renderTargetFormat = renderTargetFormat || canvasFormat;
-  renderSampleCount = renderSampleCount || DESKTOP_SAMPLE_COUNT;
+  // [LAW:one-source-of-truth] Sims always render into HDR offscreen; the swapchain is only the final composite target.
+  renderTargetFormat = 'rgba16float';
+  renderSampleCount = 1; // MSAA dropped — bloom + HDR replace it.
   context.configure({ device, format: canvasFormat, alphaMode: 'opaque' });
+  initPostFx();
 
   return true;
 }
 
-function destroyAllSimulations() {
-  for (const mode of Object.keys(simulations) as SimMode[]) {
-    simulations[mode]?.destroy();
-    delete simulations[mode];
-  }
-}
-
-function syncRenderConfig(nextFormat: GPUTextureFormat, nextSampleCount: number) {
-  if (renderTargetFormat === nextFormat && renderSampleCount === nextSampleCount) return;
-  // [LAW:one-source-of-truth] All render pipelines and attachments derive from one active render config.
-  renderTargetFormat = nextFormat;
-  renderSampleCount = nextSampleCount;
-  destroyAllSimulations();
-  initGrid();
-  ensureSimulation();
+function syncRenderConfig(_nextFormat: GPUTextureFormat, _nextSampleCount: number) {
+  // [LAW:one-source-of-truth] All sims always render into HDR (rgba16float). Composite output format
+  // is handled per-call by ensureCompositePipeline(); this function no longer needs to rebuild anything.
+  postFx.needsClear = true;
 }
 
 
@@ -767,7 +934,8 @@ function createBoidsSimulation() {
       const p = state.boids;
       const m = state.mouse;
       const fullParams = new Float32Array(16);
-      fullParams[0] = 0.016;
+      // [LAW:dataflow-not-control-flow] Time scaling lives in the dt value itself; the compute shader doesn't branch on pause/reverse.
+      fullParams[0] = 0.016 * state.fx.timeScale;
       fullParams[1] = p.separationRadius / 50;
       fullParams[2] = p.alignmentRadius / 50;
       fullParams[3] = p.cohesionRadius / 50;
@@ -1043,8 +1211,7 @@ function createPhysicsSimulation() {
     },
     primitive: { topology: 'triangle-list' },
     // Additive-blended particles don't write depth but must declare the format
-    // to match the render pass's depth attachment — omitting this causes a WebGPU
-    // validation error that silently kills the entire render pass.
+    // to match the render pass's depth attachment.
     depthStencil: { format: 'depth24plus', depthWriteEnabled: false, depthCompare: 'always' },
     multisample: { count: renderSampleCount },
   });
@@ -1085,7 +1252,7 @@ function createPhysicsSimulation() {
       const paramsData = new ArrayBuffer(96);
       const f32 = new Float32Array(paramsData);
       const u32 = new Uint32Array(paramsData);
-      f32[0] = 0.016; f32[1] = p.G * 0.001; f32[2] = p.softening; f32[3] = p.damping;
+      f32[0] = 0.016 * state.fx.timeScale; f32[1] = p.G * 0.001; f32[2] = p.softening; f32[3] = p.damping;
       u32[4] = count;
       u32[5] = MASSIVE_BODY_COUNT;
       f32[6] = p.coreOrbit;
@@ -1175,6 +1342,185 @@ function createPhysicsSimulation() {
       reduceParamsBuffer.destroy(); reduceOutBuffer.destroy(); reduceStaging.destroy();
       destroyDepthRef(depthRef);
     }
+  };
+}
+
+// --- 5b': N-BODY CLASSIC ---
+// Faithful recreation of the original n-body shader for A/B comparison.
+// 32-byte Body struct, 48-byte Params (no disk recovery, no reduction, no home anchors).
+// Renders into the shared HDR scene like every other sim, so bloom/tonemap still apply.
+
+function createPhysicsClassicSimulation(): Simulation {
+  const count = state.physics_classic.count;
+  const bodyBytes = count * 32; // pos(12) + mass(4) + vel(12) + pad(4) = 32
+
+  // [LAW:one-source-of-truth] Verbatim initial distribution from the original shader-playground.
+  const initData = new Float32Array(count * 8);
+  const dist = state.physics_classic.distribution;
+  for (let i = 0; i < count; i++) {
+    const off = i * 8;
+    let x: number, y: number, z: number, vx = 0, vy = 0, vz = 0;
+    if (dist === 'disk') {
+      const angle = Math.random() * Math.PI * 2;
+      const r = Math.random() * 2;
+      x = Math.cos(angle) * r;
+      y = (Math.random() - 0.5) * 0.1;
+      z = Math.sin(angle) * r;
+      // Orbital velocity
+      const speed = 0.5 / Math.sqrt(r + 0.1);
+      vx = -Math.sin(angle) * speed;
+      vz = Math.cos(angle) * speed;
+    } else if (dist === 'shell') {
+      const theta = Math.random() * Math.PI * 2;
+      const phi = Math.acos(2 * Math.random() - 1);
+      const r = 1.5 + Math.random() * 0.1;
+      x = r * Math.sin(phi) * Math.cos(theta);
+      y = r * Math.sin(phi) * Math.sin(theta);
+      z = r * Math.cos(phi);
+    } else {
+      x = (Math.random() - 0.5) * 4;
+      y = (Math.random() - 0.5) * 4;
+      z = (Math.random() - 0.5) * 4;
+    }
+    initData[off    ] = x;
+    initData[off + 1] = y;
+    initData[off + 2] = z;
+    initData[off + 3] = 0.5 + Math.random() * 2.0; // mass
+    initData[off + 4] = vx;
+    initData[off + 5] = vy;
+    initData[off + 6] = vz;
+  }
+
+  const bufferA = device.createBuffer({ size: bodyBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST, mappedAtCreation: true });
+  new Float32Array(bufferA.getMappedRange()).set(initData);
+  bufferA.unmap();
+  const bufferB = device.createBuffer({ size: bodyBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+
+  const paramsBuffer = device.createBuffer({ size: 48, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+  const attractorBuffer = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+  const cameraBuffer = device.createBuffer({ size: CAMERA_STRIDE * 2, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+
+  const computeModule = device.createShaderModule({ code: SHADER_NBODY_CLASSIC_COMPUTE_EDIT || SHADER_NBODY_CLASSIC_COMPUTE });
+  const renderModule = device.createShaderModule({ code: SHADER_NBODY_CLASSIC_RENDER_EDIT || SHADER_NBODY_CLASSIC_RENDER });
+
+  const computeBGL = device.createBindGroupLayout({ entries: [
+    { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
+    { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
+    { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
+  ]});
+  const computePipeline = device.createComputePipeline({
+    layout: device.createPipelineLayout({ bindGroupLayouts: [computeBGL] }),
+    compute: { module: computeModule, entryPoint: 'main' },
+  });
+
+  const renderBGL = device.createBindGroupLayout({ entries: [
+    { binding: 0, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: 'read-only-storage' } },
+    { binding: 1, visibility: GPUShaderStage.VERTEX, buffer: { type: 'uniform' } },
+    { binding: 2, visibility: GPUShaderStage.VERTEX, buffer: { type: 'uniform' } },
+  ]});
+  const renderPipeline = device.createRenderPipeline({
+    layout: device.createPipelineLayout({ bindGroupLayouts: [renderBGL] }),
+    vertex: { module: renderModule, entryPoint: 'vs_main' },
+    fragment: {
+      module: renderModule, entryPoint: 'fs_main',
+      targets: [{
+        format: renderTargetFormat,
+        blend: {
+          color: { srcFactor: 'src-alpha', dstFactor: 'one', operation: 'add' },
+          alpha: { srcFactor: 'one', dstFactor: 'one', operation: 'add' },
+        },
+      }],
+    },
+    primitive: { topology: 'triangle-list' },
+    depthStencil: { format: 'depth24plus', depthWriteEnabled: false, depthCompare: 'always' },
+    multisample: { count: renderSampleCount },
+  });
+
+  const computeBG = [
+    device.createBindGroup({ layout: computeBGL, entries: [
+      { binding: 0, resource: { buffer: bufferA } },
+      { binding: 1, resource: { buffer: bufferB } },
+      { binding: 2, resource: { buffer: paramsBuffer } },
+    ]}),
+    device.createBindGroup({ layout: computeBGL, entries: [
+      { binding: 0, resource: { buffer: bufferB } },
+      { binding: 1, resource: { buffer: bufferA } },
+      { binding: 2, resource: { buffer: paramsBuffer } },
+    ]}),
+  ];
+
+  const renderBGs: GPUBindGroup[][] = [0, 1].map(vi =>
+    [bufferA, bufferB].map(buf => device.createBindGroup({ layout: renderBGL, entries: [
+      { binding: 0, resource: { buffer: buf } },
+      { binding: 1, resource: { buffer: cameraBuffer, offset: vi * CAMERA_STRIDE, size: CAMERA_SIZE } },
+      { binding: 2, resource: { buffer: attractorBuffer } },
+    ]}))
+  );
+
+  let pingPong = 0;
+  const depthRef: DepthRef = {};
+
+  return {
+    compute(encoder: GPUCommandEncoder) {
+      const p = state.physics_classic;
+      const m = state.mouse;
+      // Pack 12 floats: dt, G, softening, damping, count(u32), 3 pads, attractor.xyz, attractorActive
+      const buf = new ArrayBuffer(48);
+      const f32 = new Float32Array(buf);
+      const u32 = new Uint32Array(buf);
+      f32[0] = 0.016 * state.fx.timeScale;
+      f32[1] = p.G * 0.001;
+      f32[2] = p.softening;
+      f32[3] = p.damping;
+      u32[4] = count;
+      f32[8] = m.down ? m.worldX : 0.0;
+      f32[9] = m.down ? m.worldY : 0.0;
+      f32[10] = m.down ? m.worldZ : 0.0;
+      f32[11] = m.down ? 1.0 : 0.0;
+      device.queue.writeBuffer(paramsBuffer, 0, new Uint8Array(buf));
+
+      // Attractor uniform for the render pass (used for the per-body swell/glow effect).
+      device.queue.writeBuffer(attractorBuffer, 0, new Float32Array([
+        m.down ? m.worldX : 0.0,
+        m.down ? m.worldY : 0.0,
+        m.down ? m.worldZ : 0.0,
+        m.down ? 1.0 : 0.0,
+      ]));
+
+      const pass = encoder.beginComputePass();
+      pass.setPipeline(computePipeline);
+      pass.setBindGroup(0, computeBG[pingPong]);
+      pass.dispatchWorkgroups(Math.ceil(count / 64));
+      pass.end();
+      pingPong = 1 - pingPong;
+    },
+
+    render(encoder: GPUCommandEncoder, textureView: GPUTextureView, viewport: number[] | null, viewIndex = 0) {
+      const aspect = viewport ? (viewport[2] / viewport[3]) : (canvas.width / canvas.height);
+      device.queue.writeBuffer(cameraBuffer, viewIndex * CAMERA_STRIDE, getCameraUniformData(aspect));
+
+      const pass = encoder.beginRenderPass({
+        colorAttachments: [getColorAttachment(depthRef, textureView, viewport)],
+        depthStencilAttachment: getDepthAttachment(depthRef, viewport),
+      });
+      const renderViewport = getRenderViewport(viewport);
+      if (renderViewport) {
+        pass.setViewport(renderViewport[0], renderViewport[1], renderViewport[2], renderViewport[3], 0, 1);
+      }
+      renderGrid(pass, aspect, viewIndex);
+      pass.setPipeline(renderPipeline);
+      pass.setBindGroup(0, renderBGs[viewIndex][pingPong]);
+      pass.draw(6, count);
+      pass.end();
+    },
+
+    getCount() { return count; },
+
+    destroy() {
+      bufferA.destroy(); bufferB.destroy();
+      paramsBuffer.destroy(); attractorBuffer.destroy(); cameraBuffer.destroy();
+      destroyDepthRef(depthRef);
+    },
   };
 }
 
@@ -1374,9 +1720,9 @@ function createFluidSimulation() {
     compute(encoder: GPUCommandEncoder) {
       const p = state.fluid;
       const dyeModeNum = p.dyeMode === 'rainbow' ? 0 : p.dyeMode === 'single' ? 1 : 2;
-      simulationTime += 0.016;
+      simulationTime += 0.016 * state.fx.timeScale;
       const paramsData = new Float32Array([
-        FLUID_DT, p.viscosity, p.diffusionRate, p.forceStrength,
+        FLUID_DT * state.fx.timeScale, p.viscosity, p.diffusionRate, p.forceStrength,
         res, state.mouse.x, state.mouse.y, state.mouse.dx,
         state.mouse.dy, state.mouse.down ? 1.0 : 0.0, dyeModeNum, simulationTime
       ]);
@@ -1564,9 +1910,9 @@ function createParametricSimulation() {
   return {
     compute(encoder: GPUCommandEncoder) {
       const p = state.parametric;
-      time += 0.016; // always advances; used for param oscillation phase
+      time += 0.016 * state.fx.timeScale; // scaled by FX time slider so pause/reverse works on the parametric animation
       const maxRate = Math.max(p.p1Rate, p.p2Rate, p.p3Rate, p.p4Rate, p.twistRate);
-      animTime += 0.016 * (maxRate > 0 ? 1 : 0); // frozen when all rates = 0
+      animTime += 0.016 * state.fx.timeScale * (maxRate > 0 ? 1 : 0); // frozen when all rates = 0
 
       // Sinusoidal oscillation — natural ease-in-out at each extreme.
       // Phase offsets stagger the peaks so params don't all sync up.
@@ -1640,6 +1986,55 @@ function createParametricSimulation() {
 // SECTION 6: UI & CONTROLS
 // ═══════════════════════════════════════════════════════════════════════════════
 
+const FX_PARAM_DEFS: { key: keyof typeof state.fx; label: string; min: number; max: number; step: number }[] = [
+  { key: 'timeScale',           label: 'Time',        min: -2.0, max: 2.0, step: 0.05 },
+  { key: 'bloomIntensity',      label: 'Bloom',       min: 0,    max: 4.0, step: 0.01 },
+  { key: 'bloomThreshold',      label: 'Threshold',   min: 0,    max: 8.0, step: 0.01 },
+  { key: 'bloomRadius',         label: 'Bloom Radius',min: 0.5,  max: 2.0, step: 0.01 },
+  { key: 'trailPersistence',    label: 'Trails',      min: 0,    max: 0.995, step: 0.001 },
+  { key: 'exposure',            label: 'Exposure',    min: 0.2,  max: 4.0, step: 0.01 },
+  { key: 'vignette',            label: 'Vignette',    min: 0,    max: 1.5, step: 0.01 },
+  { key: 'chromaticAberration', label: 'Chromatic',   min: 0,    max: 2.0, step: 0.01 },
+  { key: 'grading',             label: 'Color Grade', min: 0,    max: 1.5, step: 0.01 },
+];
+
+function buildFxSection(container: HTMLElement) {
+  const secDiv = document.createElement('div');
+  secDiv.className = 'param-section';
+  const title = document.createElement('div');
+  title.className = 'param-section-title';
+  title.textContent = 'Visual FX';
+  secDiv.appendChild(title);
+
+  for (const def of FX_PARAM_DEFS) {
+    const row = document.createElement('div');
+    row.className = 'control-row';
+    const label = document.createElement('span');
+    label.className = 'control-label';
+    label.textContent = def.label;
+    row.appendChild(label);
+    const input = document.createElement('input');
+    input.type = 'range';
+    input.min = String(def.min);
+    input.max = String(def.max);
+    input.step = String(def.step);
+    input.value = String(state.fx[def.key]);
+    const valueSpan = document.createElement('span');
+    valueSpan.className = 'control-value';
+    valueSpan.textContent = formatValue(state.fx[def.key], def.step);
+    input.addEventListener('input', () => {
+      const val = Number(input.value);
+      state.fx[def.key] = val;
+      valueSpan.textContent = formatValue(val, def.step);
+      saveState();
+    });
+    row.appendChild(input);
+    row.appendChild(valueSpan);
+    secDiv.appendChild(row);
+  }
+  container.appendChild(secDiv);
+}
+
 function buildControls() {
   for (const [modeStr, sections] of Object.entries(PARAM_DEFS)) {
     const mode = modeStr as SimMode;
@@ -1679,6 +2074,8 @@ function buildControls() {
 
       container.appendChild(secDiv);
     }
+
+    buildFxSection(container);
   }
 }
 
@@ -2117,6 +2514,7 @@ function setupMouseControls() {
 const MODE_LABELS = {
   boids: 'boids/flocking',
   physics: 'N-body gravitational',
+  physics_classic: 'classic N-body (vintage shader)',
   fluid: 'fluid dynamics',
   parametric: 'parametric shape',
 };
@@ -2202,6 +2600,10 @@ function getShaderSources(mode: SimMode): Record<string, string> {
     physics: {
       'Compute (Gravity)': SHADER_NBODY_COMPUTE,
       'Render (Vert+Frag)': SHADER_NBODY_RENDER,
+    },
+    physics_classic: {
+      'Compute (Classic)': SHADER_NBODY_CLASSIC_COMPUTE,
+      'Render (Classic)': SHADER_NBODY_CLASSIC_RENDER,
     },
     fluid: {
       'Forces + Advect': SHADER_FLUID_FORCES_ADVECT,
@@ -2357,6 +2759,10 @@ function applyShaderEdit(mode: SimMode, tabName: string, code: string) {
       'Compute (Gravity)': () => { SHADER_NBODY_COMPUTE_EDIT = code; },
       'Render (Vert+Frag)': () => { SHADER_NBODY_RENDER_EDIT = code; },
     },
+    physics_classic: {
+      'Compute (Classic)': () => { SHADER_NBODY_CLASSIC_COMPUTE_EDIT = code; },
+      'Render (Classic)': () => { SHADER_NBODY_CLASSIC_RENDER_EDIT = code; },
+    },
     fluid: {
       'Forces + Advect': () => { SHADER_FLUID_FORCES_ADVECT_EDIT = code; },
       'Diffuse': () => { SHADER_FLUID_DIFFUSE_EDIT = code; },
@@ -2380,6 +2786,8 @@ let SHADER_BOIDS_COMPUTE_EDIT: string | null = null;
 let SHADER_BOIDS_RENDER_EDIT: string | null = null;
 let SHADER_NBODY_COMPUTE_EDIT: string | null = null;
 let SHADER_NBODY_RENDER_EDIT: string | null = null;
+let SHADER_NBODY_CLASSIC_COMPUTE_EDIT: string | null = null;
+let SHADER_NBODY_CLASSIC_RENDER_EDIT: string | null = null;
 let SHADER_FLUID_FORCES_ADVECT_EDIT: string | null = null;
 let SHADER_FLUID_DIFFUSE_EDIT: string | null = null;
 let SHADER_FLUID_DIVERGENCE_EDIT: string | null = null;
@@ -2398,7 +2806,6 @@ let xrSession: XRSession | null = null;
 let xrRefSpace: XRReferenceSpace | null = null;
 let xrBinding: XRGPUBinding | null = null;
 let xrLayer: XRProjectionLayer | null = null;
-let xrFallbackDepth: GPUTexture | null = null;
 let xrInteractionSource: XRInputSource | null = null;
 let xrInteractionHasSample = false;
 
@@ -2538,7 +2945,7 @@ async function toggleXR() {
     // nativeProjectionScaleFactor is the device's native render resolution multiplier —
     // passing it to scaleFactor renders at full resolution instead of a default lower res.
     const preferredFormat = xrBinding.getPreferredColorFormat();
-    syncRenderConfig(preferredFormat, XR_SAMPLE_COUNT);
+    syncRenderConfig(preferredFormat, 1);
     const scaleFactor = xrBinding.nativeProjectionScaleFactor;
 
     // Try creating the projection layer with native scale, fall back to default scale.
@@ -2583,7 +2990,7 @@ async function toggleXR() {
       xrBinding = null;
       xrLayer = null;
       state.xrEnabled = false;
-      syncRenderConfig(canvasFormat, DESKTOP_SAMPLE_COUNT);
+      syncRenderConfig(canvasFormat, 1);
       setXRInteractionSource(null);
       btn.textContent = 'Enter VR';
       requestAnimationFrame(frame);
@@ -2638,22 +3045,6 @@ function xrFrame(time: DOMHighResTimeStamp, xrFrameData: XRFrame) {
       const viewDesc = subImage.getViewDescriptor ? subImage.getViewDescriptor() : {};
       const textureView = subImage.colorTexture.createView(viewDesc);
 
-      // Use the XR-provided depth buffer if available; otherwise create a matching one.
-      if (subImage.depthStencilTexture) {
-        xrDepthView = subImage.depthStencilTexture.createView(viewDesc);
-      } else {
-        const ct = subImage.colorTexture;
-        if (!xrFallbackDepth || xrFallbackDepth.width !== ct.width || xrFallbackDepth.height !== ct.height) {
-          if (xrFallbackDepth) xrFallbackDepth.destroy();
-          xrFallbackDepth = device.createTexture({
-            size: [ct.width, ct.height],
-            format: 'depth24plus',
-            usage: GPUTextureUsage.RENDER_ATTACHMENT,
-          });
-        }
-        xrDepthView = xrFallbackDepth.createView();
-      }
-
       // Set the per-eye camera override so getCameraUniformData() uses XR matrices.
       const pos = view.transform.position;
       xrCameraOverride = {
@@ -2663,12 +3054,21 @@ function xrFrame(time: DOMHighResTimeStamp, xrFrameData: XRFrame) {
       };
 
       const { x, y, width, height } = subImage.viewport;
-      sim.render(encoder, textureView, [x, y, width, height], viewIndex);
+
+      // [LAW:dataflow-not-control-flow] XR uses the same HDR + bloom + composite pipeline as desktop.
+      // HDR scene is sized to the eye render area; we share one HDR scene across both eyes
+      // (clobbered between eyes). Trails do not persist in XR.
+      ensureHdrTargets(width, height);
+      postFx.needsClear = true; // force loadOp:clear; no XR trails
+      const sceneIdx = postFx.sceneIdx;
+      sim.render(encoder, postFx.scene[sceneIdx].createView(), null, viewIndex);
+      runBloomChain(encoder, postFx.scene[sceneIdx]);
+      const ctFormat = subImage.colorTexture.format;
+      runComposite(encoder, postFx.scene[sceneIdx], textureView, ctFormat, [x, y, width, height]);
     }
 
     // Clear overrides after all eyes are encoded — desktop frame loop must not inherit XR state.
     xrCameraOverride = null;
-    xrDepthView = null;
 
     device.queue.submit([encoder.finish()]);
   } catch (e) {
@@ -2691,6 +3091,7 @@ function ensureSimulation() {
     const factories = {
       boids: createBoidsSimulation,
       physics: createPhysicsSimulation,
+      physics_classic: createPhysicsClassicSimulation,
       fluid: createFluidSimulation,
       parametric: createParametricSimulation,
     };
@@ -2724,6 +3125,126 @@ function resizeCanvas() {
     canvas.width = w;
     canvas.height = h;
   }
+  ensureHdrTargets(canvas.width, canvas.height);
+}
+
+// [LAW:dataflow-not-control-flow] Post-process always runs the same passes; uniform values dictate strength.
+// Before: caller has rendered the sim into the current HDR scene texture (postFx.scene[postFx.sceneIdx]).
+// After: composite is written into `finalView` (canvas swapchain or XR compositor texture).
+// `prevSceneIdx` (passed in) is the texture the fade pass should READ FROM (the previous frame's scene).
+function runFadePass(encoder: GPUCommandEncoder, prevSceneIdx: number, currSceneIdx: number) {
+  if (postFx.needsClear) return; // skip — sim's loadOp:clear handles it
+  const persistence = state.fx.trailPersistence;
+  if (persistence < 0.001) return; // trails disabled — sim's loadOp:clear handles it
+  device.queue.writeBuffer(postFx.fadeUBO!, 0, new Float32Array([persistence, 0, 0, 0]));
+  const bg = device.createBindGroup({ layout: postFx.fadeBGL!, entries: [
+    { binding: 0, resource: postFx.scene[prevSceneIdx].createView() },
+    { binding: 1, resource: postFx.linSampler! },
+    { binding: 2, resource: { buffer: postFx.fadeUBO! } },
+  ]});
+  const pass = encoder.beginRenderPass({ colorAttachments: [{
+    view: postFx.scene[currSceneIdx].createView(),
+    clearValue: DEFAULT_CLEAR_COLOR,
+    loadOp: 'clear',
+    storeOp: 'store',
+  }]});
+  pass.setPipeline(postFx.fadePipeline!);
+  pass.setBindGroup(0, bg);
+  pass.draw(3);
+  pass.end();
+}
+
+function runBloomChain(encoder: GPUCommandEncoder, sceneTex: GPUTexture) {
+  const fx = state.fx;
+  // Downsample chain: scene → mip0 → mip1 → ... → mip4
+  for (let i = 0; i < BLOOM_LEVELS; i++) {
+    const src = i === 0 ? sceneTex : postFx.bloomMips[i - 1];
+    const dst = postFx.bloomMips[i];
+    const srcW = src.width;
+    const srcH = src.height;
+    device.queue.writeBuffer(postFx.downsampleUBO[i], 0, new Float32Array([
+      1.0 / srcW, 1.0 / srcH,
+      fx.bloomThreshold,
+      i === 0 ? 1.0 : 0.0,
+    ]));
+    const bg = device.createBindGroup({ layout: postFx.downsampleBGL!, entries: [
+      { binding: 0, resource: src.createView() },
+      { binding: 1, resource: postFx.linSampler! },
+      { binding: 2, resource: { buffer: postFx.downsampleUBO[i] } },
+    ]});
+    const pass = encoder.beginRenderPass({ colorAttachments: [{
+      view: dst.createView(),
+      clearValue: { r: 0, g: 0, b: 0, a: 1 },
+      loadOp: 'clear',
+      storeOp: 'store',
+    }]});
+    pass.setPipeline(postFx.downsamplePipeline!);
+    pass.setBindGroup(0, bg);
+    pass.draw(3);
+    pass.end();
+  }
+  // Upsample chain: mip4 → mip3 (additive), mip3 → mip2 (additive), ..., mip1 → mip0 (additive).
+  // The smaller mip's content is added on top of the larger mip's existing data.
+  for (let i = BLOOM_LEVELS - 1; i > 0; i--) {
+    const src = postFx.bloomMips[i];
+    const dst = postFx.bloomMips[i - 1];
+    device.queue.writeBuffer(postFx.upsampleUBO[i], 0, new Float32Array([
+      1.0 / src.width, 1.0 / src.height,
+      fx.bloomRadius,
+      0,
+    ]));
+    const bg = device.createBindGroup({ layout: postFx.upsampleBGL!, entries: [
+      { binding: 0, resource: src.createView() },
+      { binding: 1, resource: postFx.linSampler! },
+      { binding: 2, resource: { buffer: postFx.upsampleUBO[i] } },
+    ]});
+    const pass = encoder.beginRenderPass({ colorAttachments: [{
+      view: dst.createView(),
+      clearValue: { r: 0, g: 0, b: 0, a: 1 },
+      loadOp: 'load',
+      storeOp: 'store',
+    }]});
+    pass.setPipeline(postFx.upsamplePipelineAdditive!);
+    pass.setBindGroup(0, bg);
+    pass.draw(3);
+    pass.end();
+  }
+}
+
+function runComposite(encoder: GPUCommandEncoder, sceneTex: GPUTexture, finalView: GPUTextureView, finalFormat: GPUTextureFormat, viewport: number[] | null = null) {
+  const fx = state.fx;
+  const tc = getThemeColors();
+  const buf = new Float32Array(16);
+  buf[0] = fx.bloomIntensity;
+  buf[1] = fx.exposure;
+  buf[2] = fx.vignette;
+  buf[3] = fx.chromaticAberration;
+  buf[4] = fx.grading;
+  // pad 5,6,7
+  buf[8] = tc.primary[0]; buf[9] = tc.primary[1]; buf[10] = tc.primary[2];
+  // pad 11
+  buf[12] = tc.accent[0]; buf[13] = tc.accent[1]; buf[14] = tc.accent[2];
+  // pad 15
+  device.queue.writeBuffer(postFx.compositeUBO!, 0, buf);
+
+  const pipeline = ensureCompositePipeline(finalFormat);
+  const bg = device.createBindGroup({ layout: postFx.compositeBGL!, entries: [
+    { binding: 0, resource: sceneTex.createView() },
+    { binding: 1, resource: postFx.bloomMips[0].createView() },
+    { binding: 2, resource: postFx.linSampler! },
+    { binding: 3, resource: { buffer: postFx.compositeUBO! } },
+  ]});
+  const pass = encoder.beginRenderPass({ colorAttachments: [{
+    view: finalView,
+    clearValue: { r: 0, g: 0, b: 0, a: 1 },
+    loadOp: 'clear',
+    storeOp: 'store',
+  }]});
+  pass.setPipeline(pipeline);
+  pass.setBindGroup(0, bg);
+  if (viewport) pass.setViewport(viewport[0], viewport[1], viewport[2], viewport[3], 0, 1);
+  pass.draw(3);
+  pass.end();
 }
 
 function frame(now: DOMHighResTimeStamp) {
@@ -2751,10 +3272,25 @@ function frame(now: DOMHighResTimeStamp) {
     sim.compute(encoder);
   }
 
-  const textureView = context.getCurrentTexture().createView();
-  sim.render(encoder, textureView, null);
+  const prevIdx = postFx.sceneIdx;
+  const currIdx = 1 - prevIdx;
+  postFx.sceneIdx = currIdx;
+
+  // Trail decay (no-op if trails disabled or first frame after clear)
+  runFadePass(encoder, prevIdx, currIdx);
+
+  // Sim renders into HDR scene[currIdx] (loadOp determined by getColorAttachment).
+  const sceneViewDummy = postFx.scene[currIdx].createView();
+  sim.render(encoder, sceneViewDummy, null);
+
+  // Bloom + composite
+  runBloomChain(encoder, postFx.scene[currIdx]);
+  const swapchainView = context.getCurrentTexture().createView();
+  runComposite(encoder, postFx.scene[currIdx], swapchainView, canvasFormat);
 
   device.queue.submit([encoder.finish()]);
+
+  postFx.needsClear = false;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -2774,6 +3310,7 @@ function saveState() {
       fluid: state.fluid,
       parametric: state.parametric,
       camera: state.camera,
+      fx: state.fx,
     };
     localStorage.setItem(STORAGE_KEY, JSON.stringify(toSave));
   } catch (e) { /* ignore quota errors */ }
@@ -2792,6 +3329,7 @@ function loadState() {
     if (parsed.fluid) Object.assign(state.fluid, parsed.fluid);
     if (parsed.parametric) Object.assign(state.parametric, parsed.parametric);
     if (parsed.camera) Object.assign(state.camera, parsed.camera);
+    if (parsed.fx) Object.assign(state.fx, parsed.fx);
     syncThemeTransition(state.colorTheme);
   } catch (e) { /* ignore parse errors — start fresh */ }
 }

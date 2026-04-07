@@ -1,4 +1,4 @@
-export type SimMode = 'boids' | 'physics' | 'fluid' | 'parametric';
+export type SimMode = 'boids' | 'physics' | 'physics_classic' | 'fluid' | 'parametric';
 export type ShapeName = 'torus' | 'klein' | 'mobius' | 'sphere' | 'trefoil';
 export type Distribution = 'random' | 'disk' | 'shell';
 export type DyeMode = 'rainbow' | 'single' | 'temperature';
@@ -37,6 +37,14 @@ export interface PhysicsParams {
   interactionStrength: number;
 }
 
+export interface ClassicPhysicsParams {
+  count: number;
+  G: number;
+  softening: number;
+  damping: number;
+  distribution: Distribution;
+}
+
 export interface FluidParams {
   resolution: number;
   viscosity: number;
@@ -61,6 +69,7 @@ export interface ParametricParams {
 export type ModeParamsMap = {
   boids: BoidsParams;
   physics: PhysicsParams;
+  physics_classic: ClassicPhysicsParams;
   fluid: FluidParams;
   parametric: ParametricParams;
 };
@@ -85,6 +94,18 @@ export interface MouseState {
   worldZ: number;
 }
 
+export interface FxParams {
+  bloomIntensity: number;
+  bloomThreshold: number;
+  bloomRadius: number;
+  trailPersistence: number;
+  exposure: number;
+  vignette: number;
+  chromaticAberration: number;
+  grading: number;
+  timeScale: number;
+}
+
 export interface AppState {
   mode: SimMode;
   colorTheme: string;
@@ -92,10 +113,12 @@ export interface AppState {
   paused: boolean;
   boids: BoidsParams;
   physics: PhysicsParams;
+  physics_classic: ClassicPhysicsParams;
   fluid: FluidParams;
   parametric: ParametricParams;
   camera: CameraState;
   mouse: MouseState;
+  fx: FxParams;
 }
 
 export interface ThemeColors {

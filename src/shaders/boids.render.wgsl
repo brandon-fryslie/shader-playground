@@ -35,11 +35,14 @@ fn vs_main(@builtin(vertex_index) vid: u32, @builtin(instance_index) iid: u32) -
   let right = normalize(cross(dir, up));
   let realUp = cross(right, dir);
 
-  // Triangle vertices pointing in velocity direction
-  let size = 0.06;
+  // [LAW:dataflow-not-control-flow] Constant-pixel-size triangle: scale local offsets by view-space depth so the
+  // perspective divide produces a fixed NDC offset. Boids stay tight darts regardless of camera distance.
+  let viewPos = camera.view * vec4f(p.pos, 1.0);
+  let depth = max(abs(viewPos.z), 0.05);
+  let size = 0.0035 * depth;
   var localPos: vec3f;
   switch (vid) {
-    case 0u: { localPos = dir * size * 2.0; }           // tip
+    case 0u: { localPos = dir * size * 2.0; }            // tip
     case 1u: { localPos = -dir * size + right * size; }  // left
     case 2u: { localPos = -dir * size - right * size; }  // right
     default: { localPos = vec3f(0.0); }
@@ -49,13 +52,15 @@ fn vs_main(@builtin(vertex_index) vid: u32, @builtin(instance_index) iid: u32) -
   var out: VSOut;
   out.pos = camera.proj * camera.view * vec4f(worldPos, 1.0);
 
-  // Color by speed: primary (slow) → accent (fast)
+  // Color by speed: primary (slow) → accent (fast); fast boids shift toward white-hot.
   let t = clamp(speed / 4.0, 0.0, 1.0);
-  out.color = mix(camera.primary, camera.accent, t);
+  let base = mix(camera.primary, camera.accent, t);
+  out.color = mix(base, vec3f(1.0), t * 0.45);
   return out;
 }
 
 @fragment
 fn fs_main(@location(0) color: vec3f) -> @location(0) vec4f {
-  return vec4f(color, 1.0);
+  // HDR boost: triangles are tiny, so a flat ~5x multiplier reads through bloom as luminous flecks.
+  return vec4f(color * 5.0, 1.0);
 }

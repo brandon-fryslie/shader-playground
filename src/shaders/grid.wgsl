@@ -91,5 +91,5 @@ fn fs_main(@location(0) worldPos: vec3f, @location(1) surfaceCoord: vec2f) -> @l
   let pulseColor = camera.accent;
   let color = mix(baseColor, pulseColor, pulse);
 
-  return vec4f(color, totalAlpha);
+  return vec4f(color * 1.6, totalAlpha);
 }
