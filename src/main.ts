@@ -5,6 +5,7 @@ import type { SimMode, Simulation, AppState, ThemeColors, RGBThemeColors, ParamD
 import SHADER_BOIDS_COMPUTE from './shaders/boids.compute.wgsl?raw';
 import SHADER_BOIDS_RENDER from './shaders/boids.render.wgsl?raw';
 import SHADER_NBODY_COMPUTE from './shaders/nbody.compute.wgsl?raw';
+import SHADER_NBODY_REDUCE from './shaders/nbody.reduce.wgsl?raw';
 import SHADER_NBODY_RENDER from './shaders/nbody.render.wgsl?raw';
 import SHADER_FLUID_FORCES_ADVECT from './shaders/fluid.forces.wgsl?raw';
 import SHADER_FLUID_DIFFUSE from './shaders/fluid.diffuse.wgsl?raw';
@@ -26,7 +27,10 @@ const DEFAULTS: ModeParamsMap = {
     maxSpeed: 2.0, maxForce: 0.05, visualRange: 100
   },
   physics: {
-    count: 2000, G: 1.0, softening: 0.5, damping: 1.0, coreOrbit: 0.28, distribution: 'disk'
+    count: 2000, G: 1.0, softening: 0.5, damping: 1.0, coreOrbit: 0.28, distribution: 'disk',
+    interactionStrength: 1.0,
+    diskVertDamp: 0.35, diskRadDamp: 0.12, diskTangGain: 0.18, diskTangSpeed: 0.5,
+    diskVertSpring: 0.0, diskAlignGain: 0.0,
   },
   fluid: {
     resolution: 256, viscosity: 0.1, diffusionRate: 0.001, forceStrength: 100, volumeScale: 1.5,
@@ -52,9 +56,12 @@ const PRESETS: Record<SimMode, Record<string, Record<string, number | string>>> 
   },
   physics: {
     'Default':  { ...DEFAULTS.physics },
-    'Galaxy':   { count: 3000, G: 0.5, softening: 1.0, damping: 1.0, coreOrbit: 0.32, distribution: 'disk' },
-    'Collapse': { count: 2000, G: 10.0, softening: 0.1, damping: 0.998, coreOrbit: 0.14, distribution: 'shell' },
-    'Gentle':   { count: 1000, G: 0.1, softening: 2.0, damping: 1.0, coreOrbit: 0.2, distribution: 'random' },
+    'Galaxy':   { count: 3000, G: 0.5, softening: 1.0, damping: 1.0, coreOrbit: 0.32, distribution: 'disk',
+                  interactionStrength: 1.0, diskVertDamp: 0.4, diskRadDamp: 0.15, diskTangGain: 0.22, diskTangSpeed: 0.5, diskVertSpring: 0.0, diskAlignGain: 0.0 },
+    'Collapse': { count: 2000, G: 10.0, softening: 0.1, damping: 0.998, coreOrbit: 0.14, distribution: 'shell',
+                  interactionStrength: 1.0, diskVertDamp: 0.05, diskRadDamp: 0.02, diskTangGain: 0.0, diskTangSpeed: 0.5, diskVertSpring: 0.0, diskAlignGain: 0.0 },
+    'Gentle':   { count: 1000, G: 0.1, softening: 2.0, damping: 1.0, coreOrbit: 0.2, distribution: 'random',
+                  interactionStrength: 1.0, diskVertDamp: 0.2, diskRadDamp: 0.08, diskTangGain: 0.12, diskTangSpeed: 0.4, diskVertSpring: 0.0, diskAlignGain: 0.0 },
   },
   fluid: {
     'Default':   { ...DEFAULTS.fluid },
@@ -92,9 +99,18 @@ const PARAM_DEFS: Record<SimMode, ParamSection[]> = {
       { key: 'softening', label: 'Softening', min: 0.01, max: 10.0, step: 0.01 },
       { key: 'damping', label: 'Damping', min: 0.9, max: 1.0, step: 0.001 },
       { key: 'coreOrbit', label: 'Core Friction', min: 0.0, max: 1.5, step: 0.01 },
+      { key: 'interactionStrength', label: 'Interaction Pull', min: 0.0, max: 10.0, step: 0.05 },
     ]},
     { section: 'Initial State', params: [
       { key: 'distribution', label: 'Distribution', type: 'dropdown', options: ['random', 'disk', 'shell'] },
+    ]},
+    { section: 'Disk Recovery', params: [
+      { key: 'diskVertDamp', label: 'Vertical Damp', min: 0.0, max: 2.0, step: 0.001 },
+      { key: 'diskRadDamp', label: 'Radial Damp', min: 0.0, max: 2.0, step: 0.001 },
+      { key: 'diskTangGain', label: 'Tangential Nudge', min: 0.0, max: 2.0, step: 0.001 },
+      { key: 'diskTangSpeed', label: 'Orbit Speed', min: 0.0, max: 2.0, step: 0.01 },
+      { key: 'diskVertSpring', label: 'Plane Spring', min: 0.0, max: 2.0, step: 0.001 },
+      { key: 'diskAlignGain', label: 'Flow Align', min: 0.0, max: 2.0, step: 0.001 },
     ]},
   ],
   fluid: [
@@ -956,10 +972,15 @@ function createPhysicsSimulation() {
   bufferA.unmap();
   const bufferB = device.createBuffer({ size: bodyBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
 
-  const paramsBuffer = device.createBuffer({ size: 48, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST }); // dt, G, soft, damp, count, sourceCount, coreOrbit, pad, target.xyz, interaction
+  const paramsBuffer = device.createBuffer({ size: 96, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
   const cameraBuffer = device.createBuffer({ size: CAMERA_STRIDE * 2, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+  // [LAW:one-source-of-truth] Disk-normal estimation owns its own buffers; the smoothed result lives in the closure below.
+  const reduceParamsBuffer = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+  const reduceOutBuffer = device.createBuffer({ size: 16, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
+  const reduceStaging = device.createBuffer({ size: 16, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
 
   const computeModule = device.createShaderModule({ code: SHADER_NBODY_COMPUTE_EDIT || SHADER_NBODY_COMPUTE });
+  const reduceShaderModule = device.createShaderModule({ code: SHADER_NBODY_REDUCE });
   const renderModule = device.createShaderModule({ code: SHADER_NBODY_RENDER_EDIT || SHADER_NBODY_RENDER });
 
   const computeBGL = device.createBindGroupLayout({
@@ -974,6 +995,31 @@ function createPhysicsSimulation() {
     layout: device.createPipelineLayout({ bindGroupLayouts: [computeBGL] }),
     compute: { module: computeModule, entryPoint: 'main' }
   });
+
+  const reduceBGL = device.createBindGroupLayout({
+    entries: [
+      { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
+      { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
+      { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
+    ]
+  });
+  const reducePipeline = device.createComputePipeline({
+    layout: device.createPipelineLayout({ bindGroupLayouts: [reduceBGL] }),
+    compute: { module: reduceShaderModule, entryPoint: 'main' }
+  });
+  const reduceBG = [
+    device.createBindGroup({ layout: reduceBGL, entries: [
+      { binding: 0, resource: { buffer: bufferB } },
+      { binding: 1, resource: { buffer: reduceOutBuffer } },
+      { binding: 2, resource: { buffer: reduceParamsBuffer } },
+    ]}),
+    device.createBindGroup({ layout: reduceBGL, entries: [
+      { binding: 0, resource: { buffer: bufferA } },
+      { binding: 1, resource: { buffer: reduceOutBuffer } },
+      { binding: 2, resource: { buffer: reduceParamsBuffer } },
+    ]}),
+  ];
+  device.queue.writeBuffer(reduceParamsBuffer, 0, new Uint32Array([count]));
 
   const renderBGL = device.createBindGroupLayout({
     entries: [
@@ -1026,12 +1072,17 @@ function createPhysicsSimulation() {
 
   let pingPong = 0;
   const depthRef: DepthRef = {};
+  // [LAW:one-source-of-truth] Disk normal is owned here; smoothed copy is the only thing the shader ever sees.
+  const diskNormal: [number, number, number] = [0, 1, 0];
+  let pendingMap = false;
+  const DISK_NORMAL_SMOOTH = 0.02;
+  const DISK_L_MIN = 1e-4;
 
   return {
     compute(encoder: GPUCommandEncoder) {
       const p = state.physics;
       const m = state.mouse;
-      const paramsData = new ArrayBuffer(48);
+      const paramsData = new ArrayBuffer(96);
       const f32 = new Float32Array(paramsData);
       const u32 = new Uint32Array(paramsData);
       f32[0] = 0.016; f32[1] = p.G * 0.001; f32[2] = p.softening; f32[3] = p.damping;
@@ -1042,6 +1093,16 @@ function createPhysicsSimulation() {
       f32[9] = m.down ? m.worldY : 0.0;
       f32[10] = m.down ? m.worldZ : 0.0;
       f32[11] = m.down ? 1.0 : 0.0;
+      // diskNormal at offsets 12..14, pad at 15
+      f32[12] = diskNormal[0]; f32[13] = diskNormal[1]; f32[14] = diskNormal[2];
+      // disk gain sliders 16..22, must match Params struct order in nbody.compute.wgsl
+      f32[16] = p.diskVertDamp ?? 0;
+      f32[17] = p.diskRadDamp ?? 0;
+      f32[18] = p.diskTangGain ?? 0;
+      f32[19] = p.diskVertSpring ?? 0;
+      f32[20] = p.diskAlignGain ?? 0;
+      f32[21] = p.interactionStrength ?? 1;
+      f32[22] = p.diskTangSpeed ?? 0.5;
       device.queue.writeBuffer(paramsBuffer, 0, new Uint8Array(paramsData));
 
       const pass = encoder.beginComputePass();
@@ -1049,6 +1110,38 @@ function createPhysicsSimulation() {
       pass.setBindGroup(0, computeBG[pingPong]);
       pass.dispatchWorkgroups(Math.ceil(count / 64));
       pass.end();
+
+      // Reduction reads the freshly-written buffer (= input to next main pass).
+      const nextPing = 1 - pingPong;
+      const reducePass = encoder.beginComputePass();
+      reducePass.setPipeline(reducePipeline);
+      reducePass.setBindGroup(0, reduceBG[nextPing]);
+      reducePass.dispatchWorkgroups(1);
+      reducePass.end();
+
+      if (!pendingMap) {
+        encoder.copyBufferToBuffer(reduceOutBuffer, 0, reduceStaging, 0, 16);
+        pendingMap = true;
+        device.queue.onSubmittedWorkDone().then(() => {
+          reduceStaging.mapAsync(GPUMapMode.READ).then(() => {
+            const data = new Float32Array(reduceStaging.getMappedRange().slice(0));
+            reduceStaging.unmap();
+            const lx = data[0], ly = data[1], lz = data[2];
+            const lLen = Math.sqrt(lx * lx + ly * ly + lz * lz);
+            // [LAW:dataflow-not-control-flow] When |L| is below threshold, keep the previous normal — never overwrite with garbage.
+            if (lLen > DISK_L_MIN) {
+              const nx = lx / lLen, ny = ly / lLen, nz = lz / lLen;
+              const sx = diskNormal[0] + (nx - diskNormal[0]) * DISK_NORMAL_SMOOTH;
+              const sy = diskNormal[1] + (ny - diskNormal[1]) * DISK_NORMAL_SMOOTH;
+              const sz = diskNormal[2] + (nz - diskNormal[2]) * DISK_NORMAL_SMOOTH;
+              const sLen = Math.sqrt(sx * sx + sy * sy + sz * sz) || 1;
+              diskNormal[0] = sx / sLen; diskNormal[1] = sy / sLen; diskNormal[2] = sz / sLen;
+            }
+            pendingMap = false;
+          }).catch(() => { pendingMap = false; });
+        });
+      }
+
       pingPong = 1 - pingPong;
     },
 
@@ -1079,6 +1172,7 @@ function createPhysicsSimulation() {
     destroy() {
       bufferA.destroy(); bufferB.destroy();
       paramsBuffer.destroy(); cameraBuffer.destroy();
+      reduceParamsBuffer.destroy(); reduceOutBuffer.destroy(); reduceStaging.destroy();
       destroyDepthRef(depthRef);
     }
   };

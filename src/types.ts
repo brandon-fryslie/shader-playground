@@ -31,8 +31,10 @@ export interface PhysicsParams {
   diskVertDamp: number;
   diskRadDamp: number;
   diskTangGain: number;
+  diskTangSpeed: number;
   diskVertSpring: number;
   diskAlignGain: number;
+  interactionStrength: number;
 }
 
 export interface FluidParams {
