@@ -35,6 +35,7 @@ export interface FluidParams {
   viscosity: number;
   diffusionRate: number;
   forceStrength: number;
+  volumeScale: number;
   dyeMode: DyeMode;
   jacobiIterations: number;
 }

@@ -15,7 +15,7 @@ struct FluidRenderParams {
   simRes: f32,
   gridRes: f32,
   heightScale: f32,
-  _pad: f32,
+  worldSize: f32,
 }
 
 @group(0) @binding(0) var<storage, read> dye: array<vec4f>;
@@ -27,82 +27,125 @@ struct VSOut {
   @location(0) uv: vec2f,
   @location(1) normal: vec3f,
   @location(2) worldPos: vec3f,
+  @location(3) density: f32,
 }
 
-fn sampleHeight(u: f32, v: f32) -> f32 {
+fn sampleDye(u: f32, v: f32) -> vec4f {
   let res = i32(params.simRes);
   let x = clamp(i32(u * f32(res)), 0, res - 1);
   let y = clamp(i32(v * f32(res)), 0, res - 1);
-  // Height comes from dye density (alpha), not color magnitude — the alpha
-  // channel is the mode-invariant splat amount stored in fluid.forces.wgsl,
-  // so single/rainbow/temperature dye modes all produce the same surface
-  // height for the same amount of injected dye.
-  let d = dye[y * res + x];
-  return d.a * params.heightScale;
+  return dye[y * res + x];
+}
+
+fn sampleDensity(u: f32, v: f32) -> f32 {
+  // [LAW:one-source-of-truth] Density comes solely from dye.a (the mode-invariant
+  // splat amount written by fluid.forces.wgsl). Mixing length(d.rgb) here makes
+  // surface height depend on dye color, so single/rainbow/temperature presets
+  // would render at different thicknesses for the same injected density.
+  let d = sampleDye(u, v);
+  let raw = clamp(d.a * 0.14, 0.0, 2.5);
+  return 1.0 - exp(-raw * 1.35);
+}
+
+fn spectralThemeColor(uv: vec2f, worldPos: vec3f, dyeColor: vec3f, density: f32, camera: Camera) -> vec3f {
+  let ribbon = 0.5 + 0.5 * sin(worldPos.x * 3.4 + worldPos.z * 2.8 + density * 4.0);
+  let cross = 0.5 + 0.5 * sin((uv.x - uv.y) * 12.0 + worldPos.y * 6.0);
+  let dyeEnergy = clamp(dot(dyeColor, vec3f(0.3333)), 0.0, 1.0);
+  let warm = mix(camera.secondary, camera.accent, cross);
+  let cool = mix(camera.primary, camera.secondary, ribbon);
+  let spectral = mix(cool, warm, 0.45 + 0.35 * ribbon);
+  let dyeTint = mix(dyeColor, vec3f(dyeColor.b, dyeColor.r, dyeColor.g), cross * 0.55);
+  return mix(spectral, dyeTint, 0.35 + dyeEnergy * 0.4);
+}
+
+fn cubeCorner(vid: u32) -> vec3f {
+  let corners = array<vec3f, 36>(
+    vec3f(-1.0, -1.0,  1.0), vec3f( 1.0, -1.0,  1.0), vec3f(-1.0,  1.0,  1.0),
+    vec3f(-1.0,  1.0,  1.0), vec3f( 1.0, -1.0,  1.0), vec3f( 1.0,  1.0,  1.0),
+    vec3f( 1.0, -1.0, -1.0), vec3f(-1.0, -1.0, -1.0), vec3f( 1.0,  1.0, -1.0),
+    vec3f( 1.0,  1.0, -1.0), vec3f(-1.0, -1.0, -1.0), vec3f(-1.0,  1.0, -1.0),
+    vec3f(-1.0, -1.0, -1.0), vec3f(-1.0, -1.0,  1.0), vec3f(-1.0,  1.0, -1.0),
+    vec3f(-1.0,  1.0, -1.0), vec3f(-1.0, -1.0,  1.0), vec3f(-1.0,  1.0,  1.0),
+    vec3f( 1.0, -1.0,  1.0), vec3f( 1.0, -1.0, -1.0), vec3f( 1.0,  1.0,  1.0),
+    vec3f( 1.0,  1.0,  1.0), vec3f( 1.0, -1.0, -1.0), vec3f( 1.0,  1.0, -1.0),
+    vec3f(-1.0,  1.0,  1.0), vec3f( 1.0,  1.0,  1.0), vec3f(-1.0,  1.0, -1.0),
+    vec3f(-1.0,  1.0, -1.0), vec3f( 1.0,  1.0,  1.0), vec3f( 1.0,  1.0, -1.0),
+    vec3f(-1.0, -1.0, -1.0), vec3f( 1.0, -1.0, -1.0), vec3f(-1.0, -1.0,  1.0),
+    vec3f(-1.0, -1.0,  1.0), vec3f( 1.0, -1.0, -1.0), vec3f( 1.0, -1.0,  1.0)
+  );
+  return corners[vid];
+}
+
+fn cubeNormal(vid: u32) -> vec3f {
+  let normals = array<vec3f, 36>(
+    vec3f( 0.0,  0.0,  1.0), vec3f( 0.0,  0.0,  1.0), vec3f( 0.0,  0.0,  1.0),
+    vec3f( 0.0,  0.0,  1.0), vec3f( 0.0,  0.0,  1.0), vec3f( 0.0,  0.0,  1.0),
+    vec3f( 0.0,  0.0, -1.0), vec3f( 0.0,  0.0, -1.0), vec3f( 0.0,  0.0, -1.0),
+    vec3f( 0.0,  0.0, -1.0), vec3f( 0.0,  0.0, -1.0), vec3f( 0.0,  0.0, -1.0),
+    vec3f(-1.0,  0.0,  0.0), vec3f(-1.0,  0.0,  0.0), vec3f(-1.0,  0.0,  0.0),
+    vec3f(-1.0,  0.0,  0.0), vec3f(-1.0,  0.0,  0.0), vec3f(-1.0,  0.0,  0.0),
+    vec3f( 1.0,  0.0,  0.0), vec3f( 1.0,  0.0,  0.0), vec3f( 1.0,  0.0,  0.0),
+    vec3f( 1.0,  0.0,  0.0), vec3f( 1.0,  0.0,  0.0), vec3f( 1.0,  0.0,  0.0),
+    vec3f( 0.0,  1.0,  0.0), vec3f( 0.0,  1.0,  0.0), vec3f( 0.0,  1.0,  0.0),
+    vec3f( 0.0,  1.0,  0.0), vec3f( 0.0,  1.0,  0.0), vec3f( 0.0,  1.0,  0.0),
+    vec3f( 0.0, -1.0,  0.0), vec3f( 0.0, -1.0,  0.0), vec3f( 0.0, -1.0,  0.0),
+    vec3f( 0.0, -1.0,  0.0), vec3f( 0.0, -1.0,  0.0), vec3f( 0.0, -1.0,  0.0)
+  );
+  return normals[vid];
 }
 
 @vertex
 fn vs_main(@builtin(vertex_index) vid: u32, @builtin(instance_index) iid: u32) -> VSOut {
-  // Each instance is one cell of the grid. vid selects triangle vertex (0-5).
   let gr = u32(params.gridRes);
   let cx = iid % gr;
   let cy = iid / gr;
 
-  // 6 vertices per quad (2 triangles)
-  let quadVerts = array<vec2u, 6>(
-    vec2u(0,0), vec2u(1,0), vec2u(0,1),
-    vec2u(0,1), vec2u(1,0), vec2u(1,1)
+  let u = (f32(cx) + 0.5) / f32(gr);
+  let v = (f32(cy) + 0.5) / f32(gr);
+  let density = sampleDensity(u, v);
+
+  let cellSize = params.worldSize / f32(gr);
+  let halfWidth = cellSize * mix(0.92, 1.34, density);
+  // [LAW:one-source-of-truth] Render height is derived from the same density scalar for both the permanent floor and dynamic variation.
+  let liftedDensity = pow(density, 0.58);
+  let totalHeight = 0.14 + liftedDensity * params.heightScale * 2.6;
+  let halfHeight = totalHeight * 0.5;
+  let centerY = halfHeight;
+
+  let local = cubeCorner(vid);
+  let worldPos = vec3f(
+    (u - 0.5) * params.worldSize + local.x * halfWidth,
+    centerY + local.y * halfHeight,
+    (v - 0.5) * params.worldSize + local.z * halfWidth
   );
-  let corner = quadVerts[vid];
-  let gx = cx + corner.x;
-  let gy = cy + corner.y;
-
-  let u = f32(gx) / f32(gr);
-  let v = f32(gy) / f32(gr);
-  let h = sampleHeight(u, v);
-
-  // World position: x/z from -2 to 2, y = height
-  let worldX = (u - 0.5) * 4.0;
-  let worldZ = (v - 0.5) * 4.0;
-  let worldY = h;
-
-  // Compute normal from height differences
-  let eps = 1.0 / f32(gr);
-  let hL = sampleHeight(u - eps, v);
-  let hR = sampleHeight(u + eps, v);
-  let hD = sampleHeight(u, v - eps);
-  let hU = sampleHeight(u, v + eps);
-  let nx = (hL - hR) * 2.0;
-  let nz = (hD - hU) * 2.0;
-  let n = normalize(vec3f(nx, 1.0, nz));
 
   var out: VSOut;
-  out.pos = camera.proj * camera.view * vec4f(worldX, worldY, worldZ, 1.0);
+  out.pos = camera.proj * camera.view * vec4f(worldPos, 1.0);
   out.uv = vec2f(u, v);
-  out.normal = n;
-  out.worldPos = vec3f(worldX, worldY, worldZ);
+  out.normal = cubeNormal(vid);
+  out.worldPos = worldPos;
+  out.density = density;
   return out;
 }
 
 @fragment
-fn fs_main(@location(0) uv: vec2f, @location(1) normal: vec3f, @location(2) worldPos: vec3f) -> @location(0) vec4f {
-  let res = i32(params.simRes);
-  let x = clamp(i32(uv.x * f32(res)), 0, res - 1);
-  let y = clamp(i32(uv.y * f32(res)), 0, res - 1);
-  let d = dye[y * res + x];
-
-  // Phong shading on the fluid surface
-  let lightDir = normalize(vec3f(1.0, 3.0, 1.5));
+fn fs_main(
+  @location(0) uv: vec2f,
+  @location(1) normal: vec3f,
+  @location(2) worldPos: vec3f,
+  @location(3) density: f32
+) -> @location(0) vec4f {
+  let d = sampleDye(uv.x, uv.y);
   let n = normalize(normal);
-  let ambient = 0.15;
+  let lightDir = normalize(vec3f(1.0, 2.5, 1.3));
   let diffuse = max(dot(n, lightDir), 0.0);
   let viewDir = normalize(camera.eye - worldPos);
-  let halfDir = normalize(lightDir + viewDir);
-  let spec = pow(max(dot(n, halfDir), 0.0), 64.0);
+  let rim = pow(1.0 - max(dot(n, viewDir), 0.0), 2.5);
+  let spec = pow(max(dot(n, normalize(lightDir + viewDir)), 0.0), 24.0);
 
-  // Base color from dye, tinted with theme
-  let dyeColor = d.rgb + camera.primary * 0.1;
-  let lit = dyeColor * (ambient + diffuse * 0.8) + vec3f(1.0) * spec * 0.3;
-
+  // [LAW:one-source-of-truth] The richer palette is derived from the existing dye field plus theme colors; no parallel color state is introduced.
+  let dyeColor = min(d.rgb, vec3f(1.0));
+  let baseColor = spectralThemeColor(uv, worldPos, dyeColor, density, camera);
+  let lit = baseColor * (0.16 + diffuse * 0.78) + camera.accent * rim * 0.16 + vec3f(1.0) * spec * 0.2;
   return vec4f(lit, 1.0);
 }

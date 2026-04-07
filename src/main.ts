@@ -29,7 +29,7 @@ const DEFAULTS: ModeParamsMap = {
     count: 2000, G: 1.0, softening: 0.5, damping: 1.0, coreOrbit: 0.28, distribution: 'disk'
   },
   fluid: {
-    resolution: 256, viscosity: 0.1, diffusionRate: 0.001, forceStrength: 100,
+    resolution: 256, viscosity: 0.1, diffusionRate: 0.001, forceStrength: 100, volumeScale: 1.5,
     dyeMode: 'rainbow', jacobiIterations: 40
   },
   parametric: {
@@ -58,9 +58,9 @@ const PRESETS: Record<SimMode, Record<string, Record<string, number | string>>> 
   },
   fluid: {
     'Default':   { ...DEFAULTS.fluid },
-    'Thick':     { resolution: 256, viscosity: 0.8, diffusionRate: 0.005, forceStrength: 200, dyeMode: 'rainbow', jacobiIterations: 40 },
-    'Turbulent': { resolution: 512, viscosity: 0.01, diffusionRate: 0.0001, forceStrength: 300, dyeMode: 'rainbow', jacobiIterations: 60 },
-    'Ink Drop':  { resolution: 256, viscosity: 0.3, diffusionRate: 0.0, forceStrength: 50, dyeMode: 'single', jacobiIterations: 40 },
+    'Thick':     { resolution: 256, viscosity: 0.8, diffusionRate: 0.005, forceStrength: 200, volumeScale: 1.8, dyeMode: 'rainbow', jacobiIterations: 40 },
+    'Turbulent': { resolution: 512, viscosity: 0.01, diffusionRate: 0.0001, forceStrength: 300, volumeScale: 1.3, dyeMode: 'rainbow', jacobiIterations: 60 },
+    'Ink Drop':  { resolution: 256, viscosity: 0.3, diffusionRate: 0.0, forceStrength: 50, volumeScale: 2.1, dyeMode: 'single', jacobiIterations: 40 },
   },
   parametric: {
     'Default':       { shape: 'torus',   scale: 1.0, p1Min: 0.7,  p1Max: 1.3,  p1Rate: 0.3,  p2Min: 0.2,  p2Max: 0.55, p2Rate: 0.5,  p3Min: 0.15, p3Max: 0.45, p3Rate: 0.7,  p4Min: 0.5, p4Max: 2.0, p4Rate: 0.4,  twistMin: 0,   twistMax: 0.4, twistRate: 0.15 },
@@ -108,6 +108,7 @@ const PARAM_DEFS: Record<SimMode, ParamSection[]> = {
       { key: 'jacobiIterations', label: 'Iterations', min: 10, max: 80, step: 5 },
     ]},
     { section: 'Appearance', params: [
+      { key: 'volumeScale', label: 'Volume', min: 0.4, max: 3.0, step: 0.05 },
       { key: 'dyeMode', label: 'Dye Mode', type: 'dropdown', options: ['rainbow', 'single', 'temperature'] },
     ]},
   ],
@@ -257,6 +258,8 @@ const state: AppState = {
 
 
 const FLUID_GRID_RES = 96; // tessellation resolution for 3D fluid mesh
+// [LAW:one-source-of-truth] Fluid world size is declared once so rendering and interaction use identical bounds.
+const FLUID_WORLD_SIZE = 4; // full width/depth of the fluid volume in world units
 
 // Camera uniform buffer layout for stereo XR rendering.
 // Each view's 192-byte Camera struct is placed at a 256-byte aligned offset so
@@ -1084,6 +1087,7 @@ function createPhysicsSimulation() {
 // --- 5c: FLUID DYNAMICS ---
 
 function createFluidSimulation() {
+  const FLUID_DT = 0.22;
   const res = state.fluid.resolution;
   const cellCount = res * res;
   const velBytes = cellCount * 8;  // vec2f per cell
@@ -1102,31 +1106,13 @@ function createFluidSimulation() {
   const paramsBuffer = device.createBuffer({ size: 48, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
   const cameraBuffer = device.createBuffer({ size: CAMERA_STRIDE * 2, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
 
-  // Seed initial dye with theme-colored splats
   const initDye = new Float32Array(cellCount * 4);
-  const tc = getThemeColors();
-  const splats = [
-    { x: 0.3, y: 0.3, r: tc.primary[0], g: tc.primary[1], b: tc.primary[2] },
-    { x: 0.7, y: 0.7, r: tc.secondary[0], g: tc.secondary[1], b: tc.secondary[2] },
-    { x: 0.5, y: 0.5, r: tc.accent[0], g: tc.accent[1], b: tc.accent[2] },
-    { x: 0.2, y: 0.7, r: tc.primary[0] * 0.8, g: tc.accent[1], b: tc.secondary[2] },
-    { x: 0.8, y: 0.3, r: tc.accent[0], g: tc.primary[1], b: tc.secondary[2] },
-  ];
   // Also seed initial velocity for motion
   const initVel = new Float32Array(cellCount * 2);
   for (let y = 0; y < res; y++) {
     for (let x = 0; x < res; x++) {
       const i = y * res + x;
       const fx = x / res, fy = y / res;
-      for (const s of splats) {
-        const dx = fx - s.x, dy = fy - s.y;
-        const d2 = dx * dx + dy * dy;
-        const splat = Math.exp(-d2 / (2 * 0.02));
-        initDye[i * 4]     += s.r * splat;
-        initDye[i * 4 + 1] += s.g * splat;
-        initDye[i * 4 + 2] += s.b * splat;
-        initDye[i * 4 + 3] += splat;
-      }
       // Swirl velocity
       const cx = fx - 0.5, cy = fy - 0.5;
       initVel[i * 2]     = -cy * 3.0;
@@ -1251,9 +1237,10 @@ function createFluidSimulation() {
     { binding: 2, resource: { buffer: pressA } }, { binding: 3, resource: { buffer: paramsBuffer } },
   ]});
 
-  // Render pipeline — tessellated grid with height displacement
+  // [LAW:one-source-of-truth] The dye buffer remains the canonical fluid state; the volumetric look is derived entirely in the render shader.
+  // Render pipeline — extruded voxel columns derived from the 2D fluid field
   const fluidRenderParamsBuffer = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-  device.queue.writeBuffer(fluidRenderParamsBuffer, 0, new Float32Array([res, FLUID_GRID_RES, 1.5, 0]));
+  device.queue.writeBuffer(fluidRenderParamsBuffer, 0, new Float32Array([res, FLUID_GRID_RES, state.fluid.volumeScale, FLUID_WORLD_SIZE]));
 
   const renderBGL = device.createBindGroupLayout({
     entries: [
@@ -1282,6 +1269,7 @@ function createFluidSimulation() {
 
   const workgroups = Math.ceil(res / 8);
   const depthRef: DepthRef = {};
+  let simulationTime = 0;
 
   // Buffer management strategy: always keep canonical data in A buffers.
   // Each stage reads A → writes B, then we copy B → A.
@@ -1292,10 +1280,11 @@ function createFluidSimulation() {
     compute(encoder: GPUCommandEncoder) {
       const p = state.fluid;
       const dyeModeNum = p.dyeMode === 'rainbow' ? 0 : p.dyeMode === 'single' ? 1 : 2;
+      simulationTime += 0.016;
       const paramsData = new Float32Array([
-        0.5, p.viscosity, p.diffusionRate, p.forceStrength,
+        FLUID_DT, p.viscosity, p.diffusionRate, p.forceStrength,
         res, state.mouse.x, state.mouse.y, state.mouse.dx,
-        state.mouse.dy, state.mouse.down ? 1.0 : 0.0, dyeModeNum, 0
+        state.mouse.dy, state.mouse.down ? 1.0 : 0.0, dyeModeNum, simulationTime
       ]);
       device.queue.writeBuffer(paramsBuffer, 0, paramsData);
 
@@ -1367,6 +1356,7 @@ function createFluidSimulation() {
     render(encoder: GPUCommandEncoder, textureView: GPUTextureView, viewport: number[] | null, viewIndex = 0) {
       const aspect = viewport ? (viewport[2] / viewport[3]) : (canvas.width / canvas.height);
       device.queue.writeBuffer(cameraBuffer, viewIndex * CAMERA_STRIDE, getCameraUniformData(aspect));
+      device.queue.writeBuffer(fluidRenderParamsBuffer, 0, new Float32Array([res, FLUID_GRID_RES, state.fluid.volumeScale, FLUID_WORLD_SIZE]));
 
       const pass = encoder.beginRenderPass({
         colorAttachments: [getColorAttachment(depthRef, textureView, viewport)],
@@ -1382,7 +1372,7 @@ function createFluidSimulation() {
 
       pass.setPipeline(renderPipeline);
       pass.setBindGroup(0, renderBGs[viewIndex]);
-      pass.draw(6, FLUID_GRID_RES * FLUID_GRID_RES);
+      pass.draw(36, FLUID_GRID_RES * FLUID_GRID_RES);
       pass.end();
     },
 
@@ -1860,7 +1850,7 @@ function screenToWorld(mx: number, my: number) {
   return [dir[0] * spread, dir[1] * spread, dir[2] * spread];
 }
 
-// Unproject screen coords onto the fluid plane (y=0, x/z from -2 to 2).
+// Unproject screen coords onto the fluid plane (y=0) using the shared fluid footprint.
 // Returns [u, v] in 0-1 range, or null if ray misses.
 function screenToFluidUV(mx: number, my: number) {
   const { eye, dir } = screenRay(mx, my);
@@ -1869,17 +1859,20 @@ function screenToFluidUV(mx: number, my: number) {
   if (t < 0) return null;
   const hitX = eye[0] + dir[0] * t;
   const hitZ = eye[2] + dir[2] * t;
-  // Fluid plane goes from (-2, 0, -2) to (2, 0, 2) → UV 0-1
+  const halfSize = FLUID_WORLD_SIZE * 0.5;
+  if (Math.abs(hitX) > halfSize || Math.abs(hitZ) > halfSize) return null;
   return [
-    Math.max(0, Math.min(1, (hitX + 2) / 4)),
-    Math.max(0, Math.min(1, (hitZ + 2) / 4)),
+    (hitX + halfSize) / FLUID_WORLD_SIZE,
+    (hitZ + halfSize) / FLUID_WORLD_SIZE,
   ];
 }
 
 function worldToFluidUV(worldPoint: number[]) {
+  const halfSize = FLUID_WORLD_SIZE * 0.5;
+  if (Math.abs(worldPoint[0]) > halfSize || Math.abs(worldPoint[2]) > halfSize) return null;
   return [
-    Math.max(0, Math.min(1, (worldPoint[0] + 2) / 4)),
-    Math.max(0, Math.min(1, (worldPoint[2] + 2) / 4)),
+    (worldPoint[0] + halfSize) / FLUID_WORLD_SIZE,
+    (worldPoint[2] + halfSize) / FLUID_WORLD_SIZE,
   ];
 }
 
@@ -1926,16 +1919,27 @@ function setupMouseControls() {
     state.mouse.dy = 0;
 
     if (interacting) {
-      state.mouse.down = true;
-      const wp = screenToWorld(mx, my);
-      state.mouse.worldX = wp[0];
-      state.mouse.worldY = wp[1];
-      state.mouse.worldZ = wp[2];
       // Set initial position in correct coord system for fluid
       if (state.mode === 'fluid') {
         const uv = screenToFluidUV(mx, my);
-        if (uv) { state.mouse.x = uv[0]; state.mouse.y = uv[1]; }
+        // [LAW:dataflow-not-control-flow] Out-of-bounds hits become null data and flow through the same interaction path as inactive input instead of being clamped to the edge.
+        if (!uv) {
+          setSimulationInteractionInactive();
+        } else {
+          state.mouse.down = true;
+          const wp = screenToWorld(mx, my);
+          state.mouse.worldX = wp[0];
+          state.mouse.worldY = wp[1];
+          state.mouse.worldZ = wp[2];
+          state.mouse.x = uv[0];
+          state.mouse.y = uv[1];
+        }
       } else {
+        state.mouse.down = true;
+        const wp = screenToWorld(mx, my);
+        state.mouse.worldX = wp[0];
+        state.mouse.worldY = wp[1];
+        state.mouse.worldZ = wp[2];
         state.mouse.x = mx; state.mouse.y = my;
       }
     } else {
@@ -1955,23 +1959,29 @@ function setupMouseControls() {
     const interact = interacting || e.ctrlKey || e.metaKey;
 
     if (interact) {
-      // Sim interaction (ctrl+drag)
-      state.mouse.down = true;
-      const wp = screenToWorld(mx, my);
-      state.mouse.worldX = wp[0];
-      state.mouse.worldY = wp[1];
-      state.mouse.worldZ = wp[2];
-
       // For fluid: ray-cast onto y=0 plane for camera-correct coordinates
       if (state.mode === 'fluid') {
         const uv = screenToFluidUV(mx, my);
-        if (uv) {
+        if (!uv) {
+          setSimulationInteractionInactive();
+        } else {
+          state.mouse.down = true;
+          const wp = screenToWorld(mx, my);
+          state.mouse.worldX = wp[0];
+          state.mouse.worldY = wp[1];
+          state.mouse.worldZ = wp[2];
           state.mouse.dx = (uv[0] - state.mouse.x) * 10;
           state.mouse.dy = (uv[1] - state.mouse.y) * 10;
           state.mouse.x = uv[0];
           state.mouse.y = uv[1];
         }
       } else {
+        // Sim interaction (ctrl+drag)
+        state.mouse.down = true;
+        const wp = screenToWorld(mx, my);
+        state.mouse.worldX = wp[0];
+        state.mouse.worldY = wp[1];
+        state.mouse.worldZ = wp[2];
         state.mouse.dx = (mx - state.mouse.x) * 10;
         state.mouse.dy = (my - state.mouse.y) * 10;
         state.mouse.x = mx;
@@ -2060,6 +2070,7 @@ function describeParam(_mode: string, key: string, val: number | string): string
     viscosity: () => n > 0.5 ? `thick fluid (viscosity ${val})` : n < 0.05 ? `thin fluid (viscosity ${val})` : `viscosity ${val}`,
     diffusionRate: () => `diffusion ${val}`,
     forceStrength: () => n > 200 ? `strong forces (${val})` : `force strength ${val}`,
+    volumeScale: () => n > 2 ? `large volume (${val})` : n < 1 ? `compact volume (${val})` : `volume scale ${val}`,
     dyeMode: () => `${val} dye`,
     jacobiIterations: () => `${val} solver iterations`,
     shape: () => `${val} shape`,
@@ -2346,6 +2357,11 @@ function updateXRSimulationInteraction(frame: XRFrame) {
 
   if (state.mode === 'fluid') {
     const uv = worldToFluidUV(worldPoint);
+    if (!uv) {
+      setSimulationInteractionInactive();
+      xrInteractionHasSample = false;
+      return;
+    }
     state.mouse.dx = xrInteractionHasSample ? (uv[0] - state.mouse.x) * 10 : 0;
     state.mouse.dy = xrInteractionHasSample ? (uv[1] - state.mouse.y) * 10 : 0;
     state.mouse.x = uv[0];
