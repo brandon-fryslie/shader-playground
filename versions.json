@@ -2,6 +2,210 @@
   "schema": 2,
   "versions": [
     {
+      "version": "r28-6cae4e1",
+      "ref": "refs/heads/master",
+      "sha": "6cae4e1dbbbc7b5a17c344c588cfa3d69bbe8ac8",
+      "timestamp": "2026-04-07T21:29:56.293Z",
+      "commits": [
+        {
+          "sha": "6cae4e1dbbbc7b5a17c344c588cfa3d69bbe8ac8",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-07T15:29:34-06:00",
+          "message": "improvements and tweaks\n"
+        },
+        {
+          "sha": "fd4f15414b3638d3a94292bb068fc2f2a8d27577",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-07T05:20:51-06:00",
+          "message": "nbody: anisotropic disk recovery with tangential nudge\n\nAdds the JS-side wiring for the disk-recovery layer in the n-body\nshader: 5 disk gain sliders + interaction-strength + orbit-speed\nsliders, async angular-momentum readback for disk-normal estimation,\nand a 96-byte Params layout. Defaults are tuned so disks emerge over\n~5-15s without snapping; without the tangential term, damping alone\njust collapsed bodies inward.\n"
+        },
+        {
+          "sha": "787b69afdbe75ac90520a2ec8626f76d3036cffc",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-07T05:16:04-06:00",
+          "message": "wip: nbody disk physics tuning + boids tweaks\n\nAdds interactionStrength and diskTangSpeed knobs to nbody params,\nintroduces nbody.reduce.wgsl, and extends FluidParams type with disk\ndamping/spring/alignment fields. Boids compute shader tweaks as well.\n"
+        },
+        {
+          "sha": "57fd68fec8bf5f4848f29be57bd8067901588a60",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-07T05:14:33-06:00",
+          "message": "Merge remote-tracking branch 'origin/master' into crazy_grav\n\n# Conflicts:\n#\tsrc/shaders/fluid.render.wgsl\n"
+        },
+        {
+          "sha": "57cec3d27cfb1a6e429bf8595b2054f41d86db6b",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-07T05:02:22-06:00",
+          "message": "fix(fluid): use dye alpha for surface height\n\nRender shader was computing height from length(d.rgb), which scales\nwith the dye color vector's magnitude. Single mode (~1.12), rainbow\n(~1.73), and temperature dyes therefore produced visibly different\nsurface heights for the same injected density. Use d.a — the\nmode-invariant splat amount written by fluid.forces.wgsl — so all\npresets render at the same scale.\n"
+        },
+        {
+          "sha": "60daed80584462e1d0cfc7604c9419aadfabb732",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-06T22:05:36-06:00",
+          "message": "ci: use r<count>-<sha> slots for master deploys\n\nEach push to master now gets a persistent, monotonically increasing\nversion slot like r247-abc1234 instead of overwriting /master/. Tags\nand PRs keep their existing slot semantics.\n"
+        },
+        {
+          "sha": "175a0d6ab80033db1143a3de5f179dbeb9d27aa3",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-06T19:47:23-06:00",
+          "message": "ci: add gh-pages-multiplexer for versioned deploys\n\nReplaces actions/deploy-pages with brandon-fryslie/gh-pages-multiplexer.\nBuilds with VITE_BASE matching the version slot so vite emits correct\nabsolute asset paths; multiplexer publishes into per-ref subdirectories\non gh-pages and generates an index page. PRs get their own pr-N slot.\n"
+        },
+        {
+          "sha": "2435974946cb8fb929c3d2eb9bc859b0c969816a",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-03T07:48:50-06:00",
+          "message": "add script for screenshot\n"
+        },
+        {
+          "sha": "565fbd5081c557b18276975e8ee5ce4e807a05eb",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-03T07:16:52-06:00",
+          "message": "crazy grav\n"
+        },
+        {
+          "sha": "5267177ced066832d771578c3aaaf7ea9d9e89b7",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-03T06:24:22-06:00",
+          "message": "Animate theme transitions without simulation resets\n"
+        },
+        {
+          "sha": "0045073fb638ea386fca78b4651fa889dc53399c",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-03T06:14:03-06:00",
+          "message": "Add walls\n"
+        },
+        {
+          "sha": "7814d7b8511a2e32188a4b2eadd7ffcbe3c5afce",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-03T07:16:52-06:00",
+          "message": "crazy grav\n"
+        },
+        {
+          "sha": "6b42098ab12a062cefab5f1452bfdc324410c66f",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-03T06:50:20-06:00",
+          "message": "Tune fluid volume rendering and interaction\n"
+        },
+        {
+          "sha": "113fc66dafcd9c794896778cb79383d013da9af9",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-03T06:24:22-06:00",
+          "message": "Animate theme transitions without simulation resets\n"
+        },
+        {
+          "sha": "e59f67a93b85c8d47c1492b28154d38ab26593f5",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-03T06:14:03-06:00",
+          "message": "Add walls\n"
+        },
+        {
+          "sha": "c8f5a24a83e61041c21db5dd2e4285ad439d2e3a",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-03T05:47:19-06:00",
+          "message": "Remove MSAA from XR render. Improve shapes shader\n"
+        },
+        {
+          "sha": "e51df3a679c28259714c52ada9379ade4564d01d",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-02T18:51:08-06:00",
+          "message": "Add MSAA render attachments\n"
+        },
+        {
+          "sha": "f9b60232155cb818b447d170f2ac191ef5252bd4",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-02T18:49:17-06:00",
+          "message": "Fix XR stereo: use per-view camera buffer offsets instead of overwriting\n\nRoot cause: sim.render() called device.queue.writeBuffer(cameraBuffer, 0, ...)\nfor each eye. writeBuffer is a queue operation that executes before any submitted\ncommand buffer — so the right eye's write overwrote the left eye's data, and\nboth render passes used the right eye's view matrix.\n\nFix (proper approach, matching the WebXR barebones sample):\n- Expand all camera buffers to CAMERA_STRIDE * 2 (2 × 256 bytes)\n- Create per-view bind groups for all simulations and the grid renderer,\n  each binding the camera buffer at its eye's 256-byte-aligned offset\n- render() and renderGrid() accept viewIndex (default 0) and write to\n  viewIndex * CAMERA_STRIDE, so left and right eye data coexist in the\n  buffer without conflict\n- Single encoder + single submit preserved — no extra overhead\n"
+        },
+        {
+          "sha": "686361926fabcc89e1b47fb3a8aab464fe28bafb",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-02T18:47:16-06:00",
+          "message": "fix webxr render\n"
+        },
+        {
+          "sha": "9504c67be48935d67ece793175784b79c4ea6841",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-02T18:28:42-06:00",
+          "message": "Move XR viewer back 5m so simulation is in front, not surrounding\n\nApply getOffsetReferenceSpace() after acquiring the reference space to shift\nthe user's reported pose 5 units behind the world origin (z: -5 in WebGL\nforward convention). Simulation geometry at [-2,2]^3 then appears 5m ahead.\n\nFor local-floor, also apply y: +1.6 to raise the reference space to eye level\nso the simulation center is at roughly eye height rather than at the user's feet.\n"
+        },
+        {
+          "sha": "de921097beab0c96d50800cd7114f1774b186e9b",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-02T18:19:11-06:00",
+          "message": "Use npm install instead of npm ci in deploy workflow\n\nVite 8 rolldown has platform-native bindings. Lockfile generated on macOS\narm64 doesn't include Linux x64 emnapi packages CI needs, so npm ci fails.\nnpm install resolves correctly per-platform without lockfile sync errors.\n"
+        },
+        {
+          "sha": "edc4e1b7b2ec9bc0b098015d0eadbb42289be83d",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-02T18:17:15-06:00",
+          "message": "Update package-lock.json to sync with package.json\n"
+        },
+        {
+          "sha": "b04f712f179dfa86c43c338891dd26692e9a9930",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-02T18:16:32-06:00",
+          "message": "Add GitHub Actions workflow to deploy to GitHub Pages\n\nBuilds with VITE_BASE=/shader-playground/ so asset paths resolve correctly\nunder the repo subpath. vite.config.ts reads VITE_BASE from env, defaulting\nto '/' so local dev is unaffected.\n"
+        },
+        {
+          "sha": "94e57d8babf547866fded741e508166a810fbb2b",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-02T18:14:45-06:00",
+          "message": "Simplify XR session config to Safari visionOS only\n\nThis is a Safari/AVP-only demo. Replace the browser-detection waterfall\nwith a single known-working config: webgpu required, layers + local-floor\noptional (Safari accepts layers in updateRenderState without it being required).\n"
+        },
+        {
+          "sha": "c7fb127fb621b80e108ba95f0d48a19a08028244",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-02T18:07:30-06:00",
+          "message": "Clean up WebXR code and add explanatory comments\n\n- Remove debug console.log probes (XRGPUBinding method inspection, per-frame\n  texture/viewport dumps, frame counter guards)\n- Remove xrFrameCount — only existed to gate debug logs\n- Collapse 5-config session waterfall to 3 known-working configs with comment\n  explaining Chrome vs Safari visionOS feature string differences\n- Collapse 4-config layer waterfall to 2 (with/without native scaleFactor)\n- Simplify for-loop to for-of in xrFrame\n- Add comments explaining XRGPUBinding, getViewSubImage, getViewDescriptor,\n  texture array slices, xrCameraOverride seam, and depth fallback\n"
+        },
+        {
+          "sha": "9b7d60f3bdb102a6d49e4452c99d65ed69ce68b2",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-02T18:04:28-06:00",
+          "message": "Add README and ignore .idea/ directory\n\nDocuments setup, Vision Pro HTTPS workflow, and a detailed explanation\nof the WebXR–WebGPU integration (XRGPUBinding, stereo render loop,\ncamera override seam, Safari vs Chrome API differences).\n"
+        },
+        {
+          "sha": "db269aee65202f1a8e138efcc82bd88f0ac588ab",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-03-30T23:31:01-06:00",
+          "message": "Add TypeScript types to all code with strict mode compliance\n\n- Remove @ts-nocheck from main.ts and add full type annotations\n- Install @webgpu/types for WebGPU type definitions\n- Create webxr-gpu.d.ts with WebXR + WebGPU binding types\n- Add ShapeName, Distribution, DyeMode union types to types.ts\n- Add ModeParamsMap type and modeParams() helper for correlated types\n- Type all function signatures, module-level variables, and DOM access\n- Fix initSimAndLoop undefined reference with inline recovery logic\n"
+        },
+        {
+          "sha": "49118cbf06d87969e4a0e5370853d52bd514202f",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-03-30T03:29:19-06:00",
+          "message": "WebGPU compute shader playground with WebXR stereo rendering\n\nSingle-file HTML playground for experimenting with WebGPU compute shaders.\nFour simulation modes (boids, N-body physics, fluid dynamics, parametric\nshapes), each with interactive controls, presets, and real-time parameter\nmodulation. Features include:\n\n- 3D rendering with orbit camera, background reference grid with animated pulses\n- WebXR stereo rendering for Apple Vision Pro (XRGPUBinding path)\n- Color palette system with 10 curated themes from popular editor themes\n- Ctrl+drag interaction (attractor for boids/N-body, dye injection for fluid,\n  surface deformation for parametric shapes)\n- Shader debug panel with live editing and recompilation\n- State persistence to localStorage with Reset All button\n- HTTPS dev server for Vision Pro testing (self-signed cert)\n"
+        }
+      ]
+    },
+    {
       "version": "r27-fd4f154",
       "ref": "refs/heads/master",
       "sha": "fd4f15414b3638d3a94292bb068fc2f2a8d27577",
