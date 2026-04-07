@@ -76,7 +76,10 @@ fn vs_main(@builtin(vertex_index) vid: u32, @builtin(instance_index) iid: u32) -
 @fragment
 fn fs_main(@location(0) uv: vec2f, @location(1) color: vec3f, @location(2) glow: f32) -> @location(0) vec4f {
   let dist = length(uv);
-  let alpha = smoothstep(1.0, 0.3, dist);
+  // smoothstep requires edge0 <= edge1 in WGSL (undefined behavior otherwise),
+  // so we compute the standard form and invert. Result: alpha = 1 at center,
+  // 0 at the outer edge, smoothly fading between dist=0.3 and dist=1.0.
+  let alpha = 1.0 - smoothstep(0.3, 1.0, dist);
   if (alpha < 0.01) { discard; }
   let g = exp(-dist * 2.0);
   // Extra glow ring when under attractor influence

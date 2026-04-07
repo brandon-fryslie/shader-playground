@@ -2397,12 +2397,12 @@ function setSimulationInteractionInactive() {
 function setupMouseControls() {
   const c = canvas;
   let dragging = false;
-  let interacting = false; // ctrl/meta held = sim interaction mode
+  let interacting = false; // plain drag = sim interaction; ctrl/meta = orbit camera
 
   c.addEventListener('pointerdown', (e) => {
     if (state.xrEnabled) return;
     dragging = true;
-    interacting = e.ctrlKey || e.metaKey;
+    interacting = !(e.ctrlKey || e.metaKey);
     const rect = c.getBoundingClientRect();
     const mx = (e.clientX - rect.left) / rect.width;
     const my = 1.0 - (e.clientY - rect.top) / rect.height;
@@ -2446,8 +2446,8 @@ function setupMouseControls() {
     const mx = (e.clientX - rect.left) / rect.width;
     const my = 1.0 - (e.clientY - rect.top) / rect.height;
 
-    // Re-check modifier keys mid-drag
-    const interact = interacting || e.ctrlKey || e.metaKey;
+    // Mode is committed at pointerdown — modifier changes mid-drag are ignored.
+    const interact = interacting;
 
     if (interact) {
       // For fluid: ray-cast onto y=0 plane for camera-correct coordinates
@@ -2467,7 +2467,7 @@ function setupMouseControls() {
           state.mouse.y = uv[1];
         }
       } else {
-        // Sim interaction (ctrl+drag)
+        // Sim interaction (plain drag — no modifier)
         state.mouse.down = true;
         const wp = screenToWorld(mx, my);
         state.mouse.worldX = wp[0];
@@ -2479,7 +2479,7 @@ function setupMouseControls() {
         state.mouse.y = my;
       }
     } else {
-      // Orbit camera (plain drag — all modes)
+      // Orbit camera (cmd/ctrl+drag)
       state.camera.rotY += e.movementX * 0.005;
       state.camera.rotX += e.movementY * 0.005;
       state.camera.rotX = Math.max(-Math.PI * 0.45, Math.min(Math.PI * 0.45, state.camera.rotX));
