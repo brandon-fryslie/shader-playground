@@ -28,6 +28,11 @@ export interface PhysicsParams {
   damping: number;
   coreOrbit: number;
   distribution: Distribution;
+  diskVertDamp: number;
+  diskRadDamp: number;
+  diskTangGain: number;
+  diskVertSpring: number;
+  diskAlignGain: number;
 }
 
 export interface FluidParams {

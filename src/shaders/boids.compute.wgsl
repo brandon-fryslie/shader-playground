@@ -88,15 +88,47 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
     }
   }
 
-  // Attractor force (ctrl+click interaction)
-  if (params.attractorActive > 0.5) {
-    var toAttractor = vec3f(params.attractorX, params.attractorY, params.attractorZ) - me.pos;
-    let aDist = length(toAttractor);
-    if (aDist > 0.01) {
-      toAttractor = normalize(toAttractor) * params.maxSpeed - me.vel;
-      force += limit(toAttractor, params.maxForce) * 3.0;
-    }
-  }
+  // [LAW:dataflow-not-control-flow] Vortex well attractor — always computed, attractorActive scales to zero when inactive.
+  // Three forces create orbital behavior: radial pull, core repulsion, tangential swirl.
+  let attractorPos = vec3f(params.attractorX, params.attractorY, params.attractorZ);
+  let toAttractor = attractorPos - me.pos;
+  let aDist = length(toAttractor) + 0.0001; // epsilon avoids division by zero
+  let aDir = toAttractor / aDist;
+
+  // Tuning constants — relative to maxForce so behavior scales across presets
+  let mf = params.maxForce;
+  const ATTRACT_SCALE = 3.0;       // gravity well depth (multiples of maxForce at softening distance)
+  const ATTRACT_SOFTENING = 0.3;   // prevents singularity in gravity calc
+  const CORE_RADIUS = 0.25;        // repulsion shell radius
+  const CORE_PRESSURE_SCALE = 8.0; // core push strength (multiples of maxForce)
+  const SWIRL_SCALE = 2.4;         // tangential orbit strength (multiples of maxForce)
+  const SWIRL_PEAK_RADIUS = 0.4;   // where swirl is strongest
+  const SWIRL_FALLOFF = 0.8;       // gaussian width of swirl envelope
+  const INFLUENCE_RADIUS = 2.5;    // beyond this, attractor fades to zero
+
+  // 1. Radial pull: inverse-distance with softening
+  let radialPull = mf * ATTRACT_SCALE / (aDist + ATTRACT_SOFTENING);
+
+  // 2. Core repulsion: linear ramp inside core radius prevents singularity
+  let coreRepulsion = max(0.0, CORE_RADIUS - aDist) / CORE_RADIUS * mf * CORE_PRESSURE_SCALE;
+
+  // 3. Net radial force = pull inward minus push outward
+  let radialForce = aDir * (radialPull - coreRepulsion);
+
+  // 4. Tangential swirl: cross with world-up for orbit direction
+  let worldUp = vec3f(0.0, 1.0, 0.0);
+  let worldX = vec3f(1.0, 0.0, 0.0);
+  let swirlAxis = select(worldUp, worldX, abs(dot(aDir, worldUp)) > 0.95);
+  let tangent = normalize(cross(aDir, swirlAxis));
+  // Gaussian peak near orbit shell, fading with distance
+  let swirlEnvelope = exp(-((aDist - SWIRL_PEAK_RADIUS) * (aDist - SWIRL_PEAK_RADIUS)) / (SWIRL_FALLOFF * SWIRL_FALLOFF));
+  let swirlForce = tangent * mf * SWIRL_SCALE * swirlEnvelope;
+
+  // 5. Influence envelope: smooth fadeout so distant boids keep flocking naturally
+  let influenceFade = 1.0 - smoothstep(INFLUENCE_RADIUS * 0.5, INFLUENCE_RADIUS, aDist);
+
+  // 6. Combine — attractorActive is 0.0 (inactive) or 1.0 (active)
+  force += (radialForce + swirlForce) * influenceFade * params.attractorActive;
 
   // Boundary force - soft repulsion from edges
   let bs = params.boundSize;

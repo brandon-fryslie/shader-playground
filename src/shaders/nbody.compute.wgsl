@@ -20,6 +20,17 @@ struct Params {
   targetY: f32,
   targetZ: f32,
   interactionActive: f32,
+  // [LAW:one-source-of-truth] Disk-recovery state lives in the same Params block so the CPU sends one coherent snapshot per frame.
+  diskNormal: vec3f,
+  _pad4: f32,
+  diskVertDamp: f32,
+  diskRadDamp: f32,
+  diskTangGain: f32,
+  diskVertSpring: f32,
+  diskAlignGain: f32,
+  interactionStrength: f32,
+  diskTangSpeed: f32,
+  _pad7: f32,
 }
 
 @group(0) @binding(0) var<storage, read> bodiesIn: array<Body>;
@@ -83,10 +94,10 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
 
   let targetPos = vec3f(params.targetX, params.targetY, params.targetZ);
   let interactionOn = params.interactionActive > 0.5;
-  let wellStrength = select(HOME_WELL_STRENGTH, INTERACTION_WELL_STRENGTH, interactionOn);
+  let wellStrength = select(HOME_WELL_STRENGTH, INTERACTION_WELL_STRENGTH * params.interactionStrength, interactionOn);
   let wellSoftening = select(HOME_WELL_SOFTENING, INTERACTION_WELL_SOFTENING, interactionOn);
   let coreRadius = select(HOME_CORE_RADIUS, INTERACTION_CORE_RADIUS, interactionOn);
-  let corePressure = select(HOME_CORE_PRESSURE, INTERACTION_CORE_PRESSURE, interactionOn);
+  let corePressure = select(HOME_CORE_PRESSURE, INTERACTION_CORE_PRESSURE * params.interactionStrength, interactionOn);
   let homeRestoreStiffness = select(0.0, HOME_RESTORE_STIFFNESS_ACTIVE, interactionOn);
   let homeRestoreDamping = select(0.0, HOME_RESTORE_DAMPING_ACTIVE, interactionOn);
   let interactionDrag = select(0.0, INTERACTION_DRAG_GAIN, interactionOn);
@@ -119,6 +130,38 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
   let coreSpeedExcess = max(0.0, speed - CORE_FRICTION_SPEED_START);
   let coreFrictionStrength = params.coreOrbit * coreFrictionFade * coreSpeedExcess * CORE_FRICTION_GAIN;
   acc -= me.vel * coreFrictionStrength;
+
+  // [LAW:dataflow-not-control-flow] Disk recovery always runs; gains of zero make individual terms inert without branching the solver.
+  // All five corrections are applied as accelerations only — never as direct velocity edits — so the integrator preserves frame-rate independence.
+  // [LAW:dataflow-not-control-flow] When R is degenerate, basis vectors become zero (not NaN); zero-weighted terms then contribute zero acceleration.
+  let n = params.diskNormal;
+  let r = me.pos;
+  let z = dot(r, n);
+  let vz = dot(me.vel, n);
+  let rPlane = r - z * n;
+  let R2 = dot(rPlane, rPlane);
+  let valid = R2 > 1e-8;
+  let safeR = sqrt(max(R2, 1e-8));
+  let eR = select(vec3f(0.0), rPlane / safeR, valid);
+  let crossNE = cross(n, eR);
+  let crossLen2 = dot(crossNE, crossNE);
+  let ePhi = select(vec3f(0.0), crossNE / sqrt(max(crossLen2, 1e-8)), crossLen2 > 1e-8);
+  let R = select(0.0, safeR, valid);
+  let vR = dot(me.vel, eR);
+  let vPhi = dot(me.vel, ePhi);
+  // Term 1: vertical velocity damping (primary flattener).
+  acc -= n * (vz * params.diskVertDamp);
+  // Term 2: radial velocity damping (orbit circularization).
+  acc -= eR * (vR * params.diskRadDamp);
+  // Term 3: vertical position spring (z² potential — opt-in via slider).
+  acc -= n * (z * params.diskVertSpring);
+  // Term 4: tangential target-speed nudge toward a Keplerian-ish circular speed.
+  // diskTangSpeed sets the orbital speed at R=1; falloff matches the seeded disk init (1/sqrt(R+0.1)).
+  let vc = params.diskTangSpeed / sqrt(safeR + 0.1);
+  acc += ePhi * ((vc - vPhi) * params.diskTangGain);
+  // Term 5: bias non-tangential velocity components toward the disk's coherent flow.
+  let vNonTan = me.vel - n * vz - eR * vR;
+  acc -= vNonTan * params.diskAlignGain;
 
   // A soft outer boundary keeps the toy system readable without letting the system escape to infinity.
   let centerDist = length(me.pos);
