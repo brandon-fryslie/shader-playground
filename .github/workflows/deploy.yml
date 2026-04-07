@@ -25,10 +25,15 @@ jobs:
         id: version
         run: |
           if [ "${{ github.event_name }}" = "pull_request" ]; then
-            echo "slot=pr-${{ github.event.pull_request.number }}" >> "$GITHUB_OUTPUT"
+            slot="pr-${{ github.event.pull_request.number }}"
+          elif [ "${{ github.ref_type }}" = "tag" ]; then
+            slot="${{ github.ref_name }}"
           else
-            echo "slot=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
+            count=$(git rev-list --count HEAD)
+            short=$(git rev-parse --short HEAD)
+            slot="r${count}-${short}"
           fi
+          echo "slot=${slot}" >> "$GITHUB_OUTPUT"
 
       - uses: actions/setup-node@v4
         with:
