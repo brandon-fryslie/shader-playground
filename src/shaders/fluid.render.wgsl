@@ -33,8 +33,12 @@ fn sampleHeight(u: f32, v: f32) -> f32 {
   let res = i32(params.simRes);
   let x = clamp(i32(u * f32(res)), 0, res - 1);
   let y = clamp(i32(v * f32(res)), 0, res - 1);
+  // Height comes from dye density (alpha), not color magnitude — the alpha
+  // channel is the mode-invariant splat amount stored in fluid.forces.wgsl,
+  // so single/rainbow/temperature dye modes all produce the same surface
+  // height for the same amount of injected dye.
   let d = dye[y * res + x];
-  return length(d.rgb) * params.heightScale;
+  return d.a * params.heightScale;
 }
 
 @vertex
