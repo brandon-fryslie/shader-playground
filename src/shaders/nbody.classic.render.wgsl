@@ -23,7 +23,9 @@ struct Body {
 }
 
 struct Attractor {
-  x: f32, y: f32, z: f32, active: f32,
+  // 'enabled' instead of 'active' because WGSL reserves `active` as a keyword
+  // and would reject `active: f32` with "Expected Identifier, got ReservedWord".
+  x: f32, y: f32, z: f32, enabled: f32,
 }
 
 @group(0) @binding(0) var<storage, read> bodies: array<Body>;
@@ -48,7 +50,7 @@ fn vs_main(@builtin(vertex_index) vid: u32, @builtin(instance_index) iid: u32) -
 
   // Attractor influence: bodies closer to attractor get bigger and shift color
   var attractInfluence = 0.0;
-  if (attractor.active > 0.5) {
+  if (attractor.enabled > 0.5) {
     let aPos = vec3f(attractor.x, attractor.y, attractor.z);
     let toDist = length(aPos - body.pos);
     attractInfluence = clamp(1.0 / (toDist * toDist + 0.1), 0.0, 1.0);

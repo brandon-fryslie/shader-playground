@@ -2363,13 +2363,15 @@ function createReactionSimulation() {
     multisample: { count: renderSampleCount },
   });
 
-  // renderBGs[viewIndex][pong] — pong selects which texture is "current" (last written).
+  // renderBGs[viewIndex][pong] — pong is the value of the ping-pong counter
+  // AFTER the compute loop completes. It points at which compute BG would run
+  // NEXT, which equals which texture was READ last, which means the OTHER
+  // texture holds the latest write. So:
+  //   pong=0 → computeBGs[0] is "read A, write B" is next → last write was to A
+  //   pong=1 → computeBGs[1] is "read B, write A" is next → last write was to B
   const renderBGs = [0, 1].map(vi => ([0, 1].map(pong => device.createBindGroup({
     layout: renderBGL, entries: [
-      // After step with computeBGs[0] (read A, write B), current = B.
-      // After step with computeBGs[1] (read B, write A), current = A.
-      // pong here is the NEXT value — so the "current" texture is the one we just wrote.
-      { binding: 0, resource: (pong === 0 ? uvTexB : uvTexA).createView({ dimension: '3d' }) },
+      { binding: 0, resource: (pong === 0 ? uvTexA : uvTexB).createView({ dimension: '3d' }) },
       { binding: 1, resource: sampler },
       { binding: 2, resource: { buffer: cameraBuffer, offset: vi * CAMERA_STRIDE, size: CAMERA_SIZE } },
       { binding: 3, resource: { buffer: renderParamsBuffer } },
@@ -2388,14 +2390,24 @@ function createReactionSimulation() {
     compute(encoder: GPUCommandEncoder) {
       const p = state.reaction;
       const steps = Math.max(1, Math.floor(p.stepsPerFrame));
-      // dt=0.7 keeps the explicit Euler update comfortably below the stability
-      // limit (~1/(6·Du) ≈ 0.79 for Du=0.2097). Any higher and boundary cells
-      // ping-pong and the sim explodes within a few seconds.
-      const dt = 0.7 * state.fx.timeScale;
+      // [LAW:dataflow-not-control-flow] Explicit Euler stability bound is hard:
+      // dt < 1/(6·max(Du,Dv)) ≈ 0.79 for Du=0.2097. The FX timeScale slider
+      // globally modulates animation speed across all sims, but for reaction-
+      // diffusion we must clamp the effective dt — otherwise cranking time
+      // up (or going negative, which runs the reaction backward) instantly
+      // blows the field to NaN and the sim "disappears". Run more substeps
+      // to emulate "faster" time without violating stability.
+      const STABLE_DT = 0.65;
+      const requestedMul = Math.max(0, state.fx.timeScale); // no reverse for GS
+      const dt = STABLE_DT;
+      // When timeScale > 1, use more substeps within the same frame instead
+      // of making dt bigger. When timeScale < 1, scale the number of steps
+      // down (minimum 0 to honor pause-like semantics).
+      const effectiveSteps = Math.max(0, Math.round(steps * requestedMul));
       device.queue.writeBuffer(paramsBuffer, 0, new Float32Array([
         p.feed, p.kill, p.Du, p.Dv, dt, N, 0, 0,
       ]));
-      for (let i = 0; i < steps; i++) {
+      for (let i = 0; i < effectiveSteps; i++) {
         const pass = encoder.beginComputePass();
         pass.setPipeline(computePipeline);
         pass.setBindGroup(0, computeBGs[pong]);
@@ -3836,21 +3848,28 @@ function ensureSimulation() {
     showSimError(mode, `factory threw: ${(e as Error).message}`);
   }
 
-  // Pop all three scopes regardless of throw, so we don't leak them.
-  device.popErrorScope().then(err => { if (err) showSimError(mode, `OOM: ${err.message}`); });
-  device.popErrorScope().then(err => { if (err) showSimError(mode, `internal: ${err.message}`); });
-  device.popErrorScope().then(err => {
-    if (err) {
-      showSimError(mode, `validation: ${err.message}`);
-      // If creation had validation errors, the sim is almost certainly broken —
-      // drop it so we don't render garbage on repeat.
-      const broken = simulations[mode];
-      if (broken) {
-        try { broken.destroy(); } catch { /* already in a bad state */ }
-        delete simulations[mode];
-      }
+  // [LAW:single-enforcer] The async scope handlers must only act on the sim
+  // instance we just created — not whatever lives at simulations[mode] by the
+  // time the promise resolves. Otherwise, a stale error from a previously-
+  // destroyed sim can delete a fresh one the user just reset to, and clicking
+  // Reset "doesn't bring it back" mysteriously. Capturing `sim` in the closure
+  // scopes the cleanup to exactly that instance.
+  const capturedSim = sim;
+  const capturedMode = mode;
+  const dropIfBroken = (reason: string) => {
+    showSimError(capturedMode, reason);
+    // Only drop if the current sim is STILL the one we created — if the user
+    // already reset and a new one took its place, leave it alone.
+    if (capturedSim && simulations[capturedMode] === capturedSim) {
+      try { capturedSim.destroy(); } catch { /* already bad */ }
+      delete simulations[capturedMode];
     }
-  });
+  };
+
+  // Pop all three scopes regardless of throw, so we don't leak them.
+  device.popErrorScope().then(err => { if (err) dropIfBroken(`OOM: ${err.message}`); });
+  device.popErrorScope().then(err => { if (err) dropIfBroken(`internal: ${err.message}`); });
+  device.popErrorScope().then(err => { if (err) dropIfBroken(`validation: ${err.message}`); });
 
   if (sim) {
     simulations[mode] = sim;
@@ -4059,9 +4078,10 @@ function frame(now: DOMHighResTimeStamp) {
     postFx.needsClear = false;
   } catch (e) {
     showSimError(mode, `frame threw: ${(e as Error).message}`);
-    const broken = simulations[mode];
-    if (broken) {
-      try { broken.destroy(); } catch { /* ignore */ }
+    // Only drop the sim instance we were just rendering — not whatever lives
+    // in the registry now, which could be a fresh one the user already reset.
+    if (simulations[mode] === sim) {
+      try { sim.destroy(); } catch { /* ignore */ }
       delete simulations[mode];
     }
   }
@@ -4069,9 +4089,8 @@ function frame(now: DOMHighResTimeStamp) {
   device.popErrorScope().then(err => {
     if (!err) return;
     showSimError(mode, `frame validation: ${err.message}`);
-    const broken = simulations[mode];
-    if (broken) {
-      try { broken.destroy(); } catch { /* ignore */ }
+    if (simulations[mode] === sim) {
+      try { sim.destroy(); } catch { /* ignore */ }
       delete simulations[mode];
     }
   });
