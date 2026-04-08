@@ -4,15 +4,36 @@
     {
       "version": "pr-1",
       "ref": "refs/pull/1/merge",
-      "sha": "71785408b1f87e576dea2571240ae265cd682990",
-      "timestamp": "2026-04-08T01:25:29.109Z",
+      "sha": "bd07eb50557a69775e2928241771c0c8a2eeb768",
+      "timestamp": "2026-04-08T11:12:32.140Z",
       "commits": [
         {
-          "sha": "71785408b1f87e576dea2571240ae265cd682990",
+          "sha": "bd07eb50557a69775e2928241771c0c8a2eeb768",
           "author_name": "Brandon Fryslie",
           "author_email": "530235+brandon-fryslie@users.noreply.github.com",
-          "timestamp": "2026-04-07T19:25:09-06:00",
-          "message": "Merge 16e4d5cf53072b83356e582283731edf925bc22d into 801483402712081b69953a05826897c86330268b\n"
+          "timestamp": "2026-04-08T11:12:16Z",
+          "message": "Merge b230d4f41702b0f3296748100088c10e24c3ae47 into 801483402712081b69953a05826897c86330268b\n"
+        },
+        {
+          "sha": "b230d4f41702b0f3296748100088c10e24c3ae47",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-08T05:12:05-06:00",
+          "message": "XR UI panel: text labels, ray reticle, fix arrow direction\n\n- Added text labels (PREV / NEXT / current slider parameter) via a\n  canvas-rasterized label atlas uploaded to a GPUTexture. Labels are\n  redrawn on mode change with dynamic font sizing so long labels like\n  \"GRAVITY\" auto-fit.\n- Added a glowing reticle at the XR ray / panel intersection whenever\n  a pinch is active, giving Vision Pro users visual feedback about\n  where their gaze-then-hand-corrected ray is pointing (since natural\n  input only exposes a ray during a pinch).\n- Fixed chevron direction: prev button now points left (<) and next\n  points right (>).\n- Widened button boxes to 0.36 world units so each fits a chevron\n  plus a 2:1 aspect label rect with breathing room.\n- Non-uniform label atlas sub-rects (2:1 for buttons, 4:1 for slider\n  label) so text isn't stretched when sampled at the panel surface.\n- Single-enforcer mode-cycling refactor: introduced selectMode() used\n  by both DOM tab clicks and XR prev/next so state.mode, DOM classes,\n  and simulation registry move together.\n- XR slider drags now call syncUIFromState() + saveState() on release\n  so DOM sliders show the updated value when the user exits VR.\n"
+        },
+        {
+          "sha": "f8353e5dc81ff27a42fc097f3dd2e5ef289a4e24",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-08T05:08:58-06:00",
+          "message": "reaction sim: fix diffusion scaling + raymarch aliasing\n\nTwo linked bugs produced the \"frozen boxes with ribs\" look and the\n\"changes when I move the camera\" artifact:\n\nPhysics:\n- The Laplacian divided neighbors by 6, but the canonical Gray-Scott\n  atlas (Du=0.2097, Dv=0.105) assumes a UNIT-weight Laplacian. Effective\n  diffusion was running at 1/6 strength, so most presets froze as the\n  reaction term couldn't compete with the weak spread. Removed /6.\n- dt was 1.0, which is right at the stability edge for Du=0.2097\n  (limit ~1/(6·Du) ≈ 0.79). Lowered to 0.7 for headroom.\n\nRendering:\n- stepCount=96 through a 3-unit volume meant step size ≈ texel size.\n  Under camera orbit, the fixed-stride march aligned to different texel\n  boundaries per frame, producing visible ribs that appeared to \"change\n  with the camera\". Bumped to 256 and added a per-pixel hash-based\n  start offset (stochastic sampling), which converts what would be\n  coherent aliasing into smooth noise that bloom easily absorbs.\n- Widened the soft-iso smoothstep band from ±0.04 to ±0.08 so sub-texel\n  surfaces fade in rather than popping.\n\nAll five presets should now evolve recognizably within a few seconds:\nSpots stabilizes into blobs, Mazes into maze patterns, Mitosis visibly\ndivides, Coral fills space, Worms produces worm-like channels.\n"
+        },
+        {
+          "sha": "b8da61af88cdc48cc8cde2d5338728ff51b83589",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-08T04:41:03-06:00",
+          "message": "fix reaction sim black-screen and add per-frame error surfacing\n\nTwo bugs in the initial reaction-diffusion implementation:\n\n1. rg16float is NOT in WebGPU's baseline storage-texture format list.\n   Texture creation failed silently and the sim rendered garbage or\n   nothing at all. Switched to rgba16float (always in the baseline),\n   using only .rg channels in the shader. Fixed bytesPerRow (N*4 → N*8)\n   and seed array stride (*2 → *4) accordingly.\n\n2. Sim failures produced zero user feedback — black screen or freeze,\n   with no way to know what went wrong. Now:\n\n   - ensureSimulation() wraps factory creation in validation/internal/\n     OOM error scopes. Any failure surfaces via showSimError() into the\n     existing top-left red overlay.\n\n   - frame() wraps sim.compute/render in a frame-level validation scope\n     plus a try/catch. On any failure the broken sim is destroyed and\n     dropped from the registry so the app stops hammering bad GPU state\n     every frame. The user sees the error and can switch modes.\n\nThis addresses the \"black screen / freeze / eject from XR\" experience —\nwhatever goes wrong next will say so.\n"
         },
         {
           "sha": "16e4d5cf53072b83356e582283731edf925bc22d",
