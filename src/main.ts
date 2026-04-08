@@ -17,6 +17,8 @@ import SHADER_FLUID_GRADIENT from './shaders/fluid.gradient.wgsl?raw';
 import SHADER_FLUID_RENDER from './shaders/fluid.render.wgsl?raw';
 import SHADER_PARAMETRIC_COMPUTE from './shaders/parametric.compute.wgsl?raw';
 import SHADER_PARAMETRIC_RENDER from './shaders/parametric.render.wgsl?raw';
+import SHADER_REACTION_COMPUTE from './shaders/reaction.compute.wgsl?raw';
+import SHADER_REACTION_RENDER from './shaders/reaction.render.wgsl?raw';
 import SHADER_GRID from './shaders/grid.wgsl?raw';
 import SHADER_POST_FADE from './shaders/post.fade.wgsl?raw';
 import SHADER_POST_DOWNSAMPLE from './shaders/post.downsample.wgsl?raw';
@@ -53,7 +55,15 @@ const DEFAULTS: ModeParamsMap = {
     p3Min: 0.15,   p3Max: 0.45, p3Rate: 0.7,
     p4Min: 0.5,    p4Max: 2.0,  p4Rate: 0.4,
     twistMin: 0.0, twistMax: 0.4, twistRate: 0.15,
-  }
+  },
+  reaction: {
+    resolution: 128,
+    feed: 0.055, kill: 0.062,
+    Du: 0.2097, Dv: 0.105,
+    stepsPerFrame: 4,
+    isoThreshold: 0.25,
+    preset: 'Spots',
+  },
 };
 
 const PRESETS: Record<SimMode, Record<string, Record<string, number | string>>> = {
@@ -91,6 +101,13 @@ const PRESETS: Record<SimMode, Record<string, Record<string, number | string>>> 
     'Wild Möbius':   { shape: 'mobius',  scale: 1.5, p1Min: 0.8,  p1Max: 2.0,  p1Rate: 0.3,  p2Min: 1.0,  p2Max: 3.0,  p2Rate: 0.15, p3Min: 0.2,  p3Max: 0.6,  p3Rate: 0.8,  p4Min: 0.5, p4Max: 2.5, p4Rate: 0.5,  twistMin: 1.0, twistMax: 4.0, twistRate: 0.1  },
     'Trefoil Pulse': { shape: 'trefoil', scale: 1.2, p1Min: 0.08, p1Max: 0.35, p1Rate: 0.9,  p2Min: 0.25, p2Max: 0.55, p2Rate: 0.4,  p3Min: 0.3,  p3Max: 0.9,  p3Rate: 1.2,  p4Min: 1.0, p4Max: 4.0, p4Rate: 0.7,  twistMin: 0,   twistMax: 0.5, twistRate: 0.2  },
     'Klein Chaos':   { shape: 'klein',   scale: 1.2, p1Min: 0.5,  p1Max: 1.5,  p1Rate: 0.4,  p2Min: 0,    p2Max: 0,    p2Rate: 0,    p3Min: 0.2,  p3Max: 0.6,  p3Rate: 0.9,  p4Min: 0.8, p4Max: 3.5, p4Rate: 0.5,  twistMin: 0,   twistMax: 0.8, twistRate: 0.15 },
+  },
+  reaction: {
+    'Spots':   { resolution: 128, feed: 0.055,  kill: 0.062,  Du: 0.2097, Dv: 0.105, stepsPerFrame: 4, isoThreshold: 0.25, preset: 'Spots' },
+    'Mazes':   { resolution: 128, feed: 0.029,  kill: 0.057,  Du: 0.2097, Dv: 0.105, stepsPerFrame: 4, isoThreshold: 0.25, preset: 'Mazes' },
+    'Worms':   { resolution: 128, feed: 0.058,  kill: 0.065,  Du: 0.2097, Dv: 0.105, stepsPerFrame: 4, isoThreshold: 0.25, preset: 'Worms' },
+    'Mitosis': { resolution: 128, feed: 0.0367, kill: 0.0649, Du: 0.2097, Dv: 0.105, stepsPerFrame: 4, isoThreshold: 0.25, preset: 'Mitosis' },
+    'Coral':   { resolution: 128, feed: 0.062,  kill: 0.062,  Du: 0.2097, Dv: 0.105, stepsPerFrame: 4, isoThreshold: 0.25, preset: 'Coral' },
   },
 };
 
@@ -177,6 +194,21 @@ const PARAM_DEFS: Record<SimMode, ParamSection[]> = {
       { key: 'p4Min',  label: 'Min',  min: 0.0, max: 5.0, step: 0.1  },
       { key: 'p4Max',  label: 'Max',  min: 0.0, max: 5.0, step: 0.1  },
       { key: 'p4Rate', label: 'Rate', min: 0.0, max: 3.0, step: 0.05 },
+    ]},
+  ],
+  reaction: [
+    { section: 'Volume', params: [
+      { key: 'resolution', label: 'Resolution', type: 'dropdown', options: [64, 96, 128, 160], requiresReset: true },
+      { key: 'stepsPerFrame', label: 'Steps/Frame', min: 1, max: 12, step: 1 },
+    ]},
+    { section: 'Reaction', params: [
+      { key: 'feed', label: 'Feed',  min: 0.01, max: 0.10, step: 0.0005 },
+      { key: 'kill', label: 'Kill',  min: 0.03, max: 0.08, step: 0.0005 },
+      { key: 'Du',   label: 'Du',    min: 0.05, max: 0.35, step: 0.001 },
+      { key: 'Dv',   label: 'Dv',    min: 0.02, max: 0.20, step: 0.001 },
+    ]},
+    { section: 'Render', params: [
+      { key: 'isoThreshold', label: 'Iso Threshold', min: 0.05, max: 0.6, step: 0.01 },
     ]},
   ],
 };
@@ -284,6 +316,7 @@ const state: AppState = {
   physics_classic: { ...DEFAULTS.physics_classic },
   fluid: { ...DEFAULTS.fluid },
   parametric: { ...DEFAULTS.parametric },
+  reaction: { ...DEFAULTS.reaction },
   camera: { distance: 5.0, fov: 60, rotX: 0.3, rotY: 0.0, panX: 0, panY: 0 },
   mouse: { down: false, x: 0, y: 0, dx: 0, dy: 0, worldX: 0, worldY: 0, worldZ: 0 },
   fx: {
@@ -1982,6 +2015,231 @@ function createParametricSimulation() {
 }
 
 
+// --- 5e: REACTION-DIFFUSION (Gray-Scott, 3D) ---
+
+function createReactionSimulation() {
+  // [LAW:one-source-of-truth] Volume resolution owned by state.reaction.resolution; everything else derives from it.
+  const N = state.reaction.resolution;
+  const WORLD_SIZE = 3.0;
+
+  const texDesc: GPUTextureDescriptor = {
+    size: [N, N, N],
+    dimension: '3d',
+    format: 'rg16float',
+    usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+  };
+  const uvTexA = device.createTexture(texDesc);
+  const uvTexB = device.createTexture(texDesc);
+
+  // Seed: u=1 everywhere, v=0 except a few random 3D blobs near the center.
+  // rg16float upload path: use Uint16Array half-floats (WebGPU writeTexture accepts raw bytes).
+  const seed = new Uint16Array(N * N * N * 2);
+  // Half-float encoder (IEEE 754 binary16).
+  const f2h = (f: number): number => {
+    const buf = new Float32Array(1);
+    const i32 = new Int32Array(buf.buffer);
+    buf[0] = f;
+    const x = i32[0];
+    const sign = (x >> 16) & 0x8000;
+    let exp = ((x >> 23) & 0xff) - (127 - 15);
+    const mant = x & 0x7fffff;
+    if (exp <= 0) return sign;
+    if (exp >= 31) return sign | 0x7c00;
+    return sign | (exp << 10) | (mant >> 13);
+  };
+  const h_one = f2h(1.0);
+  const h_zero = f2h(0.0);
+  const h_half = f2h(0.5);
+  for (let z = 0; z < N; z++) {
+    for (let y = 0; y < N; y++) {
+      for (let x = 0; x < N; x++) {
+        const i = (z * N * N + y * N + x) * 2;
+        seed[i] = h_one;
+        seed[i + 1] = h_zero;
+      }
+    }
+  }
+  // Sprinkle ~12 blobs in the central half of the volume.
+  const blobs = 12;
+  const blobRadius = Math.max(2, Math.floor(N / 24));
+  for (let b = 0; b < blobs; b++) {
+    const cx = Math.floor(N * (0.3 + Math.random() * 0.4));
+    const cy = Math.floor(N * (0.3 + Math.random() * 0.4));
+    const cz = Math.floor(N * (0.3 + Math.random() * 0.4));
+    for (let dz = -blobRadius; dz <= blobRadius; dz++) {
+      for (let dy = -blobRadius; dy <= blobRadius; dy++) {
+        for (let dx = -blobRadius; dx <= blobRadius; dx++) {
+          if (dx * dx + dy * dy + dz * dz > blobRadius * blobRadius) continue;
+          const x = cx + dx, y = cy + dy, z = cz + dz;
+          if (x < 0 || y < 0 || z < 0 || x >= N || y >= N || z >= N) continue;
+          const i = (z * N * N + y * N + x) * 2;
+          seed[i] = h_half;       // u → 0.5
+          seed[i + 1] = h_half;   // v → 0.5
+        }
+      }
+    }
+  }
+  device.queue.writeTexture(
+    { texture: uvTexA },
+    seed.buffer,
+    { bytesPerRow: N * 4, rowsPerImage: N },
+    [N, N, N],
+  );
+  // Also initialize B with the same state so the first render (before any steps) looks right.
+  device.queue.writeTexture(
+    { texture: uvTexB },
+    seed.buffer,
+    { bytesPerRow: N * 4, rowsPerImage: N },
+    [N, N, N],
+  );
+
+  // Compute pipeline
+  const computeModule = device.createShaderModule({ code: SHADER_REACTION_COMPUTE_EDIT || SHADER_REACTION_COMPUTE });
+  const computeBGL = device.createBindGroupLayout({
+    entries: [
+      { binding: 0, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: 'float', viewDimension: '3d' } },
+      { binding: 1, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: 'write-only', format: 'rg16float', viewDimension: '3d' } },
+      { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
+    ],
+  });
+  const paramsBuffer = device.createBuffer({ size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+  const computePipeline = device.createComputePipeline({
+    layout: device.createPipelineLayout({ bindGroupLayouts: [computeBGL] }),
+    compute: { module: computeModule, entryPoint: 'main' },
+  });
+  const computeBGs = [
+    // pong=0: read A, write B
+    device.createBindGroup({ layout: computeBGL, entries: [
+      { binding: 0, resource: uvTexA.createView({ dimension: '3d' }) },
+      { binding: 1, resource: uvTexB.createView({ dimension: '3d' }) },
+      { binding: 2, resource: { buffer: paramsBuffer } },
+    ]}),
+    // pong=1: read B, write A
+    device.createBindGroup({ layout: computeBGL, entries: [
+      { binding: 0, resource: uvTexB.createView({ dimension: '3d' }) },
+      { binding: 1, resource: uvTexA.createView({ dimension: '3d' }) },
+      { binding: 2, resource: { buffer: paramsBuffer } },
+    ]}),
+  ];
+
+  // Render pipeline — raymarched volume
+  const renderModule = device.createShaderModule({ code: SHADER_REACTION_RENDER_EDIT || SHADER_REACTION_RENDER });
+  const sampler = device.createSampler({
+    magFilter: 'linear', minFilter: 'linear',
+    addressModeU: 'clamp-to-edge', addressModeV: 'clamp-to-edge', addressModeW: 'clamp-to-edge',
+  });
+  const cameraBuffer = device.createBuffer({ size: CAMERA_STRIDE * 2, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+  const renderParamsBuffer = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+
+  const renderBGL = device.createBindGroupLayout({
+    entries: [
+      { binding: 0, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float', viewDimension: '3d' } },
+      { binding: 1, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'filtering' } },
+      { binding: 2, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
+      { binding: 3, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
+    ],
+  });
+  const renderPipeline = device.createRenderPipeline({
+    layout: device.createPipelineLayout({ bindGroupLayouts: [renderBGL] }),
+    vertex: { module: renderModule, entryPoint: 'vs_main' },
+    fragment: {
+      module: renderModule, entryPoint: 'fs_main',
+      targets: [{
+        format: renderTargetFormat,
+        blend: {
+          color: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha', operation: 'add' },
+          alpha: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha', operation: 'add' },
+        },
+      }],
+    },
+    primitive: { topology: 'triangle-list' },
+    // [LAW:feedback_nbody_depthstencil] Always declare depthStencil format to match the shared depth attachment.
+    depthStencil: { format: 'depth24plus', depthWriteEnabled: false, depthCompare: 'less' },
+    multisample: { count: renderSampleCount },
+  });
+
+  // renderBGs[viewIndex][pong] — pong selects which texture is "current" (last written).
+  const renderBGs = [0, 1].map(vi => ([0, 1].map(pong => device.createBindGroup({
+    layout: renderBGL, entries: [
+      // After step with computeBGs[0] (read A, write B), current = B.
+      // After step with computeBGs[1] (read B, write A), current = A.
+      // pong here is the NEXT value — so the "current" texture is the one we just wrote.
+      { binding: 0, resource: (pong === 0 ? uvTexB : uvTexA).createView({ dimension: '3d' }) },
+      { binding: 1, resource: sampler },
+      { binding: 2, resource: { buffer: cameraBuffer, offset: vi * CAMERA_STRIDE, size: CAMERA_SIZE } },
+      { binding: 3, resource: { buffer: renderParamsBuffer } },
+    ],
+  }))));
+
+  // Workgroup size: 8×8×4 = 256 (within default maxComputeInvocationsPerWorkgroup).
+  const wgX = Math.ceil(N / 8);
+  const wgY = Math.ceil(N / 8);
+  const wgZ = Math.ceil(N / 4);
+
+  const depthRef: DepthRef = {};
+  let pong = 0; // which compute BG to use NEXT; also selects which texture will be current after the step.
+
+  return {
+    compute(encoder: GPUCommandEncoder) {
+      const p = state.reaction;
+      const steps = Math.max(1, Math.floor(p.stepsPerFrame));
+      // dt=1.0 is the standard Gray-Scott step scale when Du/Dv are given in grid units.
+      const dt = 1.0 * state.fx.timeScale;
+      device.queue.writeBuffer(paramsBuffer, 0, new Float32Array([
+        p.feed, p.kill, p.Du, p.Dv, dt, N, 0, 0,
+      ]));
+      for (let i = 0; i < steps; i++) {
+        const pass = encoder.beginComputePass();
+        pass.setPipeline(computePipeline);
+        pass.setBindGroup(0, computeBGs[pong]);
+        pass.dispatchWorkgroups(wgX, wgY, wgZ);
+        pass.end();
+        pong = 1 - pong;
+      }
+    },
+
+    render(encoder: GPUCommandEncoder, textureView: GPUTextureView, viewport: number[] | null, viewIndex = 0) {
+      const aspect = viewport ? (viewport[2] / viewport[3]) : (canvas.width / canvas.height);
+      device.queue.writeBuffer(cameraBuffer, viewIndex * CAMERA_STRIDE, getCameraUniformData(aspect));
+      device.queue.writeBuffer(renderParamsBuffer, 0, new Float32Array([
+        N, state.reaction.isoThreshold, WORLD_SIZE, 96,
+      ]));
+
+      const pass = encoder.beginRenderPass({
+        colorAttachments: [getColorAttachment(depthRef, textureView, viewport)],
+        depthStencilAttachment: getDepthAttachment(depthRef, viewport),
+      });
+
+      const rv = getRenderViewport(viewport);
+      if (rv) {
+        pass.setViewport(rv[0], rv[1], rv[2], rv[3], 0, 1);
+      }
+
+      renderGrid(pass, aspect, viewIndex);
+
+      // The "current" texture is the one that was most recently WRITTEN, which
+      // is the target of computeBGs[pong-1]. Since `pong` has already advanced
+      // past the last step, the current texture index = pong (0 → B, 1 → A).
+      pass.setPipeline(renderPipeline);
+      pass.setBindGroup(0, renderBGs[viewIndex][pong]);
+      pass.draw(3);
+      pass.end();
+    },
+
+    getCount() { return `${N}³`; },
+
+    destroy() {
+      uvTexA.destroy();
+      uvTexB.destroy();
+      paramsBuffer.destroy();
+      cameraBuffer.destroy();
+      renderParamsBuffer.destroy();
+      destroyDepthRef(depthRef);
+    },
+  };
+}
+
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // SECTION 6: UI & CONTROLS
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -2517,6 +2775,7 @@ const MODE_LABELS = {
   physics_classic: 'classic N-body (vintage shader)',
   fluid: 'fluid dynamics',
   parametric: 'parametric shape',
+  reaction: 'Gray-Scott reaction-diffusion (3D)',
 };
 
 function updatePrompt() {
@@ -2616,6 +2875,10 @@ function getShaderSources(mode: SimMode): Record<string, string> {
     parametric: {
       'Compute (All Shapes)': SHADER_PARAMETRIC_COMPUTE,
       'Render (Phong)': SHADER_PARAMETRIC_RENDER,
+    },
+    reaction: {
+      'Compute (Gray-Scott)': SHADER_REACTION_COMPUTE,
+      'Render (Raymarch)': SHADER_REACTION_RENDER,
     },
   };
   return sources[mode] || {};
@@ -2775,6 +3038,10 @@ function applyShaderEdit(mode: SimMode, tabName: string, code: string) {
       'Compute (Mesh Gen)': () => { SHADER_PARAMETRIC_COMPUTE_EDIT = code; },
       'Render (Phong)': () => { SHADER_PARAMETRIC_RENDER_EDIT = code; },
     },
+    reaction: {
+      'Compute (Gray-Scott)': () => { SHADER_REACTION_COMPUTE_EDIT = code; },
+      'Render (Raymarch)': () => { SHADER_REACTION_RENDER_EDIT = code; },
+    },
   };
   const modeMapping = mapping[mode] as Record<string, () => void> | undefined;
   const fn = modeMapping?.[tabName];
@@ -2796,6 +3063,8 @@ let SHADER_FLUID_GRADIENT_EDIT: string | null = null;
 let SHADER_FLUID_RENDER_EDIT: string | null = null;
 let SHADER_PARAMETRIC_COMPUTE_EDIT: string | null = null;
 let SHADER_PARAMETRIC_RENDER_EDIT: string | null = null;
+let SHADER_REACTION_COMPUTE_EDIT: string | null = null;
+let SHADER_REACTION_RENDER_EDIT: string | null = null;
 
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -3094,6 +3363,7 @@ function ensureSimulation() {
       physics_classic: createPhysicsClassicSimulation,
       fluid: createFluidSimulation,
       parametric: createParametricSimulation,
+      reaction: createReactionSimulation,
     };
     simulations[mode] = factories[mode]();
   }
@@ -3113,7 +3383,7 @@ function updateStats() {
   const sim = simulations[state.mode];
   const count = sim ? sim.getCount() : '--';
   document.getElementById('stat-count')!.textContent =
-    state.mode === 'fluid' ? `Grid: ${count}` : `Particles: ${count}`;
+    (state.mode === 'fluid' || state.mode === 'reaction') ? `Grid: ${count}` : `Particles: ${count}`;
 }
 
 function resizeCanvas() {
