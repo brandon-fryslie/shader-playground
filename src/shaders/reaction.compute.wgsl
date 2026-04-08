@@ -43,8 +43,11 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   let zm = fetch(p + vec3<i32>( 0,  0, -1), maxIdx);
   let zp = fetch(p + vec3<i32>( 0,  0,  1), maxIdx);
 
-  // 7-point Laplacian (uniform-weighted; divided by 6 so Du/Dv match common atlases).
-  let lap = (xm + xp + ym + yp + zm + zp - 6.0 * c) / 6.0;
+  // Unit-weight 7-point Laplacian: sum of neighbors minus 6× center, NO division.
+  // The canonical Gray-Scott atlas values (Du≈0.2097, Dv≈0.105, feed/kill ≈ 0.05)
+  // assume this form. Dividing by 6 effectively runs diffusion at 1/6 strength
+  // and most presets visibly freeze because the reaction term can't compete.
+  let lap = xm + xp + ym + yp + zm + zp - 6.0 * c;
 
   let u = c.r;
   let v = c.g;
@@ -52,6 +55,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   let du = params.Du * lap.r - uvv + params.feed * (1.0 - u);
   let dv = params.Dv * lap.g + uvv - (params.feed + params.kill) * v;
 
+  // dt of 1.0 is on the stability edge for Du=0.21 (limit ~1/6Du ≈ 0.79). A dt
+  // of ~0.7 gives comfortable headroom; timeScale can push it higher if desired.
   var next = c + vec2f(du, dv) * params.dt;
   next = clamp(next, vec2f(0.0), vec2f(1.0));
 

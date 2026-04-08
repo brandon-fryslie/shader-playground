@@ -872,7 +872,7 @@ function renderGrid(pass: GPURenderPassEncoder, aspect: number, viewIndex = 0): 
 const XR_UI_PANEL_CENTER: [number, number, number] = [0, -0.4, -3.5];
 const XR_UI_PANEL_SIZE: [number, number] = [1.2, 0.55];
 const XR_UI_BTN_Y = 0.16;
-const XR_UI_BTN_HALF_W = 0.12;
+const XR_UI_BTN_HALF_W = 0.16;  // widened from 0.12 to fit chevron + label
 const XR_UI_BTN_HALF_H = 0.11;
 const XR_UI_PREV_X_FRAC = -0.30;  // aspect-relative
 const XR_UI_NEXT_X_FRAC =  0.30;
@@ -880,23 +880,57 @@ const XR_UI_SLIDER_Y = -0.20;
 const XR_UI_SLIDER_HALF_H = 0.05;
 const XR_UI_SLIDER_HALF_W_FRAC = 0.42; // aspect-relative
 
+// Label atlas layout — a single canvas strip split into 3 equal horizontal thirds:
+// [0..1/3] PREV, [1/3..2/3] NEXT, [2/3..1] current slider label (e.g. "FORCE").
+const XR_UI_LABEL_CANVAS_W = 768;
+const XR_UI_LABEL_CANVAS_H = 128;
+
 let xrUiPipeline!: GPURenderPipeline;
 let xrUiBGs!: GPUBindGroup[];
 let xrUiCameraBuffer!: GPUBuffer;
 let xrUiParamsBuffer!: GPUBuffer;
+let xrUiLabelCanvas!: HTMLCanvasElement;
+let xrUiLabelCtx!: CanvasRenderingContext2D;
+let xrUiLabelTexture!: GPUTexture;
+let xrUiLabelSampler!: GPUSampler;
+let xrUiLabelCurrentMode: SimMode | null = null;
 
 function initXrUi() {
   xrUiCameraBuffer?.destroy();
   xrUiParamsBuffer?.destroy();
+  xrUiLabelTexture?.destroy();
+
   xrUiCameraBuffer = device.createBuffer({ size: CAMERA_STRIDE * 2, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-  // UIParams layout (32 bytes): center.xyz, _pad, sizeX, sizeY, sliderValue, hover
-  xrUiParamsBuffer = device.createBuffer({ size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+  // UIParams layout (48 bytes): center.xyz, _pad, sizeX, sizeY, sliderValue, hover,
+  //                             hitX, hitY, hitActive, _pad2
+  xrUiParamsBuffer = device.createBuffer({ size: 48, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+
+  // Canvas used once per mode change to rasterize labels.
+  if (!xrUiLabelCanvas) {
+    xrUiLabelCanvas = document.createElement('canvas');
+    xrUiLabelCanvas.width = XR_UI_LABEL_CANVAS_W;
+    xrUiLabelCanvas.height = XR_UI_LABEL_CANVAS_H;
+    xrUiLabelCtx = xrUiLabelCanvas.getContext('2d')!;
+  }
+  xrUiLabelTexture = device.createTexture({
+    size: [XR_UI_LABEL_CANVAS_W, XR_UI_LABEL_CANVAS_H],
+    format: 'rgba8unorm',
+    usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.RENDER_ATTACHMENT,
+  });
+  xrUiLabelSampler = device.createSampler({
+    magFilter: 'linear',
+    minFilter: 'linear',
+  });
+  xrUiLabelCurrentMode = null; // force first render to upload
+
   const uiModule = device.createShaderModule({ code: SHADER_XR_UI });
 
   const uiBGL = device.createBindGroupLayout({
     entries: [
       { binding: 0, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
       { binding: 1, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
+      { binding: 2, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
+      { binding: 3, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'filtering' } },
     ]
   });
 
@@ -922,7 +956,35 @@ function initXrUi() {
   xrUiBGs = [0, 1].map(vi => device.createBindGroup({ layout: uiBGL, entries: [
     { binding: 0, resource: { buffer: xrUiCameraBuffer, offset: vi * CAMERA_STRIDE, size: CAMERA_SIZE } },
     { binding: 1, resource: { buffer: xrUiParamsBuffer } },
+    { binding: 2, resource: xrUiLabelTexture.createView() },
+    { binding: 3, resource: xrUiLabelSampler },
   ]}));
+}
+
+// Rasterize the three label strings to the canvas and upload to the label texture.
+// No-op if the mode hasn't changed since the last call.
+function updateXrUiLabels(mode: SimMode): void {
+  if (xrUiLabelCurrentMode === mode) return;
+  xrUiLabelCurrentMode = mode;
+  const ctx = xrUiLabelCtx;
+  const w = XR_UI_LABEL_CANVAS_W;
+  const h = XR_UI_LABEL_CANVAS_H;
+  ctx.clearRect(0, 0, w, h);
+  ctx.fillStyle = 'white';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  // Bold sans so the text renders cleanly after bloom/tonemap.
+  ctx.font = 'bold 78px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
+  const third = w / 3;
+  ctx.fillText('PREV', third * 0.5, h / 2);
+  ctx.fillText('NEXT', third * 1.5, h / 2);
+  ctx.fillText(XR_UI_SLIDER_DEFS[mode].label.toUpperCase(), third * 2.5, h / 2);
+
+  device.queue.copyExternalImageToTexture(
+    { source: xrUiLabelCanvas },
+    { texture: xrUiLabelTexture },
+    [w, h]
+  );
 }
 
 function xrUiHoverAsFloat(): number {
@@ -935,18 +997,25 @@ function xrUiHoverAsFloat(): number {
 }
 
 function renderXrUi(pass: GPURenderPassEncoder, aspect: number, viewIndex = 0): void {
+  // Rasterize labels on mode change (no-op otherwise).
+  updateXrUiLabels(state.mode);
+
   device.queue.writeBuffer(xrUiCameraBuffer, viewIndex * CAMERA_STRIDE, getCameraUniformData(aspect));
   // Only write params once per frame (both eyes see the same UI state).
   if (viewIndex === 0) {
-    const data = new Float32Array(8);
+    const data = new Float32Array(12);
     data[0] = XR_UI_PANEL_CENTER[0];
     data[1] = XR_UI_PANEL_CENTER[1];
     data[2] = XR_UI_PANEL_CENTER[2];
-    data[3] = 0; // _pad
+    data[3] = 0; // _pad1
     data[4] = XR_UI_PANEL_SIZE[0];
     data[5] = XR_UI_PANEL_SIZE[1];
     data[6] = getXrSliderNormalized();
     data[7] = xrUiHoverAsFloat();
+    data[8]  = xrUiState.lastHitPx;
+    data[9]  = xrUiState.lastHitPy;
+    data[10] = xrUiState.lastHitActive ? 1.0 : 0.0;
+    data[11] = 0; // _pad2
     device.queue.writeBuffer(xrUiParamsBuffer, 0, data);
   }
   pass.setPipeline(xrUiPipeline);
@@ -2280,8 +2349,10 @@ function createReactionSimulation() {
     compute(encoder: GPUCommandEncoder) {
       const p = state.reaction;
       const steps = Math.max(1, Math.floor(p.stepsPerFrame));
-      // dt=1.0 is the standard Gray-Scott step scale when Du/Dv are given in grid units.
-      const dt = 1.0 * state.fx.timeScale;
+      // dt=0.7 keeps the explicit Euler update comfortably below the stability
+      // limit (~1/(6·Du) ≈ 0.79 for Du=0.2097). Any higher and boundary cells
+      // ping-pong and the sim explodes within a few seconds.
+      const dt = 0.7 * state.fx.timeScale;
       device.queue.writeBuffer(paramsBuffer, 0, new Float32Array([
         p.feed, p.kill, p.Du, p.Dv, dt, N, 0, 0,
       ]));
@@ -2298,8 +2369,11 @@ function createReactionSimulation() {
     render(encoder: GPUCommandEncoder, textureView: GPUTextureView, viewport: number[] | null, viewIndex = 0) {
       const aspect = viewport ? (viewport[2] / viewport[3]) : (canvas.width / canvas.height);
       device.queue.writeBuffer(cameraBuffer, viewIndex * CAMERA_STRIDE, getCameraUniformData(aspect));
+      // stepCount=256: enough samples through a 3-unit volume at 128³ to give
+      // ~2 samples per texel along the longest ray, which combined with the
+      // per-pixel jitter in the shader keeps aliasing below the bloom threshold.
       device.queue.writeBuffer(renderParamsBuffer, 0, new Float32Array([
-        N, state.reaction.isoThreshold, WORLD_SIZE, 96,
+        N, state.reaction.isoThreshold, WORLD_SIZE, 256,
       ]));
 
       const pass = encoder.beginRenderPass({
@@ -2588,17 +2662,25 @@ function findParamDef(mode: SimMode, key: string): ParamDef | null {
   return null;
 }
 
+// [LAW:one-source-of-truth] Single entry point for switching simulation modes —
+// used by both DOM tab clicks and the XR UI prev/next buttons so both paths
+// keep state.mode, the DOM active classes, the simulation registry, and the
+// on-screen slider values in sync.
+function selectMode(mode: SimMode): void {
+  state.mode = mode;
+  document.querySelectorAll<HTMLElement>('.mode-tab').forEach(t =>
+    t.classList.toggle('active', t.dataset.mode === mode));
+  document.querySelectorAll<HTMLElement>('.param-group').forEach(g =>
+    g.classList.toggle('active', g.dataset.mode === mode));
+  ensureSimulation();
+  updateAll();
+}
+
 function setupTabs() {
   document.querySelectorAll<HTMLElement>('.mode-tab').forEach(tab => {
     tab.addEventListener('click', () => {
       const mode = tab.dataset.mode as SimMode;
-      state.mode = mode;
-
-      document.querySelectorAll<HTMLElement>('.mode-tab').forEach(t => t.classList.toggle('active', t === tab));
-      document.querySelectorAll<HTMLElement>('.param-group').forEach(g => g.classList.toggle('active', g.dataset.mode === mode));
-
-      ensureSimulation();
-      updateAll();
+      selectMode(mode);
     });
   });
 }
@@ -3195,6 +3277,11 @@ const xrUiState = {
   pressingSource:     null as XRInputSource | null,
   pendingPressSource: null as XRInputSource | null,
   grabbed:            false,
+  // Last ray/panel intersection — drives the in-shader reticle. Only set when
+  // an XR input is pinching and its ray hits the panel plane.
+  lastHitPx:          0,
+  lastHitPy:          0,
+  lastHitActive:      false,
 };
 
 function getXrSliderNormalized(): number {
@@ -3250,8 +3337,9 @@ function setXrSliderFromHit(px: number): void {
 function cycleXrUiMode(delta: number): void {
   const idx = XR_UI_MODE_ORDER.indexOf(state.mode);
   const next = XR_UI_MODE_ORDER[(idx + delta + XR_UI_MODE_ORDER.length) % XR_UI_MODE_ORDER.length];
-  state.mode = next;
-  ensureSimulation();
+  // Route through the single mode-change enforcer so DOM, state, and
+  // simulation registry all move together — even while we're in XR.
+  selectMode(next);
 }
 
 function getXrInputRay(frame: XRFrame, source: XRInputSource): { origin: number[]; dir: number[] } | null {
@@ -3265,6 +3353,16 @@ function getXrInputRay(frame: XRFrame, source: XRInputSource): { origin: number[
   };
 }
 
+function applyHitToUiState(hit: { px: number; py: number; element: XrUiElement } | null): void {
+  if (hit) {
+    xrUiState.lastHitPx = hit.px;
+    xrUiState.lastHitPy = hit.py;
+    xrUiState.lastHitActive = true;
+  } else {
+    xrUiState.lastHitActive = false;
+  }
+}
+
 function updateXrUiInput(frame: XRFrame): void {
   // Pending press from selectstart — resolve it against the first available ray.
   if (xrUiState.pendingPressSource) {
@@ -3273,6 +3371,7 @@ function updateXrUiInput(frame: XRFrame): void {
     if (ray) {
       const hit = hitTestXrUi(ray.origin, ray.dir);
       xrUiState.pendingPressSource = null;
+      applyHitToUiState(hit);
       if (hit && hit.element !== 'none') {
         xrUiState.pressed = hit.element;
         xrUiState.pressingSource = src;
@@ -3294,12 +3393,30 @@ function updateXrUiInput(frame: XRFrame): void {
     const ray = getXrInputRay(frame, xrUiState.pressingSource);
     if (ray) {
       const hit = hitTestXrUi(ray.origin, ray.dir);
+      applyHitToUiState(hit);
       xrUiState.hover = hit ? hit.element : 'none';
       if (xrUiState.grabbed && hit) {
         setXrSliderFromHit(hit.px);
       }
+    } else {
+      xrUiState.lastHitActive = false;
     }
     return;
+  }
+
+  // Even without a UI press, show the reticle whenever an active pinch
+  // is aimed at the panel — this is the visual feedback loop the Vision Pro
+  // interaction model relies on (the ray only exists during a pinch).
+  if (xrInteractionSource) {
+    const ray = getXrInputRay(frame, xrInteractionSource);
+    if (ray) {
+      const hit = hitTestXrUi(ray.origin, ray.dir);
+      applyHitToUiState(hit);
+    } else {
+      xrUiState.lastHitActive = false;
+    }
+  } else {
+    xrUiState.lastHitActive = false;
   }
 
   xrUiState.hover = 'none';
@@ -3484,12 +3601,20 @@ async function toggleXR() {
       // If this release matches an active UI press, trigger button action and clear state.
       if (xrUiState.pressingSource === inputSource) {
         const pressed = xrUiState.pressed;
+        const wasGrabbed = xrUiState.grabbed;
         if (pressed === 'prev' && xrUiState.hover === 'prev') cycleXrUiMode(-1);
         else if (pressed === 'next' && xrUiState.hover === 'next') cycleXrUiMode(1);
         xrUiState.pressed = 'none';
         xrUiState.pressingSource = null;
         xrUiState.grabbed = false;
         xrUiState.hover = 'none';
+        xrUiState.lastHitActive = false;
+        // Slider drag committed — persist and refresh the DOM so the value is
+        // correct when the user exits VR.
+        if (wasGrabbed) {
+          syncUIFromState();
+          saveState();
+        }
         return;
       }
 

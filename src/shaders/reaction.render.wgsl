@@ -113,20 +113,27 @@ fn fs_main(in: VSOut) -> @location(0) vec4f {
   let dt = tSpan / f32(steps);
   let iso = rparams.isoThreshold;
 
+  // [LAW:dataflow-not-control-flow] Per-pixel hash jitter on the start offset.
+  // Without this, the fixed-stride march aligns to the voxel grid and produces
+  // visible "ribs" that shift as the camera orbits. With jitter, the aliasing
+  // becomes smooth noise that bloom/trails easily absorb.
+  let jitter = fract(sin(dot(in.pos.xy, vec2f(12.9898, 78.233))) * 43758.5453);
+
   // Accumulator: rgb = premultiplied color, a = alpha.
   var accum = vec4f(0.0);
-  var t = tNear + dt * 0.5;
+  var t = tNear + dt * jitter;
 
-  for (var i = 0; i < 128; i = i + 1) {
+  for (var i = 0; i < 512; i = i + 1) {
     if (i >= steps) { break; }
     let p = ro + rd * t;
     let v = sampleV(p);
     let u = sampleU(p);
 
-    // Soft density from how far v is above iso threshold.
-    let soft = smoothstep(iso - 0.04, iso + 0.04, v);
-    // Thickness along this step → alpha.
-    let alpha = 1.0 - exp(-soft * 4.5 * dt / (rparams.worldSize / rparams.N));
+    // Soft density: wider band than before so sub-texel surfaces don't pop.
+    let soft = smoothstep(iso - 0.08, iso + 0.08, v);
+    // Thickness along this step → alpha. Scaled so doubling step count
+    // yields roughly the same total opacity through a region.
+    let alpha = 1.0 - exp(-soft * 10.0 * dt);
 
     // Shading: gradient-based normal, Phong with theme colors.
     let grad = gradientV(p);
