@@ -60,5 +60,21 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   var next = c + vec2f(du, dv) * params.dt;
   next = clamp(next, vec2f(0.0), vec2f(1.0));
 
+  // [LAW:dataflow-not-control-flow] Dirichlet boundary condition on a smooth
+  // band near the volume edge. Every cell blends toward (u=1, v=0) by an amount
+  // that's zero in the interior and 1 at the outermost face. Patterns can never
+  // escape the interior or reflect off the clamped-coord boundary, which was
+  // what made them pile up against the "invisible cube".
+  let fN = params.N;
+  let fp = vec3f(f32(p.x), f32(p.y), f32(p.z));
+  // Distance from the volume center, normalized so edge = 1.
+  let r = max(abs(fp.x - (fN - 1.0) * 0.5),
+          max(abs(fp.y - (fN - 1.0) * 0.5),
+              abs(fp.z - (fN - 1.0) * 0.5))) / ((fN - 1.0) * 0.5);
+  // Smoothstep from 0.80 (fully free interior) to 1.0 (fully clamped).
+  let boundary = smoothstep(0.80, 1.0, r);
+  let reservoir = vec2f(1.0, 0.0);
+  next = mix(next, reservoir, boundary);
+
   textureStore(uvOut, p, vec4f(next, 0.0, 0.0));
 }

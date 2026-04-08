@@ -2254,17 +2254,26 @@ function createReactionSimulation() {
       }
     }
   }
-  // Sprinkle ~12 blobs in the central half of the volume.
-  const blobs = 12;
-  const blobRadius = Math.max(2, Math.floor(N / 24));
-  for (let b = 0; b < blobs; b++) {
-    const cx = Math.floor(N * (0.3 + Math.random() * 0.4));
-    const cy = Math.floor(N * (0.3 + Math.random() * 0.4));
-    const cz = Math.floor(N * (0.3 + Math.random() * 0.4));
-    for (let dz = -blobRadius; dz <= blobRadius; dz++) {
-      for (let dy = -blobRadius; dy <= blobRadius; dy++) {
-        for (let dx = -blobRadius; dx <= blobRadius; dx++) {
-          if (dx * dx + dy * dy + dz * dz > blobRadius * blobRadius) continue;
+  // Scattered noise-style seed. Lots of tiny random points (radius 1-2) across
+  // a tight central region. Each reset genuinely looks different because the
+  // point set is different, and early-time the pattern is fine-grained instead
+  // of the obviously-spherical big-blob look. Using many small seeds also lets
+  // the reaction's pattern-formation regime dominate the final look rather
+  // than the initial geometry.
+  const seedCount = 80;
+  // Center 40% of the volume → patterns have lots of room to grow into the
+  // interior before the Dirichlet boundary's reservoir zone kicks in at ~80%.
+  const lo = 0.30, hi = 0.70;
+  for (let b = 0; b < seedCount; b++) {
+    const cx = Math.floor(N * (lo + Math.random() * (hi - lo)));
+    const cy = Math.floor(N * (lo + Math.random() * (hi - lo)));
+    const cz = Math.floor(N * (lo + Math.random() * (hi - lo)));
+    // Mix of point seeds and tiny 2-cell-radius blobs for variety.
+    const r = Math.random() < 0.5 ? 1 : 2;
+    for (let dz = -r; dz <= r; dz++) {
+      for (let dy = -r; dy <= r; dy++) {
+        for (let dx = -r; dx <= r; dx++) {
+          if (dx * dx + dy * dy + dz * dz > r * r) continue;
           const x = cx + dx, y = cy + dy, z = cz + dz;
           if (x < 0 || y < 0 || z < 0 || x >= N || y >= N || z >= N) continue;
           const i = (z * N * N + y * N + x) * 4;

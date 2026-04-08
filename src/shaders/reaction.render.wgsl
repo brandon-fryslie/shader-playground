@@ -129,8 +129,15 @@ fn fs_main(in: VSOut) -> @location(0) vec4f {
     let v = sampleV(p);
     let u = sampleU(p);
 
+    // [LAW:dataflow-not-control-flow] Spherical alpha falloff so no visible cube.
+    // Every sample multiplies by a radial mask that is 1 in the interior and 0
+    // outside — there's no "cube edge", only a soft sphere of visibility.
+    // Center of the cube is the origin; half-size = worldSize/2.
+    let rel = length(p) / (rparams.worldSize * 0.5);
+    let cubeFade = 1.0 - smoothstep(0.78, 0.95, rel);
+
     // Soft density: wider band than before so sub-texel surfaces don't pop.
-    let soft = smoothstep(iso - 0.08, iso + 0.08, v);
+    let soft = smoothstep(iso - 0.08, iso + 0.08, v) * cubeFade;
     // Thickness along this step → alpha. Scaled so doubling step count
     // yields roughly the same total opacity through a region.
     let alpha = 1.0 - exp(-soft * 10.0 * dt);
