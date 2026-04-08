@@ -872,7 +872,7 @@ function renderGrid(pass: GPURenderPassEncoder, aspect: number, viewIndex = 0): 
 const XR_UI_PANEL_CENTER: [number, number, number] = [0, -0.4, -3.5];
 const XR_UI_PANEL_SIZE: [number, number] = [1.2, 0.55];
 const XR_UI_BTN_Y = 0.16;
-const XR_UI_BTN_HALF_W = 0.16;  // widened from 0.12 to fit chevron + label
+const XR_UI_BTN_HALF_W = 0.18;  // wide enough for chevron + label side-by-side
 const XR_UI_BTN_HALF_H = 0.11;
 const XR_UI_PREV_X_FRAC = -0.30;  // aspect-relative
 const XR_UI_NEXT_X_FRAC =  0.30;
@@ -880,10 +880,15 @@ const XR_UI_SLIDER_Y = -0.20;
 const XR_UI_SLIDER_HALF_H = 0.05;
 const XR_UI_SLIDER_HALF_W_FRAC = 0.42; // aspect-relative
 
-// Label atlas layout — a single canvas strip split into 3 equal horizontal thirds:
-// [0..1/3] PREV, [1/3..2/3] NEXT, [2/3..1] current slider label (e.g. "FORCE").
-const XR_UI_LABEL_CANVAS_W = 768;
+// Label atlas layout — single canvas with non-uniform sub-rects so each label's
+// aspect matches the panel rect it will be sampled into (no squishing):
+//   [0.00 .. 0.25] PREV   — sub-rect 256×128, aspect 2:1 (matches button label)
+//   [0.25 .. 0.50] NEXT   — sub-rect 256×128, aspect 2:1
+//   [0.50 .. 1.00] slider — sub-rect 512×128, aspect 4:1 (matches slider label)
+// u-ranges are mirrored in src/shaders/xr.ui.wgsl.
+const XR_UI_LABEL_CANVAS_W = 1024;
 const XR_UI_LABEL_CANVAS_H = 128;
+const XR_UI_LABEL_FONT_FAMILY = '-apple-system, BlinkMacSystemFont, "Segoe UI", "Helvetica Neue", sans-serif';
 
 let xrUiPipeline!: GPURenderPipeline;
 let xrUiBGs!: GPUBindGroup[];
@@ -961,6 +966,27 @@ function initXrUi() {
   ]}));
 }
 
+// Draw a single label into a sub-rect, auto-shrinking the font until the text
+// fits with comfortable padding. Keeps long labels like "GRAVITY" from clipping.
+function drawXrUiLabel(
+  ctx: CanvasRenderingContext2D,
+  text: string,
+  rectX: number,
+  rectY: number,
+  rectW: number,
+  rectH: number,
+): void {
+  const maxTextW = rectW * 0.82;
+  const maxTextH = rectH * 0.75;
+  let fontPx = Math.floor(maxTextH);
+  ctx.font = `bold ${fontPx}px ${XR_UI_LABEL_FONT_FAMILY}`;
+  while (fontPx > 12 && ctx.measureText(text).width > maxTextW) {
+    fontPx -= 2;
+    ctx.font = `bold ${fontPx}px ${XR_UI_LABEL_FONT_FAMILY}`;
+  }
+  ctx.fillText(text, rectX + rectW / 2, rectY + rectH / 2);
+}
+
 // Rasterize the three label strings to the canvas and upload to the label texture.
 // No-op if the mode hasn't changed since the last call.
 function updateXrUiLabels(mode: SimMode): void {
@@ -973,12 +999,16 @@ function updateXrUiLabels(mode: SimMode): void {
   ctx.fillStyle = 'white';
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
-  // Bold sans so the text renders cleanly after bloom/tonemap.
-  ctx.font = 'bold 78px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
-  const third = w / 3;
-  ctx.fillText('PREV', third * 0.5, h / 2);
-  ctx.fillText('NEXT', third * 1.5, h / 2);
-  ctx.fillText(XR_UI_SLIDER_DEFS[mode].label.toUpperCase(), third * 2.5, h / 2);
+
+  // Sub-rects (matching LABEL_*_U0/U1 in xr.ui.wgsl):
+  //   PREV:   [0, 0]    .. [0.25w, h]  → 256×128
+  //   NEXT:   [0.25w, 0].. [0.50w, h]  → 256×128
+  //   SLIDER: [0.50w, 0].. [w, h]      → 512×128
+  const quarter = w / 4;
+  drawXrUiLabel(ctx, 'PREV', 0,             0, quarter,     h);
+  drawXrUiLabel(ctx, 'NEXT', quarter,       0, quarter,     h);
+  drawXrUiLabel(ctx, XR_UI_SLIDER_DEFS[mode].label.toUpperCase(),
+                      quarter * 2,   0, quarter * 2, h);
 
   device.queue.copyExternalImageToTexture(
     { source: xrUiLabelCanvas },
