@@ -16,7 +16,7 @@ struct Params {
 }
 
 @group(0) @binding(0) var uvIn: texture_3d<f32>;
-@group(0) @binding(1) var uvOut: texture_storage_3d<rg16float, write>;
+@group(0) @binding(1) var uvOut: texture_storage_3d<rgba16float, write>;
 @group(0) @binding(2) var<uniform> params: Params;
 
 fn fetch(p: vec3<i32>, maxIdx: i32) -> vec2f {

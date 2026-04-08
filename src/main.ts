@@ -2112,18 +2112,22 @@ function createReactionSimulation() {
   const N = state.reaction.resolution;
   const WORLD_SIZE = 3.0;
 
+  // [LAW:one-source-of-truth] rgba16float is the baseline WebGPU storage-capable
+  // 16-bit float format. rg16float is NOT in the baseline storage-texture list,
+  // so attempting to use it silently failed texture creation. Use rgba16float and
+  // only read .rg in the shader — wastes 2 channels but plumbing stays simple.
   const texDesc: GPUTextureDescriptor = {
     size: [N, N, N],
     dimension: '3d',
-    format: 'rg16float',
+    format: 'rgba16float',
     usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
   };
   const uvTexA = device.createTexture(texDesc);
   const uvTexB = device.createTexture(texDesc);
 
   // Seed: u=1 everywhere, v=0 except a few random 3D blobs near the center.
-  // rg16float upload path: use Uint16Array half-floats (WebGPU writeTexture accepts raw bytes).
-  const seed = new Uint16Array(N * N * N * 2);
+  // rgba16float upload: 4 half-float channels × 2 bytes = 8 bytes/texel.
+  const seed = new Uint16Array(N * N * N * 4);
   // Half-float encoder (IEEE 754 binary16).
   const f2h = (f: number): number => {
     const buf = new Float32Array(1);
@@ -2143,9 +2147,11 @@ function createReactionSimulation() {
   for (let z = 0; z < N; z++) {
     for (let y = 0; y < N; y++) {
       for (let x = 0; x < N; x++) {
-        const i = (z * N * N + y * N + x) * 2;
-        seed[i] = h_one;
-        seed[i + 1] = h_zero;
+        const i = (z * N * N + y * N + x) * 4;
+        seed[i] = h_one;      // r = u
+        seed[i + 1] = h_zero; // g = v
+        seed[i + 2] = h_zero;
+        seed[i + 3] = h_zero;
       }
     }
   }
@@ -2162,24 +2168,25 @@ function createReactionSimulation() {
           if (dx * dx + dy * dy + dz * dz > blobRadius * blobRadius) continue;
           const x = cx + dx, y = cy + dy, z = cz + dz;
           if (x < 0 || y < 0 || z < 0 || x >= N || y >= N || z >= N) continue;
-          const i = (z * N * N + y * N + x) * 2;
+          const i = (z * N * N + y * N + x) * 4;
           seed[i] = h_half;       // u → 0.5
           seed[i + 1] = h_half;   // v → 0.5
         }
       }
     }
   }
+  // rgba16float = 8 bytes/texel, so bytesPerRow = N * 8.
   device.queue.writeTexture(
     { texture: uvTexA },
     seed.buffer,
-    { bytesPerRow: N * 4, rowsPerImage: N },
+    { bytesPerRow: N * 8, rowsPerImage: N },
     [N, N, N],
   );
   // Also initialize B with the same state so the first render (before any steps) looks right.
   device.queue.writeTexture(
     { texture: uvTexB },
     seed.buffer,
-    { bytesPerRow: N * 4, rowsPerImage: N },
+    { bytesPerRow: N * 8, rowsPerImage: N },
     [N, N, N],
   );
 
@@ -2188,7 +2195,7 @@ function createReactionSimulation() {
   const computeBGL = device.createBindGroupLayout({
     entries: [
       { binding: 0, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: 'float', viewDimension: '3d' } },
-      { binding: 1, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: 'write-only', format: 'rg16float', viewDimension: '3d' } },
+      { binding: 1, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: 'write-only', format: 'rgba16float', viewDimension: '3d' } },
       { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
     ],
   });
@@ -3621,18 +3628,68 @@ let frameCount = 0;
 let fpsTime = 0;
 let currentFps = 0;
 
+// [LAW:single-enforcer] All sim creation funnels through here, so error surfacing
+// (both sync throws and async GPU validation errors) happens in exactly one place.
+// A failed factory leaves simulations[mode] unset so the render loop short-circuits
+// instead of repeatedly hitting the same bad GPU state.
+function showSimError(mode: SimMode, msg: string) {
+  console.error(`[sim:${mode}]`, msg);
+  let overlay = document.getElementById('gpu-error-overlay');
+  if (!overlay) {
+    overlay = document.createElement('div');
+    overlay.id = 'gpu-error-overlay';
+    overlay.style.cssText = 'position:fixed;top:60px;left:10px;right:10px;max-height:60vh;overflow:auto;background:rgba(20,0,0,0.92);color:#ff8080;font:11px monospace;padding:10px;border:1px solid #ff4040;border-radius:4px;z-index:9999;white-space:pre-wrap;';
+    document.body.appendChild(overlay);
+  }
+  const stamp = new Date().toLocaleTimeString();
+  overlay.textContent = `[${stamp}] [sim:${mode}] ${msg}\n\n` + overlay.textContent;
+}
+
 function ensureSimulation() {
   const mode = state.mode;
-  if (!simulations[mode]) {
-    const factories = {
-      boids: createBoidsSimulation,
-      physics: createPhysicsSimulation,
-      physics_classic: createPhysicsClassicSimulation,
-      fluid: createFluidSimulation,
-      parametric: createParametricSimulation,
-      reaction: createReactionSimulation,
-    };
-    simulations[mode] = factories[mode]();
+  if (simulations[mode]) return;
+
+  const factories = {
+    boids: createBoidsSimulation,
+    physics: createPhysicsSimulation,
+    physics_classic: createPhysicsClassicSimulation,
+    fluid: createFluidSimulation,
+    parametric: createParametricSimulation,
+    reaction: createReactionSimulation,
+  };
+
+  // Scope validation errors during creation so they surface loudly instead of
+  // poisoning later frames. Without this, a bad texture format or pipeline
+  // layout just leaves the user staring at a black canvas.
+  device.pushErrorScope('validation');
+  device.pushErrorScope('internal');
+  device.pushErrorScope('out-of-memory');
+
+  let sim: Simulation | null = null;
+  try {
+    sim = factories[mode]();
+  } catch (e) {
+    showSimError(mode, `factory threw: ${(e as Error).message}`);
+  }
+
+  // Pop all three scopes regardless of throw, so we don't leak them.
+  device.popErrorScope().then(err => { if (err) showSimError(mode, `OOM: ${err.message}`); });
+  device.popErrorScope().then(err => { if (err) showSimError(mode, `internal: ${err.message}`); });
+  device.popErrorScope().then(err => {
+    if (err) {
+      showSimError(mode, `validation: ${err.message}`);
+      // If creation had validation errors, the sim is almost certainly broken —
+      // drop it so we don't render garbage on repeat.
+      const broken = simulations[mode];
+      if (broken) {
+        try { broken.destroy(); } catch { /* already in a bad state */ }
+        delete simulations[mode];
+      }
+    }
+  });
+
+  if (sim) {
+    simulations[mode] = sim;
   }
 }
 
@@ -3803,31 +3860,57 @@ function frame(now: DOMHighResTimeStamp) {
   const sim = simulations[state.mode];
   if (!sim) return;
 
+  // [LAW:single-enforcer] Frame-level validation scope: if the sim produces bad
+  // GPU work, drop it once and surface the error instead of freezing silently.
+  // The scope promise runs async, so it reports on the next tick — that's fine;
+  // we just need to stop repeatedly feeding the GPU bad commands.
+  device.pushErrorScope('validation');
+
+  const mode = state.mode;
   const encoder = device.createCommandEncoder();
 
-  if (!state.paused) {
-    sim.compute(encoder);
+  try {
+    if (!state.paused) {
+      sim.compute(encoder);
+    }
+
+    const prevIdx = postFx.sceneIdx;
+    const currIdx = 1 - prevIdx;
+    postFx.sceneIdx = currIdx;
+
+    // Trail decay (no-op if trails disabled or first frame after clear)
+    runFadePass(encoder, prevIdx, currIdx);
+
+    // Sim renders into HDR scene[currIdx] (loadOp determined by getColorAttachment).
+    const sceneViewDummy = postFx.scene[currIdx].createView();
+    sim.render(encoder, sceneViewDummy, null);
+
+    // Bloom + composite
+    runBloomChain(encoder, postFx.scene[currIdx]);
+    const swapchainView = context.getCurrentTexture().createView();
+    runComposite(encoder, postFx.scene[currIdx], swapchainView, canvasFormat);
+
+    device.queue.submit([encoder.finish()]);
+
+    postFx.needsClear = false;
+  } catch (e) {
+    showSimError(mode, `frame threw: ${(e as Error).message}`);
+    const broken = simulations[mode];
+    if (broken) {
+      try { broken.destroy(); } catch { /* ignore */ }
+      delete simulations[mode];
+    }
   }
 
-  const prevIdx = postFx.sceneIdx;
-  const currIdx = 1 - prevIdx;
-  postFx.sceneIdx = currIdx;
-
-  // Trail decay (no-op if trails disabled or first frame after clear)
-  runFadePass(encoder, prevIdx, currIdx);
-
-  // Sim renders into HDR scene[currIdx] (loadOp determined by getColorAttachment).
-  const sceneViewDummy = postFx.scene[currIdx].createView();
-  sim.render(encoder, sceneViewDummy, null);
-
-  // Bloom + composite
-  runBloomChain(encoder, postFx.scene[currIdx]);
-  const swapchainView = context.getCurrentTexture().createView();
-  runComposite(encoder, postFx.scene[currIdx], swapchainView, canvasFormat);
-
-  device.queue.submit([encoder.finish()]);
-
-  postFx.needsClear = false;
+  device.popErrorScope().then(err => {
+    if (!err) return;
+    showSimError(mode, `frame validation: ${err.message}`);
+    const broken = simulations[mode];
+    if (broken) {
+      try { broken.destroy(); } catch { /* ignore */ }
+      delete simulations[mode];
+    }
+  });
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
