@@ -20,6 +20,7 @@ import SHADER_PARAMETRIC_RENDER from './shaders/parametric.render.wgsl?raw';
 import SHADER_REACTION_COMPUTE from './shaders/reaction.compute.wgsl?raw';
 import SHADER_REACTION_RENDER from './shaders/reaction.render.wgsl?raw';
 import SHADER_GRID from './shaders/grid.wgsl?raw';
+import SHADER_XR_UI from './shaders/xr.ui.wgsl?raw';
 import SHADER_POST_FADE from './shaders/post.fade.wgsl?raw';
 import SHADER_POST_DOWNSAMPLE from './shaders/post.downsample.wgsl?raw';
 import SHADER_POST_UPSAMPLE from './shaders/post.upsample.wgsl?raw';
@@ -771,7 +772,7 @@ async function initWebGPU(): Promise<boolean> {
   device.lost.then((info) => {
     console.error('WebGPU device lost:', info.message);
     if (info.reason !== 'destroyed') {
-      initWebGPU().then(ok => { if (ok) { initGrid(); ensureSimulation(); requestAnimationFrame(frame); } });
+      initWebGPU().then(ok => { if (ok) { initGrid(); initXrUi(); ensureSimulation(); requestAnimationFrame(frame); } });
     }
   });
 
@@ -862,6 +863,95 @@ function renderGrid(pass: GPURenderPassEncoder, aspect: number, viewIndex = 0): 
   pass.setPipeline(gridPipeline);
   pass.setBindGroup(0, gridBGs[viewIndex]);
   pass.draw(30);
+}
+
+
+// ═══ XR UI PANEL RENDERER ═══
+// [LAW:one-source-of-truth] Panel layout constants live here and are mirrored
+// (with matching comments) in src/shaders/xr.ui.wgsl. Keep them in sync.
+const XR_UI_PANEL_CENTER: [number, number, number] = [0, -0.4, -3.5];
+const XR_UI_PANEL_SIZE: [number, number] = [1.2, 0.55];
+const XR_UI_BTN_Y = 0.16;
+const XR_UI_BTN_HALF_W = 0.12;
+const XR_UI_BTN_HALF_H = 0.11;
+const XR_UI_PREV_X_FRAC = -0.30;  // aspect-relative
+const XR_UI_NEXT_X_FRAC =  0.30;
+const XR_UI_SLIDER_Y = -0.20;
+const XR_UI_SLIDER_HALF_H = 0.05;
+const XR_UI_SLIDER_HALF_W_FRAC = 0.42; // aspect-relative
+
+let xrUiPipeline!: GPURenderPipeline;
+let xrUiBGs!: GPUBindGroup[];
+let xrUiCameraBuffer!: GPUBuffer;
+let xrUiParamsBuffer!: GPUBuffer;
+
+function initXrUi() {
+  xrUiCameraBuffer?.destroy();
+  xrUiParamsBuffer?.destroy();
+  xrUiCameraBuffer = device.createBuffer({ size: CAMERA_STRIDE * 2, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+  // UIParams layout (32 bytes): center.xyz, _pad, sizeX, sizeY, sliderValue, hover
+  xrUiParamsBuffer = device.createBuffer({ size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+  const uiModule = device.createShaderModule({ code: SHADER_XR_UI });
+
+  const uiBGL = device.createBindGroupLayout({
+    entries: [
+      { binding: 0, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
+      { binding: 1, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
+    ]
+  });
+
+  xrUiPipeline = device.createRenderPipeline({
+    layout: device.createPipelineLayout({ bindGroupLayouts: [uiBGL] }),
+    vertex: { module: uiModule, entryPoint: 'vs_main' },
+    fragment: {
+      module: uiModule, entryPoint: 'fs_main',
+      targets: [{
+        format: renderTargetFormat,
+        blend: {
+          color: { srcFactor: 'src-alpha', dstFactor: 'one-minus-src-alpha', operation: 'add' },
+          alpha: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha', operation: 'add' },
+        }
+      }]
+    },
+    primitive: { topology: 'triangle-list' },
+    // Depth-test disabled — the panel always renders on top of the sim.
+    depthStencil: { format: 'depth24plus', depthWriteEnabled: false, depthCompare: 'always' },
+    multisample: { count: renderSampleCount },
+  });
+
+  xrUiBGs = [0, 1].map(vi => device.createBindGroup({ layout: uiBGL, entries: [
+    { binding: 0, resource: { buffer: xrUiCameraBuffer, offset: vi * CAMERA_STRIDE, size: CAMERA_SIZE } },
+    { binding: 1, resource: { buffer: xrUiParamsBuffer } },
+  ]}));
+}
+
+function xrUiHoverAsFloat(): number {
+  switch (xrUiState.hover) {
+    case 'prev':   return 1.0;
+    case 'next':   return 2.0;
+    case 'slider': return 3.0;
+    default:       return 0.0;
+  }
+}
+
+function renderXrUi(pass: GPURenderPassEncoder, aspect: number, viewIndex = 0): void {
+  device.queue.writeBuffer(xrUiCameraBuffer, viewIndex * CAMERA_STRIDE, getCameraUniformData(aspect));
+  // Only write params once per frame (both eyes see the same UI state).
+  if (viewIndex === 0) {
+    const data = new Float32Array(8);
+    data[0] = XR_UI_PANEL_CENTER[0];
+    data[1] = XR_UI_PANEL_CENTER[1];
+    data[2] = XR_UI_PANEL_CENTER[2];
+    data[3] = 0; // _pad
+    data[4] = XR_UI_PANEL_SIZE[0];
+    data[5] = XR_UI_PANEL_SIZE[1];
+    data[6] = getXrSliderNormalized();
+    data[7] = xrUiHoverAsFloat();
+    device.queue.writeBuffer(xrUiParamsBuffer, 0, data);
+  }
+  pass.setPipeline(xrUiPipeline);
+  pass.setBindGroup(0, xrUiBGs[viewIndex]);
+  pass.draw(6);
 }
 
 
@@ -3078,6 +3168,136 @@ let xrLayer: XRProjectionLayer | null = null;
 let xrInteractionSource: XRInputSource | null = null;
 let xrInteractionHasSample = false;
 
+// --- XR UI state ---
+type XrUiElement = 'none' | 'prev' | 'next' | 'slider';
+
+interface XrUiSliderDef { key: string; label: string; min: number; max: number; }
+const XR_UI_SLIDER_DEFS: Record<SimMode, XrUiSliderDef> = {
+  boids:           { key: 'maxSpeed',      label: 'Speed',   min: 0.1,  max: 10  },
+  physics:         { key: 'G',             label: 'Gravity', min: 0.01, max: 100 },
+  physics_classic: { key: 'G',             label: 'Gravity', min: 0.01, max: 100 },
+  fluid:           { key: 'forceStrength', label: 'Force',   min: 1,    max: 500 },
+  parametric:      { key: 'scale',         label: 'Scale',   min: 0.1,  max: 5   },
+  reaction:        { key: 'feed',          label: 'Feed',    min: 0.0,  max: 0.1 },
+};
+const XR_UI_MODE_ORDER: SimMode[] = ['boids', 'physics', 'physics_classic', 'fluid', 'parametric', 'reaction'];
+
+const xrUiState = {
+  hover:              'none' as XrUiElement,
+  pressed:            'none' as XrUiElement,
+  pressingSource:     null as XRInputSource | null,
+  pendingPressSource: null as XRInputSource | null,
+  grabbed:            false,
+};
+
+function getXrSliderNormalized(): number {
+  const def = XR_UI_SLIDER_DEFS[state.mode];
+  const modeParamsObj = state[state.mode] as unknown as Record<string, number>;
+  const v = modeParamsObj[def.key];
+  if (typeof v !== 'number') return 0;
+  return Math.max(0, Math.min(1, (v - def.min) / (def.max - def.min)));
+}
+
+// Ray-plane intersection against the panel (plane at z = center[2], normal = +Z).
+// Returns panel-local (px, py) in aspect-corrected coords and the element under the hit.
+function hitTestXrUi(origin: number[], dir: number[]): { px: number; py: number; element: XrUiElement } | null {
+  const [cx, cy, cz] = XR_UI_PANEL_CENTER;
+  const [sx, sy] = XR_UI_PANEL_SIZE;
+  if (Math.abs(dir[2]) < 1e-6) return null;
+  const t = (cz - origin[2]) / dir[2];
+  if (t < 0) return null;
+  const hitX = origin[0] + dir[0] * t;
+  const hitY = origin[1] + dir[1] * t;
+  const u = (hitX - cx) / sx + 0.5;
+  const v = (hitY - cy) / sy + 0.5;
+  if (u < 0 || u > 1 || v < 0 || v > 1) return null;
+
+  const aspect = sx / sy;
+  const px = (u - 0.5) * aspect;
+  const py = v - 0.5;
+
+  // Classify — box tests matching the shader's element placements.
+  let element: XrUiElement = 'none';
+  if (Math.abs(px - XR_UI_PREV_X_FRAC * aspect) < XR_UI_BTN_HALF_W && Math.abs(py - XR_UI_BTN_Y) < XR_UI_BTN_HALF_H) {
+    element = 'prev';
+  } else if (Math.abs(px - XR_UI_NEXT_X_FRAC * aspect) < XR_UI_BTN_HALF_W && Math.abs(py - XR_UI_BTN_Y) < XR_UI_BTN_HALF_H) {
+    element = 'next';
+  } else {
+    const trackHalfW = aspect * XR_UI_SLIDER_HALF_W_FRAC;
+    if (Math.abs(py - XR_UI_SLIDER_Y) < XR_UI_SLIDER_HALF_H && Math.abs(px) < trackHalfW + 0.04) {
+      element = 'slider';
+    }
+  }
+  return { px, py, element };
+}
+
+function setXrSliderFromHit(px: number): void {
+  const aspect = XR_UI_PANEL_SIZE[0] / XR_UI_PANEL_SIZE[1];
+  const trackHalfW = aspect * XR_UI_SLIDER_HALF_W_FRAC;
+  const t = Math.max(0, Math.min(1, (px + trackHalfW) / (2 * trackHalfW)));
+  const def = XR_UI_SLIDER_DEFS[state.mode];
+  const modeParamsObj = state[state.mode] as unknown as Record<string, number>;
+  modeParamsObj[def.key] = def.min + (def.max - def.min) * t;
+}
+
+function cycleXrUiMode(delta: number): void {
+  const idx = XR_UI_MODE_ORDER.indexOf(state.mode);
+  const next = XR_UI_MODE_ORDER[(idx + delta + XR_UI_MODE_ORDER.length) % XR_UI_MODE_ORDER.length];
+  state.mode = next;
+  ensureSimulation();
+}
+
+function getXrInputRay(frame: XRFrame, source: XRInputSource): { origin: number[]; dir: number[] } | null {
+  if (!xrRefSpace) return null;
+  const pose = frame.getPose(source.targetRaySpace, xrRefSpace);
+  if (!pose) return null;
+  const p = pose.transform.position;
+  return {
+    origin: [p.x, p.y, p.z],
+    dir: getXRTargetRayDirection(pose.transform),
+  };
+}
+
+function updateXrUiInput(frame: XRFrame): void {
+  // Pending press from selectstart — resolve it against the first available ray.
+  if (xrUiState.pendingPressSource) {
+    const src = xrUiState.pendingPressSource;
+    const ray = getXrInputRay(frame, src);
+    if (ray) {
+      const hit = hitTestXrUi(ray.origin, ray.dir);
+      xrUiState.pendingPressSource = null;
+      if (hit && hit.element !== 'none') {
+        xrUiState.pressed = hit.element;
+        xrUiState.pressingSource = src;
+        xrUiState.hover = hit.element;
+        if (hit.element === 'slider') {
+          xrUiState.grabbed = true;
+          setXrSliderFromHit(hit.px);
+        }
+        return; // suppress sim interaction for this press
+      }
+      // Press is not on the UI — start sim interaction as normal.
+      setXRInteractionSource(src);
+    }
+    return;
+  }
+
+  // Active UI press — keep the hover synced and drag the slider if grabbed.
+  if (xrUiState.pressingSource) {
+    const ray = getXrInputRay(frame, xrUiState.pressingSource);
+    if (ray) {
+      const hit = hitTestXrUi(ray.origin, ray.dir);
+      xrUiState.hover = hit ? hit.element : 'none';
+      if (xrUiState.grabbed && hit) {
+        setXrSliderFromHit(hit.px);
+      }
+    }
+    return;
+  }
+
+  xrUiState.hover = 'none';
+}
+
 function setXRInteractionSource(inputSource: XRInputSource | null) {
   xrInteractionSource = inputSource;
   xrInteractionHasSample = false;
@@ -3090,6 +3310,12 @@ function getXRTargetRayDirection(transform: XRRigidTransform) {
 }
 
 function updateXRSimulationInteraction(frame: XRFrame) {
+  // [LAW:single-enforcer] UI press owns the pinch exclusively — sim interaction
+  // must stay inactive so the two can't both respond to the same gesture.
+  if (xrUiState.pressed !== 'none') {
+    setSimulationInteractionInactive();
+    return;
+  }
   const source = xrInteractionSource;
   if (!source || !xrRefSpace) {
     setSimulationInteractionInactive();
@@ -3240,10 +3466,32 @@ async function toggleXR() {
     // This replaces the default baseLayer (canvas-backed) with our GPU texture layer.
     xrSession.updateRenderState({ layers: [xrLayer] });
     xrSession.addEventListener('selectstart', (event) => {
-      setXRInteractionSource((event as XRInputSourceEvent).inputSource);
+      const src = (event as XRInputSourceEvent).inputSource;
+      // Defer decision (UI vs sim interaction) until the next XRFrame when a
+      // real pose is available.
+      xrUiState.pendingPressSource = src;
     });
     xrSession.addEventListener('selectend', (event) => {
       const inputSource = (event as XRInputSourceEvent).inputSource;
+
+      // If this release matches an active UI press, trigger button action and clear state.
+      if (xrUiState.pressingSource === inputSource) {
+        const pressed = xrUiState.pressed;
+        if (pressed === 'prev' && xrUiState.hover === 'prev') cycleXrUiMode(-1);
+        else if (pressed === 'next' && xrUiState.hover === 'next') cycleXrUiMode(1);
+        xrUiState.pressed = 'none';
+        xrUiState.pressingSource = null;
+        xrUiState.grabbed = false;
+        xrUiState.hover = 'none';
+        return;
+      }
+
+      // Pending press that never got resolved (released before first frame) — drop it.
+      if (xrUiState.pendingPressSource === inputSource) {
+        xrUiState.pendingPressSource = null;
+        return;
+      }
+
       const sameSource = xrInteractionSource === inputSource;
       setXRInteractionSource(sameSource ? null : xrInteractionSource);
     });
@@ -3285,6 +3533,8 @@ function xrFrame(time: DOMHighResTimeStamp, xrFrameData: XRFrame) {
     const sim = simulations[state.mode];
     if (!sim) return;
 
+    // UI input runs first — it may claim a pinch that would otherwise drive the sim.
+    updateXrUiInput(xrFrameData);
     updateXRSimulationInteraction(xrFrameData);
 
     const encoder = device.createCommandEncoder();
@@ -3331,6 +3581,23 @@ function xrFrame(time: DOMHighResTimeStamp, xrFrameData: XRFrame) {
       postFx.needsClear = true; // force loadOp:clear; no XR trails
       const sceneIdx = postFx.sceneIdx;
       sim.render(encoder, postFx.scene[sceneIdx].createView(), null, viewIndex);
+
+      // Overlay the XR UI panel into the HDR scene so it picks up tonemap + bloom.
+      const uiPass = encoder.beginRenderPass({
+        colorAttachments: [{
+          view: postFx.scene[sceneIdx].createView(),
+          loadOp: 'load',
+          storeOp: 'store',
+        }],
+        depthStencilAttachment: {
+          view: postFx.depth!.createView(),
+          depthLoadOp: 'load',
+          depthStoreOp: 'store',
+        },
+      });
+      renderXrUi(uiPass, width / height, viewIndex);
+      uiPass.end();
+
       runBloomChain(encoder, postFx.scene[sceneIdx]);
       const ctFormat = subImage.colorTexture.format;
       runComposite(encoder, postFx.scene[sceneIdx], textureView, ctFormat, [x, y, width, height]);
@@ -3647,6 +3914,7 @@ async function main() {
   if (!ok) return;
 
   initGrid();
+  initXrUi();
   loadState();
   syncThemeTransition(state.colorTheme);
   buildControls();
