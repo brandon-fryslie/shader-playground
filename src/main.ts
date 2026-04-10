@@ -879,6 +879,10 @@ const XR_UI_NEXT_X_FRAC =  0.30;
 const XR_UI_SLIDER_Y = -0.20;
 const XR_UI_SLIDER_HALF_H = 0.05;
 const XR_UI_SLIDER_HALF_W_FRAC = 0.42; // aspect-relative
+// Grab handle — thin pill at the bottom of the panel for repositioning.
+const XR_UI_GRAB_Y = -0.40;
+const XR_UI_GRAB_HALF_W = 0.10;
+const XR_UI_GRAB_HALF_H = 0.035;
 
 // Label atlas layout — single canvas with non-uniform sub-rects so each label's
 // aspect matches the panel rect it will be sampled into (no squishing):
@@ -1022,6 +1026,7 @@ function xrUiHoverAsFloat(): number {
     case 'prev':   return 1.0;
     case 'next':   return 2.0;
     case 'slider': return 3.0;
+    case 'grab':   return 4.0;
     default:       return 0.0;
   }
 }
@@ -3309,7 +3314,7 @@ let xrInteractionSource: XRInputSource | null = null;
 let xrInteractionHasSample = false;
 
 // --- XR UI state ---
-type XrUiElement = 'none' | 'prev' | 'next' | 'slider';
+type XrUiElement = 'none' | 'prev' | 'next' | 'slider' | 'grab';
 
 interface XrUiSliderDef { key: string; label: string; min: number; max: number; }
 const XR_UI_SLIDER_DEFS: Record<SimMode, XrUiSliderDef> = {
@@ -3333,6 +3338,9 @@ const xrUiState = {
   lastHitPx:          0,
   lastHitPy:          0,
   lastHitActive:      false,
+  // Panel drag state — recorded at grab-start so we can compute deltas.
+  grabDragOriginWorld: null as [number, number, number] | null,
+  grabDragOriginCenter: null as [number, number, number] | null,
 };
 
 function getXrSliderNormalized(): number {
@@ -3367,6 +3375,8 @@ function hitTestXrUi(origin: number[], dir: number[]): { px: number; py: number;
     element = 'prev';
   } else if (Math.abs(px - XR_UI_NEXT_X_FRAC * aspect) < XR_UI_BTN_HALF_W && Math.abs(py - XR_UI_BTN_Y) < XR_UI_BTN_HALF_H) {
     element = 'next';
+  } else if (Math.abs(py - XR_UI_GRAB_Y) < XR_UI_GRAB_HALF_H && Math.abs(px) < XR_UI_GRAB_HALF_W) {
+    element = 'grab';
   } else {
     const trackHalfW = aspect * XR_UI_SLIDER_HALF_W_FRAC;
     if (Math.abs(py - XR_UI_SLIDER_Y) < XR_UI_SLIDER_HALF_H && Math.abs(px) < trackHalfW + 0.04) {
@@ -3374,6 +3384,14 @@ function hitTestXrUi(origin: number[], dir: number[]): { px: number; py: number;
     }
   }
   return { px, py, element };
+}
+
+// Intersect a ray with a Z-plane, returning the world-space hit point.
+function xrRayPlaneHitWorld(origin: number[], dir: number[], planeZ: number): [number, number, number] | null {
+  if (Math.abs(dir[2]) < 1e-6) return null;
+  const t = (planeZ - origin[2]) / dir[2];
+  if (t < 0) return null;
+  return [origin[0] + dir[0] * t, origin[1] + dir[1] * t, planeZ];
 }
 
 function setXrSliderFromHit(px: number): void {
@@ -3430,6 +3448,13 @@ function updateXrUiInput(frame: XRFrame): void {
         if (hit.element === 'slider') {
           xrUiState.grabbed = true;
           setXrSliderFromHit(hit.px);
+        } else if (hit.element === 'grab') {
+          // Record the initial world-space hit and panel center for delta drag.
+          const worldHit = xrRayPlaneHitWorld(ray.origin, ray.dir, XR_UI_PANEL_CENTER[2]);
+          if (worldHit) {
+            xrUiState.grabDragOriginWorld = worldHit;
+            xrUiState.grabDragOriginCenter = [XR_UI_PANEL_CENTER[0], XR_UI_PANEL_CENTER[1], XR_UI_PANEL_CENTER[2]];
+          }
         }
         return; // suppress sim interaction for this press
       }
@@ -3443,6 +3468,21 @@ function updateXrUiInput(frame: XRFrame): void {
   if (xrUiState.pressingSource) {
     const ray = getXrInputRay(frame, xrUiState.pressingSource);
     if (ray) {
+      // Panel drag: move center by world-space delta from the grab origin.
+      if (xrUiState.pressed === 'grab' && xrUiState.grabDragOriginWorld && xrUiState.grabDragOriginCenter) {
+        const worldHit = xrRayPlaneHitWorld(ray.origin, ray.dir, xrUiState.grabDragOriginCenter[2]);
+        if (worldHit) {
+          XR_UI_PANEL_CENTER[0] = xrUiState.grabDragOriginCenter[0] + (worldHit[0] - xrUiState.grabDragOriginWorld[0]);
+          XR_UI_PANEL_CENTER[1] = xrUiState.grabDragOriginCenter[1] + (worldHit[1] - xrUiState.grabDragOriginWorld[1]);
+        }
+        // During drag, reticle stays on the grab bar.
+        xrUiState.lastHitPx = 0;
+        xrUiState.lastHitPy = XR_UI_GRAB_Y;
+        xrUiState.lastHitActive = true;
+        xrUiState.hover = 'grab';
+        return;
+      }
+
       const hit = hitTestXrUi(ray.origin, ray.dir);
       applyHitToUiState(hit);
       xrUiState.hover = hit ? hit.element : 'none';
@@ -3658,6 +3698,8 @@ async function toggleXR() {
         xrUiState.pressed = 'none';
         xrUiState.pressingSource = null;
         xrUiState.grabbed = false;
+        xrUiState.grabDragOriginWorld = null;
+        xrUiState.grabDragOriginCenter = null;
         xrUiState.hover = 'none';
         xrUiState.lastHitActive = false;
         // Slider drag committed — persist and refresh the DOM so the value is

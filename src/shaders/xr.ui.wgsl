@@ -201,6 +201,15 @@ fn fs_main(@location(0) uv: vec2f) -> @location(0) vec4f {
   let knobColor = mix(vec3f(0.92, 0.94, 1.0), camera.accent, sliderHover * 0.7);
   col = mix(col, knobColor, knobMask);
 
+  // --- Grab handle (thin pill at the bottom for panel repositioning) ---
+  let grabY = -0.40;
+  let grabDist = sdBox(p - vec2f(0.0, grabY), vec2f(0.10, 0.02), 0.02);
+  let grabMask = fill(grabDist, aa);
+  let grabHover = step(3.5, ui.hover) * (1.0 - step(4.5, ui.hover));
+  let grabColor = mix(vec3f(0.22, 0.24, 0.32), camera.accent * 0.9, grabHover);
+  col = mix(col, grabColor, grabMask);
+  alpha = max(alpha, grabMask * 0.95);
+
   // --- Reticle where the XR ray currently intersects the panel ---
   if (ui.hitActive > 0.5) {
     let hitP = p - vec2f(ui.hitX, ui.hitY);
