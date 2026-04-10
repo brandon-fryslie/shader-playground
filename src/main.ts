@@ -199,7 +199,7 @@ const PARAM_DEFS: Record<SimMode, ParamSection[]> = {
   ],
   reaction: [
     { section: 'Volume', params: [
-      { key: 'resolution', label: 'Resolution', type: 'dropdown', options: [64, 96, 128, 160], requiresReset: true },
+      { key: 'resolution', label: 'Resolution', type: 'dropdown', options: [64, 128], requiresReset: true },
       { key: 'stepsPerFrame', label: 'Steps/Frame', min: 1, max: 12, step: 1 },
     ]},
     { section: 'Reaction', params: [
