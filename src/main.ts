@@ -2444,11 +2444,11 @@ function createReactionSimulation() {
 
       renderGrid(pass, aspect, viewIndex);
 
-      // The "current" texture is the one that was most recently WRITTEN, which
-      // is the target of computeBGs[pong-1]. Since `pong` has already advanced
-      // past the last step, the current texture index = pong (0 → B, 1 → A).
+      // `pong` is flipped after each compute step, so after the loop it points
+      // at the bind group / texture that would be used as the read side on the
+      // next step. The current reaction volume is therefore the opposite side.
       pass.setPipeline(renderPipeline);
-      pass.setBindGroup(0, renderBGs[viewIndex][pong]);
+      pass.setBindGroup(0, renderBGs[viewIndex][1 - pong]);
       pass.draw(3);
       pass.end();
     },
