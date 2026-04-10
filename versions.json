@@ -4,15 +4,22 @@
     {
       "version": "pr-1",
       "ref": "refs/pull/1/merge",
-      "sha": "3d860618b06109f393936b9871c7e3794b1af35e",
-      "timestamp": "2026-04-10T01:25:27.082Z",
+      "sha": "6a722aa5cd51fec1fdaa010d0bfe60e51d2af71b",
+      "timestamp": "2026-04-10T01:27:52.811Z",
       "commits": [
         {
-          "sha": "3d860618b06109f393936b9871c7e3794b1af35e",
+          "sha": "6a722aa5cd51fec1fdaa010d0bfe60e51d2af71b",
           "author_name": "Brandon Fryslie",
           "author_email": "530235+brandon-fryslie@users.noreply.github.com",
-          "timestamp": "2026-04-09T19:25:14-06:00",
-          "message": "Merge 256ffbe2ad3588027cec7f8f89f4c62d31acde6e into 801483402712081b69953a05826897c86330268b\n"
+          "timestamp": "2026-04-09T19:27:41-06:00",
+          "message": "Merge 961f7717821187e2149885fbd187149e01804902 into 801483402712081b69953a05826897c86330268b\n"
+        },
+        {
+          "sha": "961f7717821187e2149885fbd187149e01804902",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-09T19:27:27-06:00",
+          "message": "persistence: derive saved modes from DEFAULTS registry\n\nsaveState/loadState previously hardcoded each sim mode by name, causing\nreaction and physics_classic to be silently omitted. Rather than adding\nto the manual list, loop over Object.keys(DEFAULTS) — the canonical mode\nregistry — so any future mode added to DEFAULTS is automatically persisted\nwith no further edits.\n\n[LAW:one-source-of-truth] DEFAULTS was already the single source of which\nmodes exist; the persistence layer now derives from it instead of\nmaintaining a parallel list.\n"
         },
         {
           "sha": "256ffbe2ad3588027cec7f8f89f4c62d31acde6e",
