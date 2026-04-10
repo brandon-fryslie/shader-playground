@@ -4146,17 +4146,12 @@ const STORAGE_KEY = 'shader-playground-state';
 
 function saveState() {
   try {
-    // Only persist user-configurable state, not transient mouse/runtime data
-    const toSave = {
-      mode: state.mode,
-      colorTheme: state.colorTheme,
-      boids: state.boids,
-      physics: state.physics,
-      fluid: state.fluid,
-      parametric: state.parametric,
-      camera: state.camera,
-      fx: state.fx,
-    };
+    // [LAW:one-source-of-truth] DEFAULTS is the canonical mode registry — no parallel list
+    const modeSnapshot: Record<string, unknown> = {};
+    for (const mode of Object.keys(DEFAULTS) as SimMode[]) {
+      modeSnapshot[mode] = modeParams(mode);
+    }
+    const toSave = { mode: state.mode, colorTheme: state.colorTheme, camera: state.camera, fx: state.fx, ...modeSnapshot };
     localStorage.setItem(STORAGE_KEY, JSON.stringify(toSave));
   } catch (e) { /* ignore quota errors */ }
 }
@@ -4166,13 +4161,12 @@ function loadState() {
     const saved = localStorage.getItem(STORAGE_KEY);
     if (!saved) return;
     const parsed = JSON.parse(saved);
-    // Merge carefully — don't clobber transient fields or break structure
     if (parsed.mode && parsed.mode in DEFAULTS) state.mode = parsed.mode as SimMode;
     if (parsed.colorTheme && COLOR_THEMES[parsed.colorTheme]) state.colorTheme = parsed.colorTheme;
-    if (parsed.boids) Object.assign(state.boids, parsed.boids);
-    if (parsed.physics) Object.assign(state.physics, parsed.physics);
-    if (parsed.fluid) Object.assign(state.fluid, parsed.fluid);
-    if (parsed.parametric) Object.assign(state.parametric, parsed.parametric);
+    // [LAW:one-source-of-truth] loop over DEFAULTS so new modes get persistence automatically
+    for (const mode of Object.keys(DEFAULTS) as SimMode[]) {
+      if (parsed[mode]) Object.assign(modeParams(mode), parsed[mode]);
+    }
     if (parsed.camera) Object.assign(state.camera, parsed.camera);
     if (parsed.fx) Object.assign(state.fx, parsed.fx);
     syncThemeTransition(state.colorTheme);
