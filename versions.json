@@ -4,15 +4,36 @@
     {
       "version": "pr-1",
       "ref": "refs/pull/1/merge",
-      "sha": "bd07eb50557a69775e2928241771c0c8a2eeb768",
-      "timestamp": "2026-04-08T11:12:32.140Z",
+      "sha": "11889442b6b3b59641fb88b5aa56204a6903ce91",
+      "timestamp": "2026-04-10T00:34:21.799Z",
       "commits": [
         {
-          "sha": "bd07eb50557a69775e2928241771c0c8a2eeb768",
+          "sha": "11889442b6b3b59641fb88b5aa56204a6903ce91",
           "author_name": "Brandon Fryslie",
           "author_email": "530235+brandon-fryslie@users.noreply.github.com",
-          "timestamp": "2026-04-08T11:12:16Z",
-          "message": "Merge b230d4f41702b0f3296748100088c10e24c3ae47 into 801483402712081b69953a05826897c86330268b\n"
+          "timestamp": "2026-04-10T00:34:06Z",
+          "message": "Merge 3f3dea5da4b94ae2a08dfa9b3f40f80ccad782ab into 801483402712081b69953a05826897c86330268b\n"
+        },
+        {
+          "sha": "3f3dea5da4b94ae2a08dfa9b3f40f80ccad782ab",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-09T18:34:01-06:00",
+          "message": "XR UI panel: add grab handle for repositioning\n\nAdds a visionOS-style grab bar at the bottom of the panel that lets\nusers pinch-drag to reposition the panel anywhere in 3D space.\n\n- New 'grab' element type in hit-testing and hover encoding\n- Thin rounded pill at y=-0.40 below the slider, lights up with\n  camera.accent on hover\n- Drag tracks the world-space delta between initial and current\n  ray/Z-plane intersection, offsetting XR_UI_PANEL_CENTER each frame\n- Panel position persists across pinch releases within a session\n- Grab state cleanly cleared on selectend alongside other UI state\n"
+        },
+        {
+          "sha": "0e4fb78820a5fbc17c0b05048b75439ca57868ac",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-08T07:18:49-06:00",
+          "message": "fix reaction time knob, bg race, nbody classic reserved word\n\n1. Reaction time slider: timeScale now drives substep count, not dt.\n   Previously multiplying into dt blew past the explicit-Euler stability\n   bound (~0.79 for Du=0.2097), producing NaN and a disappearing sim.\n\n2. Reaction render ping-pong was off-by-one: renderBGs[pong] was reading\n   the STALE texture. Swapped mapping so render sees the latest write.\n\n3. Error scope handlers were deleting whatever sim currently lived at\n   simulations[mode], which could be a fresh one the user just reset.\n   Now captures the sim instance and only drops it if still the same.\n\n4. nbody.classic.render.wgsl: renamed struct field 'active' -> 'enabled'.\n   'active' is a WGSL reserved keyword, caused compile failure at 26:26.\n"
+        },
+        {
+          "sha": "137a430deb499c19d1758fe74692bc00a74cc1c6",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-08T07:06:29-06:00",
+          "message": "reaction sim: remove visible cube, scatter-noise seed\n\nThree user-visible issues addressed:\n\n1. Invisible boundary cube: patterns were piling up against the hard\n   clamped-coord texture edge and you could see the cube outline.\n   Added Dirichlet boundary in the compute shader — a smooth band at\n   r > 0.80 of half-size pulls every cell toward (u=1, v=0), creating\n   a \"reservoir\" zone that absorbs patterns before they reach the wall.\n   Patterns now die in the interior; they literally cannot escape.\n\n2. Visible cube edges in render: added a spherical alpha falloff\n   (1 - smoothstep(0.78, 0.95, radial distance)) so the render has no\n   cube edges at all — only a soft spherical fade to invisible.\n\n3. \"Keeps growing the same blobs again\" on reset: the old seed was 12\n   big spherical blobs in a fixed central region, so every reset\n   produced the same general silhouette regardless of preset. Replaced\n   with a scattered noise seed — 80 tiny random points (1-2 cell\n   radius) in the center 40% of the volume. Each reset now looks\n   genuinely different and early-time patterns are fine-grained\n   instead of obviously spherical.\n\nThe reset plumbing itself was already correct: applyPreset calls\nresetCurrentSim which destroys + recreates the sim, so the factory\nre-runs Math.random for every preset click.\n"
         },
         {
           "sha": "b230d4f41702b0f3296748100088c10e24c3ae47",
