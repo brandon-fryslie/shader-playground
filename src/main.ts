@@ -3139,8 +3139,6 @@ function setupMobileTouchControls() {
 }
 
 function setupMobileFab() {
-  const controls = document.getElementById('controls')!;
-
   document.getElementById('fab-pause')!.addEventListener('click', () => {
     state.paused = !state.paused;
     document.getElementById('fab-pause')!.textContent = state.paused ? '\u25B6' : '\u23F8';
@@ -3152,10 +3150,6 @@ function setupMobileFab() {
 
   document.getElementById('fab-reset')!.addEventListener('click', () => {
     resetCurrentSim();
-  });
-
-  document.getElementById('fab-controls')!.addEventListener('click', () => {
-    controls.classList.toggle('mobile-expanded');
   });
 
   // Mode stepper prev/next — reuse XR_UI_MODE_ORDER for consistent ordering
@@ -3173,26 +3167,51 @@ function setupMobileFab() {
 
 function setupBottomSheet() {
   const controls = document.getElementById('controls')!;
-  const handle = controls.querySelector('.mobile-drag-handle')!;
   let startY = 0;
+  let startScrollTop = 0;
+  let tracking = false;
+  const SWIPE_THRESHOLD = 30;
 
-  handle.addEventListener('pointerdown', (e: Event) => {
-    const pe = e as PointerEvent;
-    startY = pe.clientY;
-    (handle as HTMLElement).setPointerCapture(pe.pointerId);
-    pe.preventDefault();
-  });
+  // Touch on the entire sheet — decide whether to swipe-expand/collapse or scroll
+  controls.addEventListener('touchstart', (e) => {
+    startY = e.touches[0].clientY;
+    startScrollTop = controls.scrollTop;
+    const expanded = controls.classList.contains('mobile-expanded');
+    // Track for swipe when: collapsed (always), or expanded and at scroll top
+    tracking = !expanded || startScrollTop <= 0;
+  }, { passive: true });
 
-  handle.addEventListener('pointerup', (e: Event) => {
-    const pe = e as PointerEvent;
-    const dy = pe.clientY - startY;
-    // Swipe up → expand, swipe down → collapse, small move → toggle
-    if (Math.abs(dy) < 10) {
-      controls.classList.toggle('mobile-expanded');
-    } else if (dy < -30) {
+  controls.addEventListener('touchmove', (e) => {
+    if (!tracking) return;
+    const dy = e.touches[0].clientY - startY;
+    const expanded = controls.classList.contains('mobile-expanded');
+
+    // When collapsed and swiping up, prevent the sheet from scrolling
+    if (!expanded && dy < 0) {
+      e.preventDefault();
+    }
+    // When expanded at scroll top and pulling down, prevent scroll bounce
+    if (expanded && startScrollTop <= 0 && dy > 0) {
+      e.preventDefault();
+    }
+  }, { passive: false });
+
+  controls.addEventListener('touchend', (e) => {
+    if (!tracking) return;
+    tracking = false;
+    const dy = e.changedTouches[0].clientY - startY;
+    const expanded = controls.classList.contains('mobile-expanded');
+
+    if (!expanded && dy < -SWIPE_THRESHOLD) {
       controls.classList.add('mobile-expanded');
-    } else if (dy > 30) {
+    } else if (expanded && startScrollTop <= 0 && dy > SWIPE_THRESHOLD) {
       controls.classList.remove('mobile-expanded');
+    } else if (Math.abs(dy) < 10) {
+      // Small move = tap on handle area — toggle
+      const handleRect = controls.querySelector('.mobile-drag-handle')!.getBoundingClientRect();
+      if (e.changedTouches[0].clientY >= handleRect.top && e.changedTouches[0].clientY <= handleRect.bottom) {
+        controls.classList.toggle('mobile-expanded');
+      }
     }
   });
 
