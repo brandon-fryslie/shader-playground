@@ -4,15 +4,22 @@
     {
       "version": "pr-2",
       "ref": "refs/pull/2/merge",
-      "sha": "b29e0a8581192a9881fcf1aac6bc62e063c31ca9",
-      "timestamp": "2026-04-11T20:34:51.630Z",
+      "sha": "4b1e8f383315c0485adc08aa288aebb53812640f",
+      "timestamp": "2026-04-11T20:38:06.769Z",
       "commits": [
         {
-          "sha": "b29e0a8581192a9881fcf1aac6bc62e063c31ca9",
+          "sha": "4b1e8f383315c0485adc08aa288aebb53812640f",
           "author_name": "Brandon Fryslie",
           "author_email": "530235+brandon-fryslie@users.noreply.github.com",
-          "timestamp": "2026-04-11T20:34:36Z",
-          "message": "Merge ea0c7f3327dc4d8c7851c84496d5231c0bd78807 into ae694d12d043a14808fca54d1fb75f382b4f2f24\n"
+          "timestamp": "2026-04-11T14:37:49-06:00",
+          "message": "Merge f0bfc7f7dc152d25e8397fa8b938652d93ef6edb into ae694d12d043a14808fca54d1fb75f382b4f2f24\n"
+        },
+        {
+          "sha": "f0bfc7f7dc152d25e8397fa8b938652d93ef6edb",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-11T14:37:31-06:00",
+          "message": "perf: remove per-frame GPU error scopes, clarify XR grab hit-test\n\n- Remove pushErrorScope/popErrorScope from the render loop. These ran\n  every frame, creating 60+ promise allocations/sec and microtask churn.\n  device.onuncapturederror (already wired up) catches validation errors\n  without per-frame overhead. Targeted scopes in ensureSimulation()\n  remain for creation-time error attribution.\n\n- Clarify XR UI panel comment: hit-test half-extents (e.g. GRAB_HALF_H\n  = 0.035) are intentionally larger than the shader's rendered SDF\n  extents (0.02) for easier targeting. The comment previously said\n  \"mirrored\" which implied they should match.\n"
         },
         {
           "sha": "ea0c7f3327dc4d8c7851c84496d5231c0bd78807",
