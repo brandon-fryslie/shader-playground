@@ -4,15 +4,22 @@
     {
       "version": "pr-2",
       "ref": "refs/pull/2/merge",
-      "sha": "4b1e8f383315c0485adc08aa288aebb53812640f",
-      "timestamp": "2026-04-11T20:38:06.769Z",
+      "sha": "81058eb5de3a836f1f156531347b98ae05c39cb0",
+      "timestamp": "2026-04-11T21:31:56.738Z",
       "commits": [
         {
-          "sha": "4b1e8f383315c0485adc08aa288aebb53812640f",
+          "sha": "81058eb5de3a836f1f156531347b98ae05c39cb0",
           "author_name": "Brandon Fryslie",
           "author_email": "530235+brandon-fryslie@users.noreply.github.com",
-          "timestamp": "2026-04-11T14:37:49-06:00",
-          "message": "Merge f0bfc7f7dc152d25e8397fa8b938652d93ef6edb into ae694d12d043a14808fca54d1fb75f382b4f2f24\n"
+          "timestamp": "2026-04-11T21:31:44Z",
+          "message": "Merge c3ee4ad1c75f3a3d2144df0f85a956b582668f34 into ae694d12d043a14808fca54d1fb75f382b4f2f24\n"
+        },
+        {
+          "sha": "c3ee4ad1c75f3a3d2144df0f85a956b582668f34",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-11T15:31:27-06:00",
+          "message": "perf: tiled N-body compute with shared memory, eliminate hot-loop waste\n\n- Shared memory tiling: source bodies loaded cooperatively into\n  var<workgroup> tile (128 bodies per tile as vec4f pos+mass).\n  Reduces global memory reads ~64-100x per workgroup.\n- inverseSqrt() replaces 1.0/sqrt() for native GPU rsqrt instruction.\n- Eliminated redundant dot(diff,diff) in inner loop.\n- Pre-allocate params staging buffer once at init instead of\n  allocating ArrayBuffer + typed array views every frame.\n- Workgroup size 64 -> 128 for better occupancy.\n"
         },
         {
           "sha": "f0bfc7f7dc152d25e8397fa8b938652d93ef6edb",
