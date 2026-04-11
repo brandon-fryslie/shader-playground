@@ -4449,8 +4449,15 @@ async function main() {
   isMobile = mobileQuery.matches;
   document.body.classList.toggle('mobile', isMobile);
   mobileQuery.addEventListener('change', (e) => {
-    isMobile = e.matches;
+    const nextIsMobile = e.matches;
+    if (nextIsMobile === isMobile) return;
+    isMobile = nextIsMobile;
     document.body.classList.toggle('mobile', isMobile);
+
+    // Input handlers and mobile-only UI are initialized during startup, so
+    // crossing the breakpoint requires a full re-init to avoid mixing
+    // desktop and mobile interaction semantics.
+    window.location.reload();
   });
 
   initGrid();
