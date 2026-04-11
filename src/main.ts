@@ -2722,12 +2722,20 @@ function findParamDef(mode: SimMode, key: string): ParamDef | null {
 // used by both DOM tab clicks and the XR UI prev/next buttons so both paths
 // keep state.mode, the DOM active classes, the simulation registry, and the
 // on-screen slider values in sync.
+const MODE_TAB_LABELS: Record<SimMode, string> = {
+  boids: 'Boids', physics: 'N-Body', physics_classic: 'N-Body Classic',
+  fluid: 'Fluid', parametric: 'Shapes', reaction: 'Reaction',
+};
+
 function selectMode(mode: SimMode): void {
   state.mode = mode;
   document.querySelectorAll<HTMLElement>('.mode-tab').forEach(t =>
     t.classList.toggle('active', t.dataset.mode === mode));
   document.querySelectorAll<HTMLElement>('.param-group').forEach(g =>
     g.classList.toggle('active', g.dataset.mode === mode));
+  // Sync mobile stepper label
+  const stepperLabel = document.getElementById('mode-stepper-label');
+  if (stepperLabel) stepperLabel.textContent = MODE_TAB_LABELS[mode];
   ensureSimulation();
   updateAll();
 }
@@ -2999,6 +3007,209 @@ function setupMouseControls() {
   }, { passive: false });
 }
 
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SECTION 6b: MOBILE TOUCH & UI
+// ═══════════════════════════════════════════════════════════════════════════════
+
+const mobileQuery = matchMedia('(max-width: 768px)');
+let isMobile = mobileQuery.matches;
+
+function setupMobileTouchControls() {
+  const c = canvas;
+  const pointers = new Map<number, { x: number; y: number }>();
+  let prevPinchDist = 0;
+  let prevMidX = 0;
+  let prevMidY = 0;
+
+  // Reuse the same sim-interaction logic as desktop for 1-finger
+  function applySimInteraction(mx: number, my: number, isMove: boolean) {
+    if (state.mode === 'fluid') {
+      const uv = screenToFluidUV(mx, my);
+      if (!uv) {
+        setSimulationInteractionInactive();
+      } else {
+        state.mouse.down = true;
+        const wp = screenToWorld(mx, my);
+        state.mouse.worldX = wp[0];
+        state.mouse.worldY = wp[1];
+        state.mouse.worldZ = wp[2];
+        state.mouse.dx = isMove ? (uv[0] - state.mouse.x) * 10 : 0;
+        state.mouse.dy = isMove ? (uv[1] - state.mouse.y) * 10 : 0;
+        state.mouse.x = uv[0];
+        state.mouse.y = uv[1];
+      }
+    } else {
+      state.mouse.down = true;
+      const wp = screenToWorld(mx, my);
+      state.mouse.worldX = wp[0];
+      state.mouse.worldY = wp[1];
+      state.mouse.worldZ = wp[2];
+      state.mouse.dx = isMove ? (mx - state.mouse.x) * 10 : 0;
+      state.mouse.dy = isMove ? (my - state.mouse.y) * 10 : 0;
+      state.mouse.x = mx;
+      state.mouse.y = my;
+    }
+  }
+
+  c.addEventListener('pointerdown', (e) => {
+    if (state.xrEnabled) return;
+    e.preventDefault();
+    pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+
+    // 1 finger: start sim interaction
+    if (pointers.size === 1) {
+      const rect = c.getBoundingClientRect();
+      const mx = (e.clientX - rect.left) / rect.width;
+      const my = 1.0 - (e.clientY - rect.top) / rect.height;
+      state.mouse.dx = 0;
+      state.mouse.dy = 0;
+      applySimInteraction(mx, my, false);
+    }
+    // 2 fingers: initialize pinch/orbit baseline, stop sim interaction
+    if (pointers.size === 2) {
+      setSimulationInteractionInactive();
+      const pts = [...pointers.values()];
+      prevMidX = (pts[0].x + pts[1].x) / 2;
+      prevMidY = (pts[0].y + pts[1].y) / 2;
+      prevPinchDist = Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y);
+    }
+  }, { passive: false });
+
+  c.addEventListener('pointermove', (e) => {
+    if (state.xrEnabled) return;
+    if (!pointers.has(e.pointerId)) return;
+    e.preventDefault();
+    pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+
+    if (pointers.size === 1) {
+      // 1 finger: sim interaction
+      const rect = c.getBoundingClientRect();
+      const mx = (e.clientX - rect.left) / rect.width;
+      const my = 1.0 - (e.clientY - rect.top) / rect.height;
+      applySimInteraction(mx, my, true);
+    } else if (pointers.size === 2) {
+      // 2 fingers: orbit + pinch zoom
+      const pts = [...pointers.values()];
+      const midX = (pts[0].x + pts[1].x) / 2;
+      const midY = (pts[0].y + pts[1].y) / 2;
+      const dist = Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y);
+
+      // Orbit from midpoint delta
+      state.camera.rotY += (midX - prevMidX) * 0.005;
+      state.camera.rotX += (midY - prevMidY) * 0.005;
+      state.camera.rotX = Math.max(-Math.PI * 0.45, Math.min(Math.PI * 0.45, state.camera.rotX));
+
+      // Pinch zoom
+      if (prevPinchDist > 0) {
+        state.camera.distance *= prevPinchDist / dist;
+        state.camera.distance = Math.max(0.5, Math.min(50, state.camera.distance));
+      }
+
+      prevMidX = midX;
+      prevMidY = midY;
+      prevPinchDist = dist;
+      state.mouse.down = false;
+    }
+  }, { passive: false });
+
+  const onPointerEnd = (e: PointerEvent) => {
+    pointers.delete(e.pointerId);
+    if (pointers.size === 0) {
+      state.mouse.down = false;
+      state.mouse.dx = 0;
+      state.mouse.dy = 0;
+      prevPinchDist = 0;
+    }
+    // If going from 2→1 finger, re-initialize the remaining finger as sim interaction start
+    if (pointers.size === 1) {
+      const [remaining] = pointers.values();
+      const rect = c.getBoundingClientRect();
+      const mx = (remaining.x - rect.left) / rect.width;
+      const my = 1.0 - (remaining.y - rect.top) / rect.height;
+      state.mouse.dx = 0;
+      state.mouse.dy = 0;
+      applySimInteraction(mx, my, false);
+    }
+  };
+  c.addEventListener('pointerup', onPointerEnd);
+  c.addEventListener('pointercancel', onPointerEnd);
+
+  c.addEventListener('contextmenu', (e) => e.preventDefault());
+}
+
+function setupMobileFab() {
+  const controls = document.getElementById('controls')!;
+
+  document.getElementById('fab-pause')!.addEventListener('click', () => {
+    state.paused = !state.paused;
+    document.getElementById('fab-pause')!.textContent = state.paused ? '\u25B6' : '\u23F8';
+    document.getElementById('fab-pause')!.classList.toggle('active', state.paused);
+    // Sync desktop button too
+    document.getElementById('btn-pause')!.textContent = state.paused ? 'Resume' : 'Pause';
+    document.getElementById('btn-pause')!.classList.toggle('active', state.paused);
+  });
+
+  document.getElementById('fab-reset')!.addEventListener('click', () => {
+    resetCurrentSim();
+  });
+
+  document.getElementById('fab-controls')!.addEventListener('click', () => {
+    controls.classList.toggle('mobile-expanded');
+  });
+
+  // Mode stepper prev/next — reuse XR_UI_MODE_ORDER for consistent ordering
+  const stepMode = (delta: number) => {
+    const idx = XR_UI_MODE_ORDER.indexOf(state.mode);
+    const next = XR_UI_MODE_ORDER[(idx + delta + XR_UI_MODE_ORDER.length) % XR_UI_MODE_ORDER.length];
+    selectMode(next);
+  };
+  document.getElementById('mode-prev')!.addEventListener('click', () => stepMode(-1));
+  document.getElementById('mode-next')!.addEventListener('click', () => stepMode(1));
+
+  // Sync stepper label to initial state
+  document.getElementById('mode-stepper-label')!.textContent = MODE_TAB_LABELS[state.mode];
+}
+
+function setupBottomSheet() {
+  const controls = document.getElementById('controls')!;
+  const handle = controls.querySelector('.mobile-drag-handle')!;
+  let startY = 0;
+
+  handle.addEventListener('pointerdown', (e: Event) => {
+    const pe = e as PointerEvent;
+    startY = pe.clientY;
+    (handle as HTMLElement).setPointerCapture(pe.pointerId);
+    pe.preventDefault();
+  });
+
+  handle.addEventListener('pointerup', (e: Event) => {
+    const pe = e as PointerEvent;
+    const dy = pe.clientY - startY;
+    // Swipe up → expand, swipe down → collapse, small move → toggle
+    if (Math.abs(dy) < 10) {
+      controls.classList.toggle('mobile-expanded');
+    } else if (dy < -30) {
+      controls.classList.add('mobile-expanded');
+    } else if (dy > 30) {
+      controls.classList.remove('mobile-expanded');
+    }
+  });
+
+  // Tap on canvas collapses the sheet
+  canvas.addEventListener('pointerdown', () => {
+    controls.classList.remove('mobile-expanded');
+  }, { capture: true });
+}
+
+function applyMobileDefaults() {
+  // [LAW:one-source-of-truth] Only override defaults for fresh installs — saved state is authoritative
+  if (localStorage.getItem(STORAGE_KEY)) return;
+  state.boids.count = 500;
+  state.physics.count = 2000;
+  state.physics_classic.count = 200;
+  state.reaction.resolution = 64;
+}
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // SECTION 7: PROMPT GENERATOR
@@ -4215,15 +4426,30 @@ async function main() {
   const ok = await initWebGPU();
   if (!ok) return;
 
+  // Mobile detection — gates touch controls, bottom sheet, and performance defaults
+  isMobile = mobileQuery.matches;
+  document.body.classList.toggle('mobile', isMobile);
+  mobileQuery.addEventListener('change', (e) => {
+    isMobile = e.matches;
+    document.body.classList.toggle('mobile', isMobile);
+  });
+
   initGrid();
   initXrUi();
   loadState();
+  if (isMobile) applyMobileDefaults();
   syncThemeTransition(state.colorTheme);
   buildControls();
   buildThemeSelector();
   setupTabs();
   setupGlobalControls();
-  setupMouseControls();
+  if (isMobile) {
+    setupMobileTouchControls();
+    setupMobileFab();
+    setupBottomSheet();
+  } else {
+    setupMouseControls();
+  }
   setupShaderPanel();
   syncUIFromState();
   resizeCanvas();
