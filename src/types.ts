@@ -1,4 +1,4 @@
-export type SimMode = 'boids' | 'physics' | 'physics_classic' | 'fluid' | 'parametric';
+export type SimMode = 'boids' | 'physics' | 'physics_classic' | 'fluid' | 'parametric' | 'reaction';
 export type ShapeName = 'torus' | 'klein' | 'mobius' | 'sphere' | 'trefoil';
 export type Distribution = 'random' | 'disk' | 'shell';
 export type DyeMode = 'rainbow' | 'single' | 'temperature';
@@ -55,6 +55,17 @@ export interface FluidParams {
   jacobiIterations: number;
 }
 
+export interface ReactionParams {
+  resolution: number;      // N for N×N×N volume
+  feed: number;
+  kill: number;
+  Du: number;
+  Dv: number;
+  stepsPerFrame: number;
+  isoThreshold: number;
+  preset: string;          // informational
+}
+
 export interface ParametricParams {
   shape: ShapeName;
   scale: number;
@@ -72,6 +83,7 @@ export type ModeParamsMap = {
   physics_classic: ClassicPhysicsParams;
   fluid: FluidParams;
   parametric: ParametricParams;
+  reaction: ReactionParams;
 };
 
 export interface CameraState {
@@ -116,6 +128,7 @@ export interface AppState {
   physics_classic: ClassicPhysicsParams;
   fluid: FluidParams;
   parametric: ParametricParams;
+  reaction: ReactionParams;
   camera: CameraState;
   mouse: MouseState;
   fx: FxParams;

@@ -17,7 +17,10 @@ import SHADER_FLUID_GRADIENT from './shaders/fluid.gradient.wgsl?raw';
 import SHADER_FLUID_RENDER from './shaders/fluid.render.wgsl?raw';
 import SHADER_PARAMETRIC_COMPUTE from './shaders/parametric.compute.wgsl?raw';
 import SHADER_PARAMETRIC_RENDER from './shaders/parametric.render.wgsl?raw';
+import SHADER_REACTION_COMPUTE from './shaders/reaction.compute.wgsl?raw';
+import SHADER_REACTION_RENDER from './shaders/reaction.render.wgsl?raw';
 import SHADER_GRID from './shaders/grid.wgsl?raw';
+import SHADER_XR_UI from './shaders/xr.ui.wgsl?raw';
 import SHADER_POST_FADE from './shaders/post.fade.wgsl?raw';
 import SHADER_POST_DOWNSAMPLE from './shaders/post.downsample.wgsl?raw';
 import SHADER_POST_UPSAMPLE from './shaders/post.upsample.wgsl?raw';
@@ -53,7 +56,15 @@ const DEFAULTS: ModeParamsMap = {
     p3Min: 0.15,   p3Max: 0.45, p3Rate: 0.7,
     p4Min: 0.5,    p4Max: 2.0,  p4Rate: 0.4,
     twistMin: 0.0, twistMax: 0.4, twistRate: 0.15,
-  }
+  },
+  reaction: {
+    resolution: 128,
+    feed: 0.055, kill: 0.062,
+    Du: 0.2097, Dv: 0.105,
+    stepsPerFrame: 4,
+    isoThreshold: 0.25,
+    preset: 'Spots',
+  },
 };
 
 const PRESETS: Record<SimMode, Record<string, Record<string, number | string>>> = {
@@ -91,6 +102,13 @@ const PRESETS: Record<SimMode, Record<string, Record<string, number | string>>> 
     'Wild Möbius':   { shape: 'mobius',  scale: 1.5, p1Min: 0.8,  p1Max: 2.0,  p1Rate: 0.3,  p2Min: 1.0,  p2Max: 3.0,  p2Rate: 0.15, p3Min: 0.2,  p3Max: 0.6,  p3Rate: 0.8,  p4Min: 0.5, p4Max: 2.5, p4Rate: 0.5,  twistMin: 1.0, twistMax: 4.0, twistRate: 0.1  },
     'Trefoil Pulse': { shape: 'trefoil', scale: 1.2, p1Min: 0.08, p1Max: 0.35, p1Rate: 0.9,  p2Min: 0.25, p2Max: 0.55, p2Rate: 0.4,  p3Min: 0.3,  p3Max: 0.9,  p3Rate: 1.2,  p4Min: 1.0, p4Max: 4.0, p4Rate: 0.7,  twistMin: 0,   twistMax: 0.5, twistRate: 0.2  },
     'Klein Chaos':   { shape: 'klein',   scale: 1.2, p1Min: 0.5,  p1Max: 1.5,  p1Rate: 0.4,  p2Min: 0,    p2Max: 0,    p2Rate: 0,    p3Min: 0.2,  p3Max: 0.6,  p3Rate: 0.9,  p4Min: 0.8, p4Max: 3.5, p4Rate: 0.5,  twistMin: 0,   twistMax: 0.8, twistRate: 0.15 },
+  },
+  reaction: {
+    'Spots':   { resolution: 128, feed: 0.055,  kill: 0.062,  Du: 0.2097, Dv: 0.105, stepsPerFrame: 4, isoThreshold: 0.25, preset: 'Spots' },
+    'Mazes':   { resolution: 128, feed: 0.029,  kill: 0.057,  Du: 0.2097, Dv: 0.105, stepsPerFrame: 4, isoThreshold: 0.25, preset: 'Mazes' },
+    'Worms':   { resolution: 128, feed: 0.058,  kill: 0.065,  Du: 0.2097, Dv: 0.105, stepsPerFrame: 4, isoThreshold: 0.25, preset: 'Worms' },
+    'Mitosis': { resolution: 128, feed: 0.0367, kill: 0.0649, Du: 0.2097, Dv: 0.105, stepsPerFrame: 4, isoThreshold: 0.25, preset: 'Mitosis' },
+    'Coral':   { resolution: 128, feed: 0.062,  kill: 0.062,  Du: 0.2097, Dv: 0.105, stepsPerFrame: 4, isoThreshold: 0.25, preset: 'Coral' },
   },
 };
 
@@ -177,6 +195,21 @@ const PARAM_DEFS: Record<SimMode, ParamSection[]> = {
       { key: 'p4Min',  label: 'Min',  min: 0.0, max: 5.0, step: 0.1  },
       { key: 'p4Max',  label: 'Max',  min: 0.0, max: 5.0, step: 0.1  },
       { key: 'p4Rate', label: 'Rate', min: 0.0, max: 3.0, step: 0.05 },
+    ]},
+  ],
+  reaction: [
+    { section: 'Volume', params: [
+      { key: 'resolution', label: 'Resolution', type: 'dropdown', options: [64, 128], requiresReset: true },
+      { key: 'stepsPerFrame', label: 'Steps/Frame', min: 1, max: 12, step: 1 },
+    ]},
+    { section: 'Reaction', params: [
+      { key: 'feed', label: 'Feed',  min: 0.01, max: 0.10, step: 0.0005 },
+      { key: 'kill', label: 'Kill',  min: 0.03, max: 0.08, step: 0.0005 },
+      { key: 'Du',   label: 'Du',    min: 0.05, max: 0.35, step: 0.001 },
+      { key: 'Dv',   label: 'Dv',    min: 0.02, max: 0.20, step: 0.001 },
+    ]},
+    { section: 'Render', params: [
+      { key: 'isoThreshold', label: 'Iso Threshold', min: 0.05, max: 0.6, step: 0.01 },
     ]},
   ],
 };
@@ -284,6 +317,7 @@ const state: AppState = {
   physics_classic: { ...DEFAULTS.physics_classic },
   fluid: { ...DEFAULTS.fluid },
   parametric: { ...DEFAULTS.parametric },
+  reaction: { ...DEFAULTS.reaction },
   camera: { distance: 5.0, fov: 60, rotX: 0.3, rotY: 0.0, panX: 0, panY: 0 },
   mouse: { down: false, x: 0, y: 0, dx: 0, dy: 0, worldX: 0, worldY: 0, worldZ: 0 },
   fx: {
@@ -738,7 +772,7 @@ async function initWebGPU(): Promise<boolean> {
   device.lost.then((info) => {
     console.error('WebGPU device lost:', info.message);
     if (info.reason !== 'destroyed') {
-      initWebGPU().then(ok => { if (ok) { initGrid(); ensureSimulation(); requestAnimationFrame(frame); } });
+      initWebGPU().then(ok => { if (ok) { initGrid(); initXrUi(); ensureSimulation(); requestAnimationFrame(frame); } });
     }
   });
 
@@ -829,6 +863,199 @@ function renderGrid(pass: GPURenderPassEncoder, aspect: number, viewIndex = 0): 
   pass.setPipeline(gridPipeline);
   pass.setBindGroup(0, gridBGs[viewIndex]);
   pass.draw(30);
+}
+
+
+// ═══ XR UI PANEL RENDERER ═══
+// [LAW:one-source-of-truth] Panel layout constants live here and are mirrored
+// (with matching comments) in src/shaders/xr.ui.wgsl. Keep them in sync.
+const XR_UI_PANEL_CENTER: [number, number, number] = [0, -0.4, -3.5];
+const XR_UI_PANEL_SIZE: [number, number] = [1.2, 0.55];
+const XR_UI_BTN_Y = 0.16;
+const XR_UI_BTN_HALF_W = 0.18;  // wide enough for chevron + label side-by-side
+const XR_UI_BTN_HALF_H = 0.11;
+const XR_UI_PREV_X_FRAC = -0.30;  // aspect-relative
+const XR_UI_NEXT_X_FRAC =  0.30;
+const XR_UI_SLIDER_Y = -0.20;
+const XR_UI_SLIDER_HALF_H = 0.05;
+const XR_UI_SLIDER_HALF_W_FRAC = 0.42; // aspect-relative
+// Grab handle — thin pill at the bottom of the panel for repositioning.
+const XR_UI_GRAB_Y = -0.40;
+const XR_UI_GRAB_HALF_W = 0.10;
+const XR_UI_GRAB_HALF_H = 0.035;
+
+// Label atlas layout — single canvas with non-uniform sub-rects so each label's
+// aspect matches the panel rect it will be sampled into (no squishing):
+//   [0.00 .. 0.25] PREV   — sub-rect 256×128, aspect 2:1 (matches button label)
+//   [0.25 .. 0.50] NEXT   — sub-rect 256×128, aspect 2:1
+//   [0.50 .. 1.00] slider — sub-rect 512×128, aspect 4:1 (matches slider label)
+// u-ranges are mirrored in src/shaders/xr.ui.wgsl.
+const XR_UI_LABEL_CANVAS_W = 1024;
+const XR_UI_LABEL_CANVAS_H = 128;
+const XR_UI_LABEL_FONT_FAMILY = '-apple-system, BlinkMacSystemFont, "Segoe UI", "Helvetica Neue", sans-serif';
+
+let xrUiPipeline!: GPURenderPipeline;
+let xrUiBGs!: GPUBindGroup[];
+let xrUiCameraBuffer!: GPUBuffer;
+let xrUiParamsBuffer!: GPUBuffer;
+let xrUiLabelCanvas!: HTMLCanvasElement;
+let xrUiLabelCtx!: CanvasRenderingContext2D;
+let xrUiLabelTexture!: GPUTexture;
+let xrUiLabelSampler!: GPUSampler;
+let xrUiLabelCurrentMode: SimMode | null = null;
+
+function initXrUi() {
+  xrUiCameraBuffer?.destroy();
+  xrUiParamsBuffer?.destroy();
+  xrUiLabelTexture?.destroy();
+
+  xrUiCameraBuffer = device.createBuffer({ size: CAMERA_STRIDE * 2, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+  // UIParams layout (48 bytes): center.xyz, _pad, sizeX, sizeY, sliderValue, hover,
+  //                             hitX, hitY, hitActive, _pad2
+  xrUiParamsBuffer = device.createBuffer({ size: 48, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+
+  // Canvas used once per mode change to rasterize labels.
+  if (!xrUiLabelCanvas) {
+    xrUiLabelCanvas = document.createElement('canvas');
+    xrUiLabelCanvas.width = XR_UI_LABEL_CANVAS_W;
+    xrUiLabelCanvas.height = XR_UI_LABEL_CANVAS_H;
+    xrUiLabelCtx = xrUiLabelCanvas.getContext('2d')!;
+  }
+  xrUiLabelTexture = device.createTexture({
+    size: [XR_UI_LABEL_CANVAS_W, XR_UI_LABEL_CANVAS_H],
+    format: 'rgba8unorm',
+    usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.RENDER_ATTACHMENT,
+  });
+  xrUiLabelSampler = device.createSampler({
+    magFilter: 'linear',
+    minFilter: 'linear',
+  });
+  xrUiLabelCurrentMode = null; // force first render to upload
+
+  const uiModule = device.createShaderModule({ code: SHADER_XR_UI });
+
+  const uiBGL = device.createBindGroupLayout({
+    entries: [
+      { binding: 0, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
+      { binding: 1, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
+      { binding: 2, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
+      { binding: 3, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'filtering' } },
+    ]
+  });
+
+  xrUiPipeline = device.createRenderPipeline({
+    layout: device.createPipelineLayout({ bindGroupLayouts: [uiBGL] }),
+    vertex: { module: uiModule, entryPoint: 'vs_main' },
+    fragment: {
+      module: uiModule, entryPoint: 'fs_main',
+      targets: [{
+        format: renderTargetFormat,
+        blend: {
+          color: { srcFactor: 'src-alpha', dstFactor: 'one-minus-src-alpha', operation: 'add' },
+          alpha: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha', operation: 'add' },
+        }
+      }]
+    },
+    primitive: { topology: 'triangle-list' },
+    // Depth-test disabled — the panel always renders on top of the sim.
+    depthStencil: { format: 'depth24plus', depthWriteEnabled: false, depthCompare: 'always' },
+    multisample: { count: renderSampleCount },
+  });
+
+  xrUiBGs = [0, 1].map(vi => device.createBindGroup({ layout: uiBGL, entries: [
+    { binding: 0, resource: { buffer: xrUiCameraBuffer, offset: vi * CAMERA_STRIDE, size: CAMERA_SIZE } },
+    { binding: 1, resource: { buffer: xrUiParamsBuffer } },
+    { binding: 2, resource: xrUiLabelTexture.createView() },
+    { binding: 3, resource: xrUiLabelSampler },
+  ]}));
+}
+
+// Draw a single label into a sub-rect, auto-shrinking the font until the text
+// fits with comfortable padding. Keeps long labels like "GRAVITY" from clipping.
+function drawXrUiLabel(
+  ctx: CanvasRenderingContext2D,
+  text: string,
+  rectX: number,
+  rectY: number,
+  rectW: number,
+  rectH: number,
+): void {
+  const maxTextW = rectW * 0.82;
+  const maxTextH = rectH * 0.75;
+  let fontPx = Math.floor(maxTextH);
+  ctx.font = `bold ${fontPx}px ${XR_UI_LABEL_FONT_FAMILY}`;
+  while (fontPx > 12 && ctx.measureText(text).width > maxTextW) {
+    fontPx -= 2;
+    ctx.font = `bold ${fontPx}px ${XR_UI_LABEL_FONT_FAMILY}`;
+  }
+  ctx.fillText(text, rectX + rectW / 2, rectY + rectH / 2);
+}
+
+// Rasterize the three label strings to the canvas and upload to the label texture.
+// No-op if the mode hasn't changed since the last call.
+function updateXrUiLabels(mode: SimMode): void {
+  if (xrUiLabelCurrentMode === mode) return;
+  xrUiLabelCurrentMode = mode;
+  const ctx = xrUiLabelCtx;
+  const w = XR_UI_LABEL_CANVAS_W;
+  const h = XR_UI_LABEL_CANVAS_H;
+  ctx.clearRect(0, 0, w, h);
+  ctx.fillStyle = 'white';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+
+  // Sub-rects (matching LABEL_*_U0/U1 in xr.ui.wgsl):
+  //   PREV:   [0, 0]    .. [0.25w, h]  → 256×128
+  //   NEXT:   [0.25w, 0].. [0.50w, h]  → 256×128
+  //   SLIDER: [0.50w, 0].. [w, h]      → 512×128
+  const quarter = w / 4;
+  drawXrUiLabel(ctx, 'PREV', 0,             0, quarter,     h);
+  drawXrUiLabel(ctx, 'NEXT', quarter,       0, quarter,     h);
+  drawXrUiLabel(ctx, XR_UI_SLIDER_DEFS[mode].label.toUpperCase(),
+                      quarter * 2,   0, quarter * 2, h);
+
+  device.queue.copyExternalImageToTexture(
+    { source: xrUiLabelCanvas },
+    { texture: xrUiLabelTexture },
+    [w, h]
+  );
+}
+
+function xrUiHoverAsFloat(): number {
+  switch (xrUiState.hover) {
+    case 'prev':   return 1.0;
+    case 'next':   return 2.0;
+    case 'slider': return 3.0;
+    case 'grab':   return 4.0;
+    default:       return 0.0;
+  }
+}
+
+function renderXrUi(pass: GPURenderPassEncoder, aspect: number, viewIndex = 0): void {
+  // Rasterize labels on mode change (no-op otherwise).
+  updateXrUiLabels(state.mode);
+
+  device.queue.writeBuffer(xrUiCameraBuffer, viewIndex * CAMERA_STRIDE, getCameraUniformData(aspect));
+  // Only write params once per frame (both eyes see the same UI state).
+  if (viewIndex === 0) {
+    const data = new Float32Array(12);
+    data[0] = XR_UI_PANEL_CENTER[0];
+    data[1] = XR_UI_PANEL_CENTER[1];
+    data[2] = XR_UI_PANEL_CENTER[2];
+    data[3] = 0; // _pad1
+    data[4] = XR_UI_PANEL_SIZE[0];
+    data[5] = XR_UI_PANEL_SIZE[1];
+    data[6] = getXrSliderNormalized();
+    data[7] = xrUiHoverAsFloat();
+    data[8]  = xrUiState.lastHitPx;
+    data[9]  = xrUiState.lastHitPy;
+    data[10] = xrUiState.lastHitActive ? 1.0 : 0.0;
+    data[11] = 0; // _pad2
+    device.queue.writeBuffer(xrUiParamsBuffer, 0, data);
+  }
+  pass.setPipeline(xrUiPipeline);
+  pass.setBindGroup(0, xrUiBGs[viewIndex]);
+  pass.draw(6);
 }
 
 
@@ -1982,6 +2209,264 @@ function createParametricSimulation() {
 }
 
 
+// --- 5e: REACTION-DIFFUSION (Gray-Scott, 3D) ---
+
+function createReactionSimulation() {
+  // [LAW:one-source-of-truth] Volume resolution owned by state.reaction.resolution; everything else derives from it.
+  const N = state.reaction.resolution;
+  const WORLD_SIZE = 3.0;
+
+  // [LAW:one-source-of-truth] rgba16float is the baseline WebGPU storage-capable
+  // 16-bit float format. rg16float is NOT in the baseline storage-texture list,
+  // so attempting to use it silently failed texture creation. Use rgba16float and
+  // only read .rg in the shader — wastes 2 channels but plumbing stays simple.
+  const texDesc: GPUTextureDescriptor = {
+    size: [N, N, N],
+    dimension: '3d',
+    format: 'rgba16float',
+    usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+  };
+  const uvTexA = device.createTexture(texDesc);
+  const uvTexB = device.createTexture(texDesc);
+
+  // Seed: u=1 everywhere, v=0 except a few random 3D blobs near the center.
+  // rgba16float upload: 4 half-float channels × 2 bytes = 8 bytes/texel.
+  const seed = new Uint16Array(N * N * N * 4);
+  // Half-float encoder (IEEE 754 binary16).
+  const f2h = (f: number): number => {
+    const buf = new Float32Array(1);
+    const i32 = new Int32Array(buf.buffer);
+    buf[0] = f;
+    const x = i32[0];
+    const sign = (x >> 16) & 0x8000;
+    let exp = ((x >> 23) & 0xff) - (127 - 15);
+    const mant = x & 0x7fffff;
+    if (exp <= 0) return sign;
+    if (exp >= 31) return sign | 0x7c00;
+    return sign | (exp << 10) | (mant >> 13);
+  };
+  const h_one = f2h(1.0);
+  const h_zero = f2h(0.0);
+  const h_half = f2h(0.5);
+  for (let z = 0; z < N; z++) {
+    for (let y = 0; y < N; y++) {
+      for (let x = 0; x < N; x++) {
+        const i = (z * N * N + y * N + x) * 4;
+        seed[i] = h_one;      // r = u
+        seed[i + 1] = h_zero; // g = v
+        seed[i + 2] = h_zero;
+        seed[i + 3] = h_zero;
+      }
+    }
+  }
+  // Scattered noise-style seed. Lots of tiny random points (radius 1-2) across
+  // a tight central region. Each reset genuinely looks different because the
+  // point set is different, and early-time the pattern is fine-grained instead
+  // of the obviously-spherical big-blob look. Using many small seeds also lets
+  // the reaction's pattern-formation regime dominate the final look rather
+  // than the initial geometry.
+  const seedCount = 80;
+  // Center 40% of the volume → patterns have lots of room to grow into the
+  // interior before the Dirichlet boundary's reservoir zone kicks in at ~80%.
+  const lo = 0.30, hi = 0.70;
+  for (let b = 0; b < seedCount; b++) {
+    const cx = Math.floor(N * (lo + Math.random() * (hi - lo)));
+    const cy = Math.floor(N * (lo + Math.random() * (hi - lo)));
+    const cz = Math.floor(N * (lo + Math.random() * (hi - lo)));
+    // Mix of point seeds and tiny 2-cell-radius blobs for variety.
+    const r = Math.random() < 0.5 ? 1 : 2;
+    for (let dz = -r; dz <= r; dz++) {
+      for (let dy = -r; dy <= r; dy++) {
+        for (let dx = -r; dx <= r; dx++) {
+          if (dx * dx + dy * dy + dz * dz > r * r) continue;
+          const x = cx + dx, y = cy + dy, z = cz + dz;
+          if (x < 0 || y < 0 || z < 0 || x >= N || y >= N || z >= N) continue;
+          const i = (z * N * N + y * N + x) * 4;
+          seed[i] = h_half;       // u → 0.5
+          seed[i + 1] = h_half;   // v → 0.5
+        }
+      }
+    }
+  }
+  // rgba16float = 8 bytes/texel, so bytesPerRow = N * 8.
+  device.queue.writeTexture(
+    { texture: uvTexA },
+    seed.buffer,
+    { bytesPerRow: N * 8, rowsPerImage: N },
+    [N, N, N],
+  );
+  // Also initialize B with the same state so the first render (before any steps) looks right.
+  device.queue.writeTexture(
+    { texture: uvTexB },
+    seed.buffer,
+    { bytesPerRow: N * 8, rowsPerImage: N },
+    [N, N, N],
+  );
+
+  // Compute pipeline
+  const computeModule = device.createShaderModule({ code: SHADER_REACTION_COMPUTE_EDIT || SHADER_REACTION_COMPUTE });
+  const computeBGL = device.createBindGroupLayout({
+    entries: [
+      { binding: 0, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: 'float', viewDimension: '3d' } },
+      { binding: 1, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: 'write-only', format: 'rgba16float', viewDimension: '3d' } },
+      { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
+    ],
+  });
+  const paramsBuffer = device.createBuffer({ size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+  const computePipeline = device.createComputePipeline({
+    layout: device.createPipelineLayout({ bindGroupLayouts: [computeBGL] }),
+    compute: { module: computeModule, entryPoint: 'main' },
+  });
+  const computeBGs = [
+    // pong=0: read A, write B
+    device.createBindGroup({ layout: computeBGL, entries: [
+      { binding: 0, resource: uvTexA.createView({ dimension: '3d' }) },
+      { binding: 1, resource: uvTexB.createView({ dimension: '3d' }) },
+      { binding: 2, resource: { buffer: paramsBuffer } },
+    ]}),
+    // pong=1: read B, write A
+    device.createBindGroup({ layout: computeBGL, entries: [
+      { binding: 0, resource: uvTexB.createView({ dimension: '3d' }) },
+      { binding: 1, resource: uvTexA.createView({ dimension: '3d' }) },
+      { binding: 2, resource: { buffer: paramsBuffer } },
+    ]}),
+  ];
+
+  // Render pipeline — raymarched volume
+  const renderModule = device.createShaderModule({ code: SHADER_REACTION_RENDER_EDIT || SHADER_REACTION_RENDER });
+  const sampler = device.createSampler({
+    magFilter: 'linear', minFilter: 'linear',
+    addressModeU: 'clamp-to-edge', addressModeV: 'clamp-to-edge', addressModeW: 'clamp-to-edge',
+  });
+  const cameraBuffer = device.createBuffer({ size: CAMERA_STRIDE * 2, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+  const renderParamsBuffer = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+
+  const renderBGL = device.createBindGroupLayout({
+    entries: [
+      { binding: 0, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float', viewDimension: '3d' } },
+      { binding: 1, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'filtering' } },
+      { binding: 2, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
+      { binding: 3, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
+    ],
+  });
+  const renderPipeline = device.createRenderPipeline({
+    layout: device.createPipelineLayout({ bindGroupLayouts: [renderBGL] }),
+    vertex: { module: renderModule, entryPoint: 'vs_main' },
+    fragment: {
+      module: renderModule, entryPoint: 'fs_main',
+      targets: [{
+        format: renderTargetFormat,
+        blend: {
+          color: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha', operation: 'add' },
+          alpha: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha', operation: 'add' },
+        },
+      }],
+    },
+    primitive: { topology: 'triangle-list' },
+    // [LAW:feedback_nbody_depthstencil] Always declare depthStencil format to match the shared depth attachment.
+    depthStencil: { format: 'depth24plus', depthWriteEnabled: false, depthCompare: 'less' },
+    multisample: { count: renderSampleCount },
+  });
+
+  // renderBGs[viewIndex][pong] — pong is the value of the ping-pong counter
+  // AFTER the compute loop completes. It points at which compute BG would run
+  // NEXT, which equals which texture was READ last, which means the OTHER
+  // texture holds the latest write. So:
+  //   pong=0 → computeBGs[0] is "read A, write B" is next → last write was to A
+  //   pong=1 → computeBGs[1] is "read B, write A" is next → last write was to B
+  const renderBGs = [0, 1].map(vi => ([0, 1].map(pong => device.createBindGroup({
+    layout: renderBGL, entries: [
+      { binding: 0, resource: (pong === 0 ? uvTexA : uvTexB).createView({ dimension: '3d' }) },
+      { binding: 1, resource: sampler },
+      { binding: 2, resource: { buffer: cameraBuffer, offset: vi * CAMERA_STRIDE, size: CAMERA_SIZE } },
+      { binding: 3, resource: { buffer: renderParamsBuffer } },
+    ],
+  }))));
+
+  // Workgroup size: 8×8×4 = 256 (within default maxComputeInvocationsPerWorkgroup).
+  const wgX = Math.ceil(N / 8);
+  const wgY = Math.ceil(N / 8);
+  const wgZ = Math.ceil(N / 4);
+
+  const depthRef: DepthRef = {};
+  let pong = 0; // which compute BG to use NEXT; also selects which texture will be current after the step.
+
+  return {
+    compute(encoder: GPUCommandEncoder) {
+      const p = state.reaction;
+      const steps = Math.max(1, Math.floor(p.stepsPerFrame));
+      // [LAW:dataflow-not-control-flow] Explicit Euler stability bound is hard:
+      // dt < 1/(6·max(Du,Dv)) ≈ 0.79 for Du=0.2097. The FX timeScale slider
+      // globally modulates animation speed across all sims, but for reaction-
+      // diffusion we must clamp the effective dt — otherwise cranking time
+      // up (or going negative, which runs the reaction backward) instantly
+      // blows the field to NaN and the sim "disappears". Run more substeps
+      // to emulate "faster" time without violating stability.
+      const STABLE_DT = 0.65;
+      const requestedMul = Math.max(0, state.fx.timeScale); // no reverse for GS
+      const dt = STABLE_DT;
+      // When timeScale > 1, use more substeps within the same frame instead
+      // of making dt bigger. When timeScale < 1, scale the number of steps
+      // down (minimum 0 to honor pause-like semantics).
+      const effectiveSteps = Math.max(0, Math.round(steps * requestedMul));
+      device.queue.writeBuffer(paramsBuffer, 0, new Float32Array([
+        p.feed, p.kill, p.Du, p.Dv, dt, N, 0, 0,
+      ]));
+      for (let i = 0; i < effectiveSteps; i++) {
+        const pass = encoder.beginComputePass();
+        pass.setPipeline(computePipeline);
+        pass.setBindGroup(0, computeBGs[pong]);
+        pass.dispatchWorkgroups(wgX, wgY, wgZ);
+        pass.end();
+        pong = 1 - pong;
+      }
+    },
+
+    render(encoder: GPUCommandEncoder, textureView: GPUTextureView, viewport: number[] | null, viewIndex = 0) {
+      const aspect = viewport ? (viewport[2] / viewport[3]) : (canvas.width / canvas.height);
+      device.queue.writeBuffer(cameraBuffer, viewIndex * CAMERA_STRIDE, getCameraUniformData(aspect));
+      // stepCount=256: enough samples through a 3-unit volume at 128³ to give
+      // ~2 samples per texel along the longest ray, which combined with the
+      // per-pixel jitter in the shader keeps aliasing below the bloom threshold.
+      device.queue.writeBuffer(renderParamsBuffer, 0, new Float32Array([
+        N, state.reaction.isoThreshold, WORLD_SIZE, 256,
+      ]));
+
+      const pass = encoder.beginRenderPass({
+        colorAttachments: [getColorAttachment(depthRef, textureView, viewport)],
+        depthStencilAttachment: getDepthAttachment(depthRef, viewport),
+      });
+
+      const rv = getRenderViewport(viewport);
+      if (rv) {
+        pass.setViewport(rv[0], rv[1], rv[2], rv[3], 0, 1);
+      }
+
+      renderGrid(pass, aspect, viewIndex);
+
+      // `pong` is flipped after each compute step, so after the loop it points
+      // at the bind group / texture that would be used as the read side on the
+      // next step. The current reaction volume is therefore the opposite side.
+      pass.setPipeline(renderPipeline);
+      pass.setBindGroup(0, renderBGs[viewIndex][1 - pong]);
+      pass.draw(3);
+      pass.end();
+    },
+
+    getCount() { return `${N}³`; },
+
+    destroy() {
+      uvTexA.destroy();
+      uvTexB.destroy();
+      paramsBuffer.destroy();
+      cameraBuffer.destroy();
+      renderParamsBuffer.destroy();
+      destroyDepthRef(depthRef);
+    },
+  };
+}
+
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // SECTION 6: UI & CONTROLS
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -2233,17 +2718,33 @@ function findParamDef(mode: SimMode, key: string): ParamDef | null {
   return null;
 }
 
+// [LAW:one-source-of-truth] Single entry point for switching simulation modes —
+// used by both DOM tab clicks and the XR UI prev/next buttons so both paths
+// keep state.mode, the DOM active classes, the simulation registry, and the
+// on-screen slider values in sync.
+const MODE_TAB_LABELS: Record<SimMode, string> = {
+  boids: 'Boids', physics: 'N-Body', physics_classic: 'N-Body Classic',
+  fluid: 'Fluid', parametric: 'Shapes', reaction: 'Reaction',
+};
+
+function selectMode(mode: SimMode): void {
+  state.mode = mode;
+  document.querySelectorAll<HTMLElement>('.mode-tab').forEach(t =>
+    t.classList.toggle('active', t.dataset.mode === mode));
+  document.querySelectorAll<HTMLElement>('.param-group').forEach(g =>
+    g.classList.toggle('active', g.dataset.mode === mode));
+  // Sync mobile stepper label
+  const stepperLabel = document.getElementById('mode-stepper-label');
+  if (stepperLabel) stepperLabel.textContent = MODE_TAB_LABELS[mode];
+  ensureSimulation();
+  updateAll();
+}
+
 function setupTabs() {
   document.querySelectorAll<HTMLElement>('.mode-tab').forEach(tab => {
     tab.addEventListener('click', () => {
       const mode = tab.dataset.mode as SimMode;
-      state.mode = mode;
-
-      document.querySelectorAll<HTMLElement>('.mode-tab').forEach(t => t.classList.toggle('active', t === tab));
-      document.querySelectorAll<HTMLElement>('.param-group').forEach(g => g.classList.toggle('active', g.dataset.mode === mode));
-
-      ensureSimulation();
-      updateAll();
+      selectMode(mode);
     });
   });
 }
@@ -2508,6 +3009,209 @@ function setupMouseControls() {
 
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// SECTION 6b: MOBILE TOUCH & UI
+// ═══════════════════════════════════════════════════════════════════════════════
+
+const mobileQuery = matchMedia('(max-width: 768px)');
+let isMobile = mobileQuery.matches;
+
+function setupMobileTouchControls() {
+  const c = canvas;
+  const pointers = new Map<number, { x: number; y: number }>();
+  let prevPinchDist = 0;
+  let prevMidX = 0;
+  let prevMidY = 0;
+
+  // Reuse the same sim-interaction logic as desktop for 1-finger
+  function applySimInteraction(mx: number, my: number, isMove: boolean) {
+    if (state.mode === 'fluid') {
+      const uv = screenToFluidUV(mx, my);
+      if (!uv) {
+        setSimulationInteractionInactive();
+      } else {
+        state.mouse.down = true;
+        const wp = screenToWorld(mx, my);
+        state.mouse.worldX = wp[0];
+        state.mouse.worldY = wp[1];
+        state.mouse.worldZ = wp[2];
+        state.mouse.dx = isMove ? (uv[0] - state.mouse.x) * 10 : 0;
+        state.mouse.dy = isMove ? (uv[1] - state.mouse.y) * 10 : 0;
+        state.mouse.x = uv[0];
+        state.mouse.y = uv[1];
+      }
+    } else {
+      state.mouse.down = true;
+      const wp = screenToWorld(mx, my);
+      state.mouse.worldX = wp[0];
+      state.mouse.worldY = wp[1];
+      state.mouse.worldZ = wp[2];
+      state.mouse.dx = isMove ? (mx - state.mouse.x) * 10 : 0;
+      state.mouse.dy = isMove ? (my - state.mouse.y) * 10 : 0;
+      state.mouse.x = mx;
+      state.mouse.y = my;
+    }
+  }
+
+  c.addEventListener('pointerdown', (e) => {
+    if (state.xrEnabled) return;
+    e.preventDefault();
+    pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+
+    // 1 finger: start sim interaction
+    if (pointers.size === 1) {
+      const rect = c.getBoundingClientRect();
+      const mx = (e.clientX - rect.left) / rect.width;
+      const my = 1.0 - (e.clientY - rect.top) / rect.height;
+      state.mouse.dx = 0;
+      state.mouse.dy = 0;
+      applySimInteraction(mx, my, false);
+    }
+    // 2 fingers: initialize pinch/orbit baseline, stop sim interaction
+    if (pointers.size === 2) {
+      setSimulationInteractionInactive();
+      const pts = [...pointers.values()];
+      prevMidX = (pts[0].x + pts[1].x) / 2;
+      prevMidY = (pts[0].y + pts[1].y) / 2;
+      prevPinchDist = Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y);
+    }
+  }, { passive: false });
+
+  c.addEventListener('pointermove', (e) => {
+    if (state.xrEnabled) return;
+    if (!pointers.has(e.pointerId)) return;
+    e.preventDefault();
+    pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+
+    if (pointers.size === 1) {
+      // 1 finger: sim interaction
+      const rect = c.getBoundingClientRect();
+      const mx = (e.clientX - rect.left) / rect.width;
+      const my = 1.0 - (e.clientY - rect.top) / rect.height;
+      applySimInteraction(mx, my, true);
+    } else if (pointers.size === 2) {
+      // 2 fingers: orbit + pinch zoom
+      const pts = [...pointers.values()];
+      const midX = (pts[0].x + pts[1].x) / 2;
+      const midY = (pts[0].y + pts[1].y) / 2;
+      const dist = Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y);
+
+      // Orbit from midpoint delta
+      state.camera.rotY += (midX - prevMidX) * 0.005;
+      state.camera.rotX += (midY - prevMidY) * 0.005;
+      state.camera.rotX = Math.max(-Math.PI * 0.45, Math.min(Math.PI * 0.45, state.camera.rotX));
+
+      // Pinch zoom
+      if (prevPinchDist > 0) {
+        state.camera.distance *= prevPinchDist / dist;
+        state.camera.distance = Math.max(0.5, Math.min(50, state.camera.distance));
+      }
+
+      prevMidX = midX;
+      prevMidY = midY;
+      prevPinchDist = dist;
+      state.mouse.down = false;
+    }
+  }, { passive: false });
+
+  const onPointerEnd = (e: PointerEvent) => {
+    pointers.delete(e.pointerId);
+    if (pointers.size === 0) {
+      state.mouse.down = false;
+      state.mouse.dx = 0;
+      state.mouse.dy = 0;
+      prevPinchDist = 0;
+    }
+    // If going from 2→1 finger, re-initialize the remaining finger as sim interaction start
+    if (pointers.size === 1) {
+      const [remaining] = pointers.values();
+      const rect = c.getBoundingClientRect();
+      const mx = (remaining.x - rect.left) / rect.width;
+      const my = 1.0 - (remaining.y - rect.top) / rect.height;
+      state.mouse.dx = 0;
+      state.mouse.dy = 0;
+      applySimInteraction(mx, my, false);
+    }
+  };
+  c.addEventListener('pointerup', onPointerEnd);
+  c.addEventListener('pointercancel', onPointerEnd);
+
+  c.addEventListener('contextmenu', (e) => e.preventDefault());
+}
+
+function setupMobileFab() {
+  const controls = document.getElementById('controls')!;
+
+  document.getElementById('fab-pause')!.addEventListener('click', () => {
+    state.paused = !state.paused;
+    document.getElementById('fab-pause')!.textContent = state.paused ? '\u25B6' : '\u23F8';
+    document.getElementById('fab-pause')!.classList.toggle('active', state.paused);
+    // Sync desktop button too
+    document.getElementById('btn-pause')!.textContent = state.paused ? 'Resume' : 'Pause';
+    document.getElementById('btn-pause')!.classList.toggle('active', state.paused);
+  });
+
+  document.getElementById('fab-reset')!.addEventListener('click', () => {
+    resetCurrentSim();
+  });
+
+  document.getElementById('fab-controls')!.addEventListener('click', () => {
+    controls.classList.toggle('mobile-expanded');
+  });
+
+  // Mode stepper prev/next — reuse XR_UI_MODE_ORDER for consistent ordering
+  const stepMode = (delta: number) => {
+    const idx = XR_UI_MODE_ORDER.indexOf(state.mode);
+    const next = XR_UI_MODE_ORDER[(idx + delta + XR_UI_MODE_ORDER.length) % XR_UI_MODE_ORDER.length];
+    selectMode(next);
+  };
+  document.getElementById('mode-prev')!.addEventListener('click', () => stepMode(-1));
+  document.getElementById('mode-next')!.addEventListener('click', () => stepMode(1));
+
+  // Sync stepper label to initial state
+  document.getElementById('mode-stepper-label')!.textContent = MODE_TAB_LABELS[state.mode];
+}
+
+function setupBottomSheet() {
+  const controls = document.getElementById('controls')!;
+  const handle = controls.querySelector('.mobile-drag-handle')!;
+  let startY = 0;
+
+  handle.addEventListener('pointerdown', (e: Event) => {
+    const pe = e as PointerEvent;
+    startY = pe.clientY;
+    (handle as HTMLElement).setPointerCapture(pe.pointerId);
+    pe.preventDefault();
+  });
+
+  handle.addEventListener('pointerup', (e: Event) => {
+    const pe = e as PointerEvent;
+    const dy = pe.clientY - startY;
+    // Swipe up → expand, swipe down → collapse, small move → toggle
+    if (Math.abs(dy) < 10) {
+      controls.classList.toggle('mobile-expanded');
+    } else if (dy < -30) {
+      controls.classList.add('mobile-expanded');
+    } else if (dy > 30) {
+      controls.classList.remove('mobile-expanded');
+    }
+  });
+
+  // Tap on canvas collapses the sheet
+  canvas.addEventListener('pointerdown', () => {
+    controls.classList.remove('mobile-expanded');
+  }, { capture: true });
+}
+
+function applyMobileDefaults() {
+  // [LAW:one-source-of-truth] Only override defaults for fresh installs — saved state is authoritative
+  if (localStorage.getItem(STORAGE_KEY)) return;
+  state.boids.count = 500;
+  state.physics.count = 2000;
+  state.physics_classic.count = 200;
+  state.reaction.resolution = 64;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // SECTION 7: PROMPT GENERATOR
 // ═══════════════════════════════════════════════════════════════════════════════
 
@@ -2517,6 +3221,7 @@ const MODE_LABELS = {
   physics_classic: 'classic N-body (vintage shader)',
   fluid: 'fluid dynamics',
   parametric: 'parametric shape',
+  reaction: 'Gray-Scott reaction-diffusion (3D)',
 };
 
 function updatePrompt() {
@@ -2616,6 +3321,10 @@ function getShaderSources(mode: SimMode): Record<string, string> {
     parametric: {
       'Compute (All Shapes)': SHADER_PARAMETRIC_COMPUTE,
       'Render (Phong)': SHADER_PARAMETRIC_RENDER,
+    },
+    reaction: {
+      'Compute (Gray-Scott)': SHADER_REACTION_COMPUTE,
+      'Render (Raymarch)': SHADER_REACTION_RENDER,
     },
   };
   return sources[mode] || {};
@@ -2775,6 +3484,10 @@ function applyShaderEdit(mode: SimMode, tabName: string, code: string) {
       'Compute (Mesh Gen)': () => { SHADER_PARAMETRIC_COMPUTE_EDIT = code; },
       'Render (Phong)': () => { SHADER_PARAMETRIC_RENDER_EDIT = code; },
     },
+    reaction: {
+      'Compute (Gray-Scott)': () => { SHADER_REACTION_COMPUTE_EDIT = code; },
+      'Render (Raymarch)': () => { SHADER_REACTION_RENDER_EDIT = code; },
+    },
   };
   const modeMapping = mapping[mode] as Record<string, () => void> | undefined;
   const fn = modeMapping?.[tabName];
@@ -2796,6 +3509,8 @@ let SHADER_FLUID_GRADIENT_EDIT: string | null = null;
 let SHADER_FLUID_RENDER_EDIT: string | null = null;
 let SHADER_PARAMETRIC_COMPUTE_EDIT: string | null = null;
 let SHADER_PARAMETRIC_RENDER_EDIT: string | null = null;
+let SHADER_REACTION_COMPUTE_EDIT: string | null = null;
+let SHADER_REACTION_RENDER_EDIT: string | null = null;
 
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -2809,6 +3524,206 @@ let xrLayer: XRProjectionLayer | null = null;
 let xrInteractionSource: XRInputSource | null = null;
 let xrInteractionHasSample = false;
 
+// --- XR UI state ---
+type XrUiElement = 'none' | 'prev' | 'next' | 'slider' | 'grab';
+
+interface XrUiSliderDef { key: string; label: string; min: number; max: number; }
+const XR_UI_SLIDER_DEFS: Record<SimMode, XrUiSliderDef> = {
+  boids:           { key: 'maxSpeed',      label: 'Speed',   min: 0.1,  max: 10  },
+  physics:         { key: 'G',             label: 'Gravity', min: 0.01, max: 100 },
+  physics_classic: { key: 'G',             label: 'Gravity', min: 0.01, max: 100 },
+  fluid:           { key: 'forceStrength', label: 'Force',   min: 1,    max: 500 },
+  parametric:      { key: 'scale',         label: 'Scale',   min: 0.1,  max: 5   },
+  reaction:        { key: 'feed',          label: 'Feed',    min: 0.0,  max: 0.1 },
+};
+const XR_UI_MODE_ORDER: SimMode[] = ['boids', 'physics', 'physics_classic', 'fluid', 'parametric', 'reaction'];
+
+const xrUiState = {
+  hover:              'none' as XrUiElement,
+  pressed:            'none' as XrUiElement,
+  pressingSource:     null as XRInputSource | null,
+  pendingPressSource: null as XRInputSource | null,
+  grabbed:            false,
+  // Last ray/panel intersection — drives the in-shader reticle. Only set when
+  // an XR input is pinching and its ray hits the panel plane.
+  lastHitPx:          0,
+  lastHitPy:          0,
+  lastHitActive:      false,
+  // Panel drag state — recorded at grab-start so we can compute deltas.
+  grabDragOriginWorld: null as [number, number, number] | null,
+  grabDragOriginCenter: null as [number, number, number] | null,
+};
+
+function getXrSliderNormalized(): number {
+  const def = XR_UI_SLIDER_DEFS[state.mode];
+  const modeParamsObj = state[state.mode] as unknown as Record<string, number>;
+  const v = modeParamsObj[def.key];
+  if (typeof v !== 'number') return 0;
+  return Math.max(0, Math.min(1, (v - def.min) / (def.max - def.min)));
+}
+
+// Ray-plane intersection against the panel (plane at z = center[2], normal = +Z).
+// Returns panel-local (px, py) in aspect-corrected coords and the element under the hit.
+function hitTestXrUi(origin: number[], dir: number[]): { px: number; py: number; element: XrUiElement } | null {
+  const [cx, cy, cz] = XR_UI_PANEL_CENTER;
+  const [sx, sy] = XR_UI_PANEL_SIZE;
+  if (Math.abs(dir[2]) < 1e-6) return null;
+  const t = (cz - origin[2]) / dir[2];
+  if (t < 0) return null;
+  const hitX = origin[0] + dir[0] * t;
+  const hitY = origin[1] + dir[1] * t;
+  const u = (hitX - cx) / sx + 0.5;
+  const v = (hitY - cy) / sy + 0.5;
+  if (u < 0 || u > 1 || v < 0 || v > 1) return null;
+
+  const aspect = sx / sy;
+  const px = (u - 0.5) * aspect;
+  const py = v - 0.5;
+
+  // Classify — box tests matching the shader's element placements.
+  let element: XrUiElement = 'none';
+  if (Math.abs(px - XR_UI_PREV_X_FRAC * aspect) < XR_UI_BTN_HALF_W && Math.abs(py - XR_UI_BTN_Y) < XR_UI_BTN_HALF_H) {
+    element = 'prev';
+  } else if (Math.abs(px - XR_UI_NEXT_X_FRAC * aspect) < XR_UI_BTN_HALF_W && Math.abs(py - XR_UI_BTN_Y) < XR_UI_BTN_HALF_H) {
+    element = 'next';
+  } else if (Math.abs(py - XR_UI_GRAB_Y) < XR_UI_GRAB_HALF_H && Math.abs(px) < XR_UI_GRAB_HALF_W) {
+    element = 'grab';
+  } else {
+    const trackHalfW = aspect * XR_UI_SLIDER_HALF_W_FRAC;
+    if (Math.abs(py - XR_UI_SLIDER_Y) < XR_UI_SLIDER_HALF_H && Math.abs(px) < trackHalfW + 0.04) {
+      element = 'slider';
+    }
+  }
+  return { px, py, element };
+}
+
+// Intersect a ray with a Z-plane, returning the world-space hit point.
+function xrRayPlaneHitWorld(origin: number[], dir: number[], planeZ: number): [number, number, number] | null {
+  if (Math.abs(dir[2]) < 1e-6) return null;
+  const t = (planeZ - origin[2]) / dir[2];
+  if (t < 0) return null;
+  return [origin[0] + dir[0] * t, origin[1] + dir[1] * t, planeZ];
+}
+
+function setXrSliderFromHit(px: number): void {
+  const aspect = XR_UI_PANEL_SIZE[0] / XR_UI_PANEL_SIZE[1];
+  const trackHalfW = aspect * XR_UI_SLIDER_HALF_W_FRAC;
+  const t = Math.max(0, Math.min(1, (px + trackHalfW) / (2 * trackHalfW)));
+  const def = XR_UI_SLIDER_DEFS[state.mode];
+  const modeParamsObj = state[state.mode] as unknown as Record<string, number>;
+  modeParamsObj[def.key] = def.min + (def.max - def.min) * t;
+}
+
+function cycleXrUiMode(delta: number): void {
+  const idx = XR_UI_MODE_ORDER.indexOf(state.mode);
+  const next = XR_UI_MODE_ORDER[(idx + delta + XR_UI_MODE_ORDER.length) % XR_UI_MODE_ORDER.length];
+  // Route through the single mode-change enforcer so DOM, state, and
+  // simulation registry all move together — even while we're in XR.
+  selectMode(next);
+}
+
+function getXrInputRay(frame: XRFrame, source: XRInputSource): { origin: number[]; dir: number[] } | null {
+  if (!xrRefSpace) return null;
+  const pose = frame.getPose(source.targetRaySpace, xrRefSpace);
+  if (!pose) return null;
+  const p = pose.transform.position;
+  return {
+    origin: [p.x, p.y, p.z],
+    dir: getXRTargetRayDirection(pose.transform),
+  };
+}
+
+function applyHitToUiState(hit: { px: number; py: number; element: XrUiElement } | null): void {
+  if (hit) {
+    xrUiState.lastHitPx = hit.px;
+    xrUiState.lastHitPy = hit.py;
+    xrUiState.lastHitActive = true;
+  } else {
+    xrUiState.lastHitActive = false;
+  }
+}
+
+function updateXrUiInput(frame: XRFrame): void {
+  // Pending press from selectstart — resolve it against the first available ray.
+  if (xrUiState.pendingPressSource) {
+    const src = xrUiState.pendingPressSource;
+    const ray = getXrInputRay(frame, src);
+    if (ray) {
+      const hit = hitTestXrUi(ray.origin, ray.dir);
+      xrUiState.pendingPressSource = null;
+      applyHitToUiState(hit);
+      if (hit && hit.element !== 'none') {
+        xrUiState.pressed = hit.element;
+        xrUiState.pressingSource = src;
+        xrUiState.hover = hit.element;
+        if (hit.element === 'slider') {
+          xrUiState.grabbed = true;
+          setXrSliderFromHit(hit.px);
+        } else if (hit.element === 'grab') {
+          // Record the initial world-space hit and panel center for delta drag.
+          const worldHit = xrRayPlaneHitWorld(ray.origin, ray.dir, XR_UI_PANEL_CENTER[2]);
+          if (worldHit) {
+            xrUiState.grabDragOriginWorld = worldHit;
+            xrUiState.grabDragOriginCenter = [XR_UI_PANEL_CENTER[0], XR_UI_PANEL_CENTER[1], XR_UI_PANEL_CENTER[2]];
+          }
+        }
+        return; // suppress sim interaction for this press
+      }
+      // Press is not on the UI — start sim interaction as normal.
+      setXRInteractionSource(src);
+    }
+    return;
+  }
+
+  // Active UI press — keep the hover synced and drag the slider if grabbed.
+  if (xrUiState.pressingSource) {
+    const ray = getXrInputRay(frame, xrUiState.pressingSource);
+    if (ray) {
+      // Panel drag: move center by world-space delta from the grab origin.
+      if (xrUiState.pressed === 'grab' && xrUiState.grabDragOriginWorld && xrUiState.grabDragOriginCenter) {
+        const worldHit = xrRayPlaneHitWorld(ray.origin, ray.dir, xrUiState.grabDragOriginCenter[2]);
+        if (worldHit) {
+          XR_UI_PANEL_CENTER[0] = xrUiState.grabDragOriginCenter[0] + (worldHit[0] - xrUiState.grabDragOriginWorld[0]);
+          XR_UI_PANEL_CENTER[1] = xrUiState.grabDragOriginCenter[1] + (worldHit[1] - xrUiState.grabDragOriginWorld[1]);
+        }
+        // During drag, reticle stays on the grab bar.
+        xrUiState.lastHitPx = 0;
+        xrUiState.lastHitPy = XR_UI_GRAB_Y;
+        xrUiState.lastHitActive = true;
+        xrUiState.hover = 'grab';
+        return;
+      }
+
+      const hit = hitTestXrUi(ray.origin, ray.dir);
+      applyHitToUiState(hit);
+      xrUiState.hover = hit ? hit.element : 'none';
+      if (xrUiState.grabbed && hit) {
+        setXrSliderFromHit(hit.px);
+      }
+    } else {
+      xrUiState.lastHitActive = false;
+    }
+    return;
+  }
+
+  // Even without a UI press, show the reticle whenever an active pinch
+  // is aimed at the panel — this is the visual feedback loop the Vision Pro
+  // interaction model relies on (the ray only exists during a pinch).
+  if (xrInteractionSource) {
+    const ray = getXrInputRay(frame, xrInteractionSource);
+    if (ray) {
+      const hit = hitTestXrUi(ray.origin, ray.dir);
+      applyHitToUiState(hit);
+    } else {
+      xrUiState.lastHitActive = false;
+    }
+  } else {
+    xrUiState.lastHitActive = false;
+  }
+
+  xrUiState.hover = 'none';
+}
+
 function setXRInteractionSource(inputSource: XRInputSource | null) {
   xrInteractionSource = inputSource;
   xrInteractionHasSample = false;
@@ -2821,6 +3736,12 @@ function getXRTargetRayDirection(transform: XRRigidTransform) {
 }
 
 function updateXRSimulationInteraction(frame: XRFrame) {
+  // [LAW:single-enforcer] UI press owns the pinch exclusively — sim interaction
+  // must stay inactive so the two can't both respond to the same gesture.
+  if (xrUiState.pressed !== 'none') {
+    setSimulationInteractionInactive();
+    return;
+  }
   const source = xrInteractionSource;
   if (!source || !xrRefSpace) {
     setSimulationInteractionInactive();
@@ -2971,10 +3892,42 @@ async function toggleXR() {
     // This replaces the default baseLayer (canvas-backed) with our GPU texture layer.
     xrSession.updateRenderState({ layers: [xrLayer] });
     xrSession.addEventListener('selectstart', (event) => {
-      setXRInteractionSource((event as XRInputSourceEvent).inputSource);
+      const src = (event as XRInputSourceEvent).inputSource;
+      // Defer decision (UI vs sim interaction) until the next XRFrame when a
+      // real pose is available.
+      xrUiState.pendingPressSource = src;
     });
     xrSession.addEventListener('selectend', (event) => {
       const inputSource = (event as XRInputSourceEvent).inputSource;
+
+      // If this release matches an active UI press, trigger button action and clear state.
+      if (xrUiState.pressingSource === inputSource) {
+        const pressed = xrUiState.pressed;
+        const wasGrabbed = xrUiState.grabbed;
+        if (pressed === 'prev' && xrUiState.hover === 'prev') cycleXrUiMode(-1);
+        else if (pressed === 'next' && xrUiState.hover === 'next') cycleXrUiMode(1);
+        xrUiState.pressed = 'none';
+        xrUiState.pressingSource = null;
+        xrUiState.grabbed = false;
+        xrUiState.grabDragOriginWorld = null;
+        xrUiState.grabDragOriginCenter = null;
+        xrUiState.hover = 'none';
+        xrUiState.lastHitActive = false;
+        // Slider drag committed — persist and refresh the DOM so the value is
+        // correct when the user exits VR.
+        if (wasGrabbed) {
+          syncUIFromState();
+          saveState();
+        }
+        return;
+      }
+
+      // Pending press that never got resolved (released before first frame) — drop it.
+      if (xrUiState.pendingPressSource === inputSource) {
+        xrUiState.pendingPressSource = null;
+        return;
+      }
+
       const sameSource = xrInteractionSource === inputSource;
       setXRInteractionSource(sameSource ? null : xrInteractionSource);
     });
@@ -3016,6 +3969,8 @@ function xrFrame(time: DOMHighResTimeStamp, xrFrameData: XRFrame) {
     const sim = simulations[state.mode];
     if (!sim) return;
 
+    // UI input runs first — it may claim a pinch that would otherwise drive the sim.
+    updateXrUiInput(xrFrameData);
     updateXRSimulationInteraction(xrFrameData);
 
     const encoder = device.createCommandEncoder();
@@ -3062,6 +4017,23 @@ function xrFrame(time: DOMHighResTimeStamp, xrFrameData: XRFrame) {
       postFx.needsClear = true; // force loadOp:clear; no XR trails
       const sceneIdx = postFx.sceneIdx;
       sim.render(encoder, postFx.scene[sceneIdx].createView(), null, viewIndex);
+
+      // Overlay the XR UI panel into the HDR scene so it picks up tonemap + bloom.
+      const uiPass = encoder.beginRenderPass({
+        colorAttachments: [{
+          view: postFx.scene[sceneIdx].createView(),
+          loadOp: 'load',
+          storeOp: 'store',
+        }],
+        depthStencilAttachment: {
+          view: postFx.depth!.createView(),
+          depthLoadOp: 'load',
+          depthStoreOp: 'store',
+        },
+      });
+      renderXrUi(uiPass, width / height, viewIndex);
+      uiPass.end();
+
       runBloomChain(encoder, postFx.scene[sceneIdx]);
       const ctFormat = subImage.colorTexture.format;
       runComposite(encoder, postFx.scene[sceneIdx], textureView, ctFormat, [x, y, width, height]);
@@ -3085,17 +4057,75 @@ let frameCount = 0;
 let fpsTime = 0;
 let currentFps = 0;
 
+// [LAW:single-enforcer] All sim creation funnels through here, so error surfacing
+// (both sync throws and async GPU validation errors) happens in exactly one place.
+// A failed factory leaves simulations[mode] unset so the render loop short-circuits
+// instead of repeatedly hitting the same bad GPU state.
+function showSimError(mode: SimMode, msg: string) {
+  console.error(`[sim:${mode}]`, msg);
+  let overlay = document.getElementById('gpu-error-overlay');
+  if (!overlay) {
+    overlay = document.createElement('div');
+    overlay.id = 'gpu-error-overlay';
+    overlay.style.cssText = 'position:fixed;top:60px;left:10px;right:10px;max-height:60vh;overflow:auto;background:rgba(20,0,0,0.92);color:#ff8080;font:11px monospace;padding:10px;border:1px solid #ff4040;border-radius:4px;z-index:9999;white-space:pre-wrap;';
+    document.body.appendChild(overlay);
+  }
+  const stamp = new Date().toLocaleTimeString();
+  overlay.textContent = `[${stamp}] [sim:${mode}] ${msg}\n\n` + overlay.textContent;
+}
+
 function ensureSimulation() {
   const mode = state.mode;
-  if (!simulations[mode]) {
-    const factories = {
-      boids: createBoidsSimulation,
-      physics: createPhysicsSimulation,
-      physics_classic: createPhysicsClassicSimulation,
-      fluid: createFluidSimulation,
-      parametric: createParametricSimulation,
-    };
-    simulations[mode] = factories[mode]();
+  if (simulations[mode]) return;
+
+  const factories = {
+    boids: createBoidsSimulation,
+    physics: createPhysicsSimulation,
+    physics_classic: createPhysicsClassicSimulation,
+    fluid: createFluidSimulation,
+    parametric: createParametricSimulation,
+    reaction: createReactionSimulation,
+  };
+
+  // Scope validation errors during creation so they surface loudly instead of
+  // poisoning later frames. Without this, a bad texture format or pipeline
+  // layout just leaves the user staring at a black canvas.
+  device.pushErrorScope('validation');
+  device.pushErrorScope('internal');
+  device.pushErrorScope('out-of-memory');
+
+  let sim: Simulation | null = null;
+  try {
+    sim = factories[mode]();
+  } catch (e) {
+    showSimError(mode, `factory threw: ${(e as Error).message}`);
+  }
+
+  // [LAW:single-enforcer] The async scope handlers must only act on the sim
+  // instance we just created — not whatever lives at simulations[mode] by the
+  // time the promise resolves. Otherwise, a stale error from a previously-
+  // destroyed sim can delete a fresh one the user just reset to, and clicking
+  // Reset "doesn't bring it back" mysteriously. Capturing `sim` in the closure
+  // scopes the cleanup to exactly that instance.
+  const capturedSim = sim;
+  const capturedMode = mode;
+  const dropIfBroken = (reason: string) => {
+    showSimError(capturedMode, reason);
+    // Only drop if the current sim is STILL the one we created — if the user
+    // already reset and a new one took its place, leave it alone.
+    if (capturedSim && simulations[capturedMode] === capturedSim) {
+      try { capturedSim.destroy(); } catch { /* already bad */ }
+      delete simulations[capturedMode];
+    }
+  };
+
+  // Pop all three scopes regardless of throw, so we don't leak them.
+  device.popErrorScope().then(err => { if (err) dropIfBroken(`OOM: ${err.message}`); });
+  device.popErrorScope().then(err => { if (err) dropIfBroken(`internal: ${err.message}`); });
+  device.popErrorScope().then(err => { if (err) dropIfBroken(`validation: ${err.message}`); });
+
+  if (sim) {
+    simulations[mode] = sim;
   }
 }
 
@@ -3113,7 +4143,7 @@ function updateStats() {
   const sim = simulations[state.mode];
   const count = sim ? sim.getCount() : '--';
   document.getElementById('stat-count')!.textContent =
-    state.mode === 'fluid' ? `Grid: ${count}` : `Particles: ${count}`;
+    (state.mode === 'fluid' || state.mode === 'reaction') ? `Grid: ${count}` : `Particles: ${count}`;
 }
 
 function resizeCanvas() {
@@ -3266,31 +4296,57 @@ function frame(now: DOMHighResTimeStamp) {
   const sim = simulations[state.mode];
   if (!sim) return;
 
+  // [LAW:single-enforcer] Frame-level validation scope: if the sim produces bad
+  // GPU work, drop it once and surface the error instead of freezing silently.
+  // The scope promise runs async, so it reports on the next tick — that's fine;
+  // we just need to stop repeatedly feeding the GPU bad commands.
+  device.pushErrorScope('validation');
+
+  const mode = state.mode;
   const encoder = device.createCommandEncoder();
 
-  if (!state.paused) {
-    sim.compute(encoder);
+  try {
+    if (!state.paused) {
+      sim.compute(encoder);
+    }
+
+    const prevIdx = postFx.sceneIdx;
+    const currIdx = 1 - prevIdx;
+    postFx.sceneIdx = currIdx;
+
+    // Trail decay (no-op if trails disabled or first frame after clear)
+    runFadePass(encoder, prevIdx, currIdx);
+
+    // Sim renders into HDR scene[currIdx] (loadOp determined by getColorAttachment).
+    const sceneViewDummy = postFx.scene[currIdx].createView();
+    sim.render(encoder, sceneViewDummy, null);
+
+    // Bloom + composite
+    runBloomChain(encoder, postFx.scene[currIdx]);
+    const swapchainView = context.getCurrentTexture().createView();
+    runComposite(encoder, postFx.scene[currIdx], swapchainView, canvasFormat);
+
+    device.queue.submit([encoder.finish()]);
+
+    postFx.needsClear = false;
+  } catch (e) {
+    showSimError(mode, `frame threw: ${(e as Error).message}`);
+    // Only drop the sim instance we were just rendering — not whatever lives
+    // in the registry now, which could be a fresh one the user already reset.
+    if (simulations[mode] === sim) {
+      try { sim.destroy(); } catch { /* ignore */ }
+      delete simulations[mode];
+    }
   }
 
-  const prevIdx = postFx.sceneIdx;
-  const currIdx = 1 - prevIdx;
-  postFx.sceneIdx = currIdx;
-
-  // Trail decay (no-op if trails disabled or first frame after clear)
-  runFadePass(encoder, prevIdx, currIdx);
-
-  // Sim renders into HDR scene[currIdx] (loadOp determined by getColorAttachment).
-  const sceneViewDummy = postFx.scene[currIdx].createView();
-  sim.render(encoder, sceneViewDummy, null);
-
-  // Bloom + composite
-  runBloomChain(encoder, postFx.scene[currIdx]);
-  const swapchainView = context.getCurrentTexture().createView();
-  runComposite(encoder, postFx.scene[currIdx], swapchainView, canvasFormat);
-
-  device.queue.submit([encoder.finish()]);
-
-  postFx.needsClear = false;
+  device.popErrorScope().then(err => {
+    if (!err) return;
+    showSimError(mode, `frame validation: ${err.message}`);
+    if (simulations[mode] === sim) {
+      try { sim.destroy(); } catch { /* ignore */ }
+      delete simulations[mode];
+    }
+  });
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -3301,17 +4357,12 @@ const STORAGE_KEY = 'shader-playground-state';
 
 function saveState() {
   try {
-    // Only persist user-configurable state, not transient mouse/runtime data
-    const toSave = {
-      mode: state.mode,
-      colorTheme: state.colorTheme,
-      boids: state.boids,
-      physics: state.physics,
-      fluid: state.fluid,
-      parametric: state.parametric,
-      camera: state.camera,
-      fx: state.fx,
-    };
+    // [LAW:one-source-of-truth] DEFAULTS is the canonical mode registry — no parallel list
+    const modeSnapshot: Record<string, unknown> = {};
+    for (const mode of Object.keys(DEFAULTS) as SimMode[]) {
+      modeSnapshot[mode] = modeParams(mode);
+    }
+    const toSave = { mode: state.mode, colorTheme: state.colorTheme, camera: state.camera, fx: state.fx, ...modeSnapshot };
     localStorage.setItem(STORAGE_KEY, JSON.stringify(toSave));
   } catch (e) { /* ignore quota errors */ }
 }
@@ -3321,13 +4372,12 @@ function loadState() {
     const saved = localStorage.getItem(STORAGE_KEY);
     if (!saved) return;
     const parsed = JSON.parse(saved);
-    // Merge carefully — don't clobber transient fields or break structure
     if (parsed.mode && parsed.mode in DEFAULTS) state.mode = parsed.mode as SimMode;
     if (parsed.colorTheme && COLOR_THEMES[parsed.colorTheme]) state.colorTheme = parsed.colorTheme;
-    if (parsed.boids) Object.assign(state.boids, parsed.boids);
-    if (parsed.physics) Object.assign(state.physics, parsed.physics);
-    if (parsed.fluid) Object.assign(state.fluid, parsed.fluid);
-    if (parsed.parametric) Object.assign(state.parametric, parsed.parametric);
+    // [LAW:one-source-of-truth] loop over DEFAULTS so new modes get persistence automatically
+    for (const mode of Object.keys(DEFAULTS) as SimMode[]) {
+      if (parsed[mode]) Object.assign(modeParams(mode), parsed[mode]);
+    }
     if (parsed.camera) Object.assign(state.camera, parsed.camera);
     if (parsed.fx) Object.assign(state.fx, parsed.fx);
     syncThemeTransition(state.colorTheme);
@@ -3376,14 +4426,30 @@ async function main() {
   const ok = await initWebGPU();
   if (!ok) return;
 
+  // Mobile detection — gates touch controls, bottom sheet, and performance defaults
+  isMobile = mobileQuery.matches;
+  document.body.classList.toggle('mobile', isMobile);
+  mobileQuery.addEventListener('change', (e) => {
+    isMobile = e.matches;
+    document.body.classList.toggle('mobile', isMobile);
+  });
+
   initGrid();
+  initXrUi();
   loadState();
+  if (isMobile) applyMobileDefaults();
   syncThemeTransition(state.colorTheme);
   buildControls();
   buildThemeSelector();
   setupTabs();
   setupGlobalControls();
-  setupMouseControls();
+  if (isMobile) {
+    setupMobileTouchControls();
+    setupMobileFab();
+    setupBottomSheet();
+  } else {
+    setupMouseControls();
+  }
   setupShaderPanel();
   syncUIFromState();
   resizeCanvas();

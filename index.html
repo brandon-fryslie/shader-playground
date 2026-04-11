@@ -14,6 +14,7 @@
 
 <div id="app">
   <div id="controls">
+    <div class="mobile-drag-handle"><span></span></div>
     <div class="color-section">
       <div class="param-section-title" style="padding: 8px 16px 4px; margin: 0;">Color Theme</div>
       <div class="presets" id="theme-presets" style="padding: 4px 16px 8px;"></div>
@@ -24,12 +25,19 @@
       <button class="mode-tab" data-mode="physics_classic">N-Body Classic</button>
       <button class="mode-tab" data-mode="fluid">Fluid</button>
       <button class="mode-tab" data-mode="parametric">Shapes</button>
+      <button class="mode-tab" data-mode="reaction">Reaction</button>
+    </div>
+    <div class="mobile-mode-stepper">
+      <button class="stepper-btn" id="mode-prev" aria-label="Previous mode">&#x276E;</button>
+      <span class="stepper-label" id="mode-stepper-label">Boids</span>
+      <button class="stepper-btn" id="mode-next" aria-label="Next mode">&#x276F;</button>
     </div>
     <div class="param-group active" data-mode="boids" id="params-boids"></div>
     <div class="param-group" data-mode="physics" id="params-physics"></div>
     <div class="param-group" data-mode="physics_classic" id="params-physics_classic"></div>
     <div class="param-group" data-mode="fluid" id="params-fluid"></div>
     <div class="param-group" data-mode="parametric" id="params-parametric"></div>
+    <div class="param-group" data-mode="reaction" id="params-reaction"></div>
     <div class="global-controls">
       <div class="btn-row">
         <button class="ctrl-btn" id="btn-pause">Pause</button>
@@ -47,6 +55,11 @@
   </div>
   <div id="canvas-container">
     <canvas id="gpu-canvas"></canvas>
+    <div class="mobile-fab">
+      <button class="fab-btn" id="fab-pause" aria-label="Pause">&#x23F8;</button>
+      <button class="fab-btn" id="fab-reset" aria-label="Reset">&#x21BA;</button>
+      <button class="fab-btn" id="fab-controls" aria-label="Controls">&#x2699;</button>
+    </div>
     <button id="shader-toggle">&lt;/&gt;</button>
     <div id="shader-panel">
       <div class="shader-tabs" id="shader-tabs"></div>

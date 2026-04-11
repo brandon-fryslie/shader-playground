@@ -390,3 +390,203 @@ body {
   font-size: 11px;
   color: #4ade80;
 }
+
+/* ═══ MOBILE ELEMENTS (hidden on desktop) ═══ */
+.mobile-drag-handle { display: none; }
+.mobile-fab { display: none; }
+.mobile-mode-stepper { display: none; }
+
+/* ═══ MOBILE LAYOUT ═══ */
+@media (max-width: 768px) {
+  :root { --mobile-peek-height: 100px; }
+
+  #app {
+    grid-template-columns: 1fr;
+    grid-template-rows: 1fr;
+  }
+
+  /* Canvas fills full viewport */
+  #canvas-container {
+    grid-row: 1;
+    grid-column: 1;
+    position: fixed;
+    inset: 0;
+    z-index: 0;
+  }
+  #canvas-container canvas {
+    touch-action: none;
+  }
+
+  /* Hide prompt bar on mobile */
+  #prompt-output { display: none; }
+
+  /* Controls become bottom sheet */
+  #controls {
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    z-index: 10;
+    max-height: 85vh;
+    border-right: none;
+    border-top: 1px solid var(--panel-border);
+    border-radius: 16px 16px 0 0;
+    transform: translateY(calc(100% - var(--mobile-peek-height)));
+    transition: transform 0.3s ease;
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+    background: var(--panel);
+  }
+  #controls.mobile-expanded {
+    transform: translateY(0);
+  }
+
+  /* Drag handle — pill indicator at top of sheet */
+  .mobile-drag-handle {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    padding: 10px 0 6px;
+    flex-shrink: 0;
+    cursor: grab;
+  }
+  .mobile-drag-handle span {
+    display: block;
+    width: 40px;
+    height: 4px;
+    border-radius: 2px;
+    background: var(--text-dim);
+    opacity: 0.5;
+  }
+
+  /* Hide desktop tabs and theme section on mobile */
+  .mode-tabs { display: none; }
+  .color-section { display: none; }
+
+  /* Mode stepper: prev / label / next */
+  .mobile-mode-stepper {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 4px 12px 8px;
+    flex-shrink: 0;
+    border-bottom: 1px solid var(--panel-border);
+  }
+  .stepper-btn {
+    width: 44px;
+    height: 44px;
+    border-radius: 50%;
+    background: var(--surface);
+    color: var(--text);
+    border: 1px solid var(--panel-border);
+    font-size: 18px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: all 0.15s;
+    flex-shrink: 0;
+  }
+  .stepper-btn:active {
+    background: var(--accent-dim);
+    border-color: var(--accent);
+  }
+  .stepper-label {
+    font-size: 15px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: var(--accent);
+    text-align: center;
+    flex: 1;
+  }
+
+  /* Touch-friendly slider thumbs */
+  .control-row input[type="range"]::-webkit-slider-thumb {
+    width: 24px;
+    height: 24px;
+  }
+  .control-row input[type="range"] {
+    height: 6px;
+  }
+
+  /* Touch-friendly preset buttons */
+  .preset-btn {
+    padding: 8px 14px;
+    font-size: 12px;
+    min-height: 36px;
+    display: flex;
+    align-items: center;
+  }
+
+  /* Touch-friendly control buttons */
+  .ctrl-btn {
+    min-height: 44px;
+    font-size: 13px;
+  }
+  .xr-btn {
+    min-height: 44px;
+    font-size: 13px;
+  }
+
+  /* Touch-friendly dropdowns */
+  .control-row select {
+    min-height: 36px;
+    font-size: 13px;
+  }
+
+  /* Shader panel goes full-width on mobile */
+  #shader-panel {
+    width: 100%;
+    min-width: unset;
+  }
+  #shader-toggle {
+    top: auto;
+    bottom: calc(var(--mobile-peek-height) + 8px);
+    right: 8px;
+    z-index: 11;
+  }
+
+  /* Floating action buttons */
+  .mobile-fab {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    position: absolute;
+    top: 12px;
+    right: 12px;
+    z-index: 5;
+  }
+  .fab-btn {
+    width: 44px;
+    height: 44px;
+    border-radius: 50%;
+    background: rgba(22, 24, 42, 0.85);
+    color: var(--text);
+    border: 1px solid var(--panel-border);
+    font-size: 18px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+    transition: all 0.15s;
+  }
+  .fab-btn:active {
+    background: var(--accent-dim);
+    border-color: var(--accent);
+  }
+  .fab-btn.active {
+    background: var(--accent-dim);
+    border-color: var(--accent);
+  }
+
+  /* Mobile stats overlay — show FPS on canvas */
+  .global-controls .stats {
+    font-size: 10px;
+  }
+
+  /* Hide VR button on mobile (no WebXR on phones) */
+  .xr-btn { display: none; }
+}
