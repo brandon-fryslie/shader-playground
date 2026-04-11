@@ -68,28 +68,58 @@ const CORE_FRICTION_INNER_RADIUS = 0.14;
 const CORE_FRICTION_SPEED_START = 0.9;
 const CORE_FRICTION_GAIN = 3.4;
 
-@compute @workgroup_size(64)
-fn main(@builtin(global_invocation_id) gid: vec3u) {
+// Shared memory tile for source bodies — only pos + mass needed for force computation.
+// [LAW:one-source-of-truth] TILE_SIZE matches @workgroup_size so every thread loads exactly one body per tile.
+const TILE_SIZE = 128u;
+var<workgroup> tile: array<vec4f, TILE_SIZE>;
+
+@compute @workgroup_size(TILE_SIZE)
+fn main(@builtin(global_invocation_id) gid: vec3u, @builtin(local_invocation_id) lid: vec3u) {
   let idx = gid.x;
   if (idx >= params.count) { return; }
 
   let me = bodiesIn[idx];
   var acc = vec3f(0.0);
 
-  for (var i = 0u; i < params.sourceCount; i++) {
-    if (i == idx) { continue; }
-    let other = bodiesIn[i];
-    let diff = other.pos - me.pos;
-    let rawDist2 = dot(diff, diff);
-    let dist2 = dot(diff, diff) + params.softening * params.softening;
-    let inv = 1.0 / sqrt(dist2);
-    let inv3 = inv * inv * inv;
-    acc += diff * (params.G * other.mass * inv3);
-    let pressureDist = sqrt(rawDist2 + 0.0001);
-    let pressureFade = 1.0 - smoothstep(0.0, PARTICLE_PRESSURE_RADIUS, pressureDist);
-    let pressureMass = min(other.mass, PARTICLE_PRESSURE_MASS_CAP);
-    let pressureScale = pressureFade * pressureFade * (PARTICLE_PRESSURE_STRENGTH * pressureMass / (rawDist2 + PARTICLE_PRESSURE_SOFTENING));
-    acc -= (diff / pressureDist) * pressureScale;
+  // Hoist loop-invariant values.
+  let softeningSq = params.softening * params.softening;
+  let G = params.G;
+  let numTiles = (params.sourceCount + TILE_SIZE - 1u) / TILE_SIZE;
+
+  for (var t = 0u; t < numTiles; t++) {
+    // Cooperative tile load: each thread loads one source body into shared memory.
+    let loadIdx = t * TILE_SIZE + lid.x;
+    tile[lid.x] = select(
+      vec4f(0.0),
+      vec4f(bodiesIn[loadIdx].pos, bodiesIn[loadIdx].mass),
+      loadIdx < params.sourceCount
+    );
+    workgroupBarrier();
+
+    // Accumulate forces from all bodies in this tile.
+    let tileEnd = min(TILE_SIZE, params.sourceCount - t * TILE_SIZE);
+    for (var j = 0u; j < tileEnd; j++) {
+      let globalJ = t * TILE_SIZE + j;
+      if (globalJ == idx) { continue; }
+
+      let otherPosM = tile[j];
+      let diff = otherPosM.xyz - me.pos;
+      let dist2 = dot(diff, diff) + softeningSq;
+      let inv = inverseSqrt(dist2);
+      let inv3 = inv * inv * inv;
+
+      // Gravity — scales by mass, so zero-mass tracers contribute nothing naturally.
+      acc += diff * (G * otherPosM.w * inv3);
+
+      // Pressure — multiply mass into scale early so zero-mass tracers skip the expensive path at negligible cost.
+      let pressureMass = min(otherPosM.w, PARTICLE_PRESSURE_MASS_CAP);
+      let rawDist2 = dot(diff, diff);
+      let pressureDist = sqrt(rawDist2 + 0.0001);
+      let pressureFade = 1.0 - smoothstep(0.0, PARTICLE_PRESSURE_RADIUS, pressureDist);
+      let pressureScale = pressureFade * pressureFade * (PARTICLE_PRESSURE_STRENGTH * pressureMass / (rawDist2 + PARTICLE_PRESSURE_SOFTENING));
+      acc -= (diff / pressureDist) * pressureScale;
+    }
+    workgroupBarrier();
   }
 
   let targetPos = vec3f(params.targetX, params.targetY, params.targetZ);
@@ -146,14 +176,13 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
   let crossNE = cross(n, eR);
   let crossLen2 = dot(crossNE, crossNE);
   let ePhi = select(vec3f(0.0), crossNE / sqrt(max(crossLen2, 1e-8)), crossLen2 > 1e-8);
-  let R = select(0.0, safeR, valid);
   let vR = dot(me.vel, eR);
   let vPhi = dot(me.vel, ePhi);
   // Term 1: vertical velocity damping (primary flattener).
   acc -= n * (vz * params.diskVertDamp);
   // Term 2: radial velocity damping (orbit circularization).
   acc -= eR * (vR * params.diskRadDamp);
-  // Term 3: vertical position spring (z² potential — opt-in via slider).
+  // Term 3: vertical position spring (z^2 potential — opt-in via slider).
   acc -= n * (z * params.diskVertSpring);
   // Term 4: tangential target-speed nudge toward a Keplerian-ish circular speed.
   // diskTangSpeed sets the orbital speed at R=1; falloff matches the seeded disk init (1/sqrt(R+0.1)).

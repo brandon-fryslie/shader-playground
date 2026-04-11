@@ -1473,13 +1473,16 @@ function createPhysicsSimulation() {
   const DISK_NORMAL_SMOOTH = 0.02;
   const DISK_L_MIN = 1e-4;
 
+  // Pre-allocated params staging buffer — avoids GC churn from per-frame ArrayBuffer allocation.
+  const paramsData = new ArrayBuffer(96);
+  const f32 = new Float32Array(paramsData);
+  const u32 = new Uint32Array(paramsData);
+  const paramsBytes = new Uint8Array(paramsData);
+
   return {
     compute(encoder: GPUCommandEncoder) {
       const p = state.physics;
       const m = state.mouse;
-      const paramsData = new ArrayBuffer(96);
-      const f32 = new Float32Array(paramsData);
-      const u32 = new Uint32Array(paramsData);
       f32[0] = 0.016 * state.fx.timeScale; f32[1] = p.G * 0.001; f32[2] = p.softening; f32[3] = p.damping;
       u32[4] = count;
       u32[5] = MASSIVE_BODY_COUNT;
@@ -1498,12 +1501,12 @@ function createPhysicsSimulation() {
       f32[20] = p.diskAlignGain ?? 0;
       f32[21] = p.interactionStrength ?? 1;
       f32[22] = p.diskTangSpeed ?? 0.5;
-      device.queue.writeBuffer(paramsBuffer, 0, new Uint8Array(paramsData));
+      device.queue.writeBuffer(paramsBuffer, 0, paramsBytes);
 
       const pass = encoder.beginComputePass();
       pass.setPipeline(computePipeline);
       pass.setBindGroup(0, computeBG[pingPong]);
-      pass.dispatchWorkgroups(Math.ceil(count / 64));
+      pass.dispatchWorkgroups(Math.ceil(count / 128));
       pass.end();
 
       // Reduction reads the freshly-written buffer (= input to next main pass).
