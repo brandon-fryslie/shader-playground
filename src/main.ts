@@ -867,8 +867,9 @@ function renderGrid(pass: GPURenderPassEncoder, aspect: number, viewIndex = 0): 
 
 
 // ═══ XR UI PANEL RENDERER ═══
-// [LAW:one-source-of-truth] Panel layout constants live here and are mirrored
-// (with matching comments) in src/shaders/xr.ui.wgsl. Keep them in sync.
+// [LAW:one-source-of-truth] Panel layout constants live here; positions and widths
+// are mirrored in src/shaders/xr.ui.wgsl. Hit-test half-extents (e.g. GRAB_HALF_H)
+// are intentionally larger than the rendered SDF extents for easier targeting.
 const XR_UI_PANEL_CENTER: [number, number, number] = [0, -0.4, -3.5];
 const XR_UI_PANEL_SIZE: [number, number] = [1.2, 0.55];
 const XR_UI_BTN_Y = 0.16;
@@ -4315,12 +4316,9 @@ function frame(now: DOMHighResTimeStamp) {
   const sim = simulations[state.mode];
   if (!sim) return;
 
-  // [LAW:single-enforcer] Frame-level validation scope: if the sim produces bad
-  // GPU work, drop it once and surface the error instead of freezing silently.
-  // The scope promise runs async, so it reports on the next tick — that's fine;
-  // we just need to stop repeatedly feeding the GPU bad commands.
-  device.pushErrorScope('validation');
-
+  // [LAW:single-enforcer] GPU validation errors are caught by device.onuncapturederror
+  // (set up in initWebGPU) which surfaces them in the error overlay without per-frame
+  // scope overhead. Targeted scopes in ensureSimulation() handle creation-time errors.
   const mode = state.mode;
   const encoder = device.createCommandEncoder();
 
@@ -4357,15 +4355,6 @@ function frame(now: DOMHighResTimeStamp) {
       delete simulations[mode];
     }
   }
-
-  device.popErrorScope().then(err => {
-    if (!err) return;
-    showSimError(mode, `frame validation: ${err.message}`);
-    if (simulations[mode] === sim) {
-      try { sim.destroy(); } catch { /* ignore */ }
-      delete simulations[mode];
-    }
-  });
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
