@@ -1,5 +1,5 @@
 // Gray-Scott reaction-diffusion on a 3D volume.
-// State is rg16float: r = u concentration, g = v concentration.
+// State texture is rgba16float: r = u concentration, g = v concentration.
 // 7-point Laplacian stencil, unconditional loads with clamped coords.
 // [LAW:dataflow-not-control-flow] Same operations run every cell; boundaries
 // are handled by clamping coords, not by branching.
