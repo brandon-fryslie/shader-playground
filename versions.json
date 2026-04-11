@@ -4,15 +4,22 @@
     {
       "version": "pr-1",
       "ref": "refs/pull/1/merge",
-      "sha": "6a722aa5cd51fec1fdaa010d0bfe60e51d2af71b",
-      "timestamp": "2026-04-10T01:27:52.811Z",
+      "sha": "e371b4f5d9ee3c31985cd4abedda4e113bf2fd78",
+      "timestamp": "2026-04-11T19:38:29.474Z",
       "commits": [
         {
-          "sha": "6a722aa5cd51fec1fdaa010d0bfe60e51d2af71b",
+          "sha": "e371b4f5d9ee3c31985cd4abedda4e113bf2fd78",
           "author_name": "Brandon Fryslie",
           "author_email": "530235+brandon-fryslie@users.noreply.github.com",
-          "timestamp": "2026-04-09T19:27:41-06:00",
-          "message": "Merge 961f7717821187e2149885fbd187149e01804902 into 801483402712081b69953a05826897c86330268b\n"
+          "timestamp": "2026-04-11T19:38:18Z",
+          "message": "Merge db1dae7ee827f64d3f9a58ab0a6c4e58ed6e1f93 into 801483402712081b69953a05826897c86330268b\n"
+        },
+        {
+          "sha": "db1dae7ee827f64d3f9a58ab0a6c4e58ed6e1f93",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-11T13:38:02-06:00",
+          "message": "mobile UI: bottom sheet controls, touch gestures, mode stepper\n\nAuto-detects mobile via matchMedia (max-width: 768px) and switches to\na mobile-optimized layout:\n\n- Canvas fills full viewport, controls become a bottom sheet overlay\n  with drag handle and peek state showing the mode stepper\n- Prev/next mode stepper replaces the 6-tab bar on small screens\n- FAB buttons (pause/reset/controls) overlay the canvas top-right\n- Multi-touch gesture system: 1-finger = sim interaction, 2-finger\n  drag = orbit camera, pinch = zoom (replaces ctrl+drag and wheel)\n- Touch-friendly sizing: 24px slider thumbs, 44px buttons\n- Reduced default particle counts for mobile GPUs on fresh installs\n- Theme selector and prompt bar hidden on mobile\n- Shader editor goes full-width on mobile\n- Desktop UI completely unchanged\n"
         },
         {
           "sha": "961f7717821187e2149885fbd187149e01804902",
