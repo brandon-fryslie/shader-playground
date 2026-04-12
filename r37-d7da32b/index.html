@@ -4,8 +4,8 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>WebGPU Compute Shader Playground</title>
-  <script type="module" crossorigin src="/shader-playground/pr-2/assets/index-JtMHPsiI.js"></script>
-  <link rel="stylesheet" crossorigin href="/shader-playground/pr-2/assets/index-DHUItVV-.css">
+  <script type="module" crossorigin src="/shader-playground/r37-d7da32b/assets/index-Caz1hhZK.js"></script>
+  <link rel="stylesheet" crossorigin href="/shader-playground/r37-d7da32b/assets/index-BNSndYL-.css">
 </head>
 <body>
 
@@ -22,8 +22,8 @@
       <div class="presets" id="theme-presets" style="padding: 4px 16px 8px;"></div>
     </div>
     <div class="mode-tabs">
-      <button class="mode-tab active" data-mode="boids">Boids</button>
-      <button class="mode-tab" data-mode="physics">N-Body</button>
+      <button class="mode-tab active" data-mode="physics">N-Body</button>
+      <button class="mode-tab" data-mode="boids">Boids</button>
       <button class="mode-tab" data-mode="physics_classic">N-Body Classic</button>
       <button class="mode-tab" data-mode="fluid">Fluid</button>
       <button class="mode-tab" data-mode="parametric">Shapes</button>
@@ -48,15 +48,15 @@
       <div class="btn-row">
         <button class="ctrl-btn" id="btn-reset-all" style="font-size:10px;color:var(--text-dim);">Reset All</button>
       </div>
-      <button class="xr-btn" id="btn-xr" disabled>Enter VR</button>
-      <div class="stats">
-        <span id="stat-fps">FPS: --</span>
-        <span id="stat-count">Particles: --</span>
-      </div>
     </div>
   </div>
   <div id="canvas-container">
     <canvas id="gpu-canvas"></canvas>
+    <div class="canvas-stats">
+      <span id="stat-fps">FPS: --</span>
+      <span id="stat-count">Particles: --</span>
+    </div>
+    <button class="xr-btn" id="btn-xr" disabled>Enter VR</button>
     <div class="mobile-fab">
       <button class="fab-btn" id="fab-pause" aria-label="Pause">&#x23F8;</button>
       <button class="fab-btn" id="fab-reset" aria-label="Reset">&#x21BA;</button>
@@ -83,8 +83,8 @@
 <script><!-- gh-pages-multiplexer:nav-widget -->
 (function(){
   var MANIFEST_URL = "../versions.json";
-  var INDEX_URL = "../";
-  var CURRENT = "pr-2";
+  var INDEX_URL = "../_versions/";
+  var CURRENT = "r37-d7da32b";
   var ICON_SVG = "<svg viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\" aria-hidden=\"true\"><path d=\"M12.83 2.18a2 2 0 0 0-1.66 0L2.6 6.08a1 1 0 0 0 0 1.83l8.58 3.91a2 2 0 0 0 1.66 0l8.58-3.9a1 1 0 0 0 0-1.83Z\"/><path d=\"m22 17.65-9.17 4.16a2 2 0 0 1-1.66 0L2 17.65\"/><path d=\"m22 12.65-9.17 4.16a2 2 0 0 1-1.66 0L2 12.65\"/><\/svg>";
   var LABEL_TEMPLATE = "{version}";
   var POSITION = "right 80%";
