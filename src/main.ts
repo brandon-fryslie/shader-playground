@@ -36,10 +36,10 @@ const DEFAULTS: ModeParamsMap = {
     maxSpeed: 2.0, maxForce: 0.05, visualRange: 100
   },
   physics: {
-    count: 10000, G: 1.0, softening: 0.5, damping: 1.0, coreOrbit: 0.28, distribution: 'disk',
-    interactionStrength: 1.0,
-    diskVertDamp: 0.35, diskRadDamp: 0.12, diskTangGain: 0.18, diskTangSpeed: 0.5,
-    diskVertSpring: 0.0, diskAlignGain: 0.0,
+    count: 10000, G: 0.4, softening: 1.5, damping: 1.0, coreOrbit: 0.28, distribution: 'disk',
+    interactionStrength: 1.0, tidalStrength: 0.008,
+    diskVertDamp: 3.0, diskRadDamp: 0.8, diskTangGain: 0.8, diskTangSpeed: 1.5,
+    diskVertSpring: 1.5, diskAlignGain: 0.4,
   },
   physics_classic: {
     // Verbatim defaults from the original shader-playground for fair A/B comparison.
@@ -76,13 +76,17 @@ const PRESETS: Record<SimMode, Record<string, Record<string, number | string>>> 
     'Slow Dance':  { count: 500, separationRadius: 40, alignmentRadius: 80, cohesionRadius: 100, maxSpeed: 0.5, maxForce: 0.01, visualRange: 150 },
   },
   physics: {
-    'Default':  { ...DEFAULTS.physics },
-    'Galaxy':   { count: 3000, G: 0.5, softening: 1.0, damping: 1.0, coreOrbit: 0.32, distribution: 'disk',
-                  interactionStrength: 1.0, diskVertDamp: 0.4, diskRadDamp: 0.15, diskTangGain: 0.22, diskTangSpeed: 0.5, diskVertSpring: 0.0, diskAlignGain: 0.0 },
-    'Collapse': { count: 2000, G: 10.0, softening: 0.1, damping: 0.998, coreOrbit: 0.14, distribution: 'shell',
-                  interactionStrength: 1.0, diskVertDamp: 0.05, diskRadDamp: 0.02, diskTangGain: 0.0, diskTangSpeed: 0.5, diskVertSpring: 0.0, diskAlignGain: 0.0 },
-    'Gentle':   { count: 1000, G: 0.1, softening: 2.0, damping: 1.0, coreOrbit: 0.2, distribution: 'random',
-                  interactionStrength: 1.0, diskVertDamp: 0.2, diskRadDamp: 0.08, diskTangGain: 0.12, diskTangSpeed: 0.4, diskVertSpring: 0.0, diskAlignGain: 0.0 },
+    'Default':    { ...DEFAULTS.physics },
+    'Galaxy':     { count: 3000, G: 0.35, softening: 1.5, damping: 1.0, coreOrbit: 0.32, distribution: 'disk',
+                    interactionStrength: 1.0, tidalStrength: 0.006, diskVertDamp: 3.0, diskRadDamp: 0.8, diskTangGain: 0.8, diskTangSpeed: 1.5, diskVertSpring: 1.5, diskAlignGain: 0.4 },
+    'Spiral':     { count: 5000, G: 0.4, softening: 1.5, damping: 1.0, coreOrbit: 0.2, distribution: 'disk',
+                    interactionStrength: 1.0, tidalStrength: 0.012, diskVertDamp: 3.5, diskRadDamp: 0.6, diskTangGain: 1.0, diskTangSpeed: 1.8, diskVertSpring: 1.2, diskAlignGain: 0.3 },
+    'Filaments':  { count: 3000, G: 0.3, softening: 2.5, damping: 1.0, coreOrbit: 0.1, distribution: 'shell',
+                    interactionStrength: 1.0, tidalStrength: 0.015, diskVertDamp: 0.1, diskRadDamp: 0.05, diskTangGain: 0.0, diskTangSpeed: 0.5, diskVertSpring: 0.0, diskAlignGain: 0.0 },
+    'Collapse':   { count: 2000, G: 3.0, softening: 0.5, damping: 0.998, coreOrbit: 0.14, distribution: 'shell',
+                    interactionStrength: 1.0, tidalStrength: 0.002, diskVertDamp: 0.1, diskRadDamp: 0.05, diskTangGain: 0.0, diskTangSpeed: 0.5, diskVertSpring: 0.0, diskAlignGain: 0.0 },
+    'Gentle':     { count: 1000, G: 0.15, softening: 2.0, damping: 1.0, coreOrbit: 0.2, distribution: 'random',
+                    interactionStrength: 1.0, tidalStrength: 0.003, diskVertDamp: 1.5, diskRadDamp: 0.4, diskTangGain: 0.5, diskTangSpeed: 1.0, diskVertSpring: 0.8, diskAlignGain: 0.2 },
   },
   physics_classic: {
     'Default':  { ...DEFAULTS.physics_classic },
@@ -128,23 +132,24 @@ const PARAM_DEFS: Record<SimMode, ParamSection[]> = {
   ],
   physics: [
     { section: 'Simulation', params: [
-      { key: 'count', label: 'Bodies', min: 10, max: 50000, step: 10, requiresReset: true },
-      { key: 'G', label: 'Gravity (G)', min: 0.01, max: 100.0, step: 0.01 },
-      { key: 'softening', label: 'Softening', min: 0.01, max: 10.0, step: 0.01 },
-      { key: 'damping', label: 'Damping', min: 0.9, max: 1.0, step: 0.001 },
-      { key: 'coreOrbit', label: 'Core Friction', min: 0.0, max: 1.5, step: 0.01 },
-      { key: 'interactionStrength', label: 'Interaction Pull', min: 0.0, max: 10.0, step: 0.05 },
+      { key: 'count', label: 'Bodies', min: 10, max: 150000, step: 10, requiresReset: true },
+      { key: 'G', label: 'Gravity (G)', min: 0.05, max: 5.0, step: 0.01 },
+      { key: 'softening', label: 'Softening', min: 0.2, max: 4.0, step: 0.05 },
+      { key: 'damping', label: 'Damping', min: 0.98, max: 1.0, step: 0.0005 },
+      { key: 'coreOrbit', label: 'Core Friction', min: 0.0, max: 0.8, step: 0.01 },
+      { key: 'interactionStrength', label: 'Interaction Pull', min: 0.1, max: 3.0, step: 0.05 },
+      { key: 'tidalStrength', label: 'Tidal Field', min: 0.0, max: 0.05, step: 0.0005 },
     ]},
     { section: 'Initial State', params: [
       { key: 'distribution', label: 'Distribution', type: 'dropdown', options: ['random', 'disk', 'shell'] },
     ]},
     { section: 'Disk Recovery', params: [
-      { key: 'diskVertDamp', label: 'Vertical Damp', min: 0.0, max: 2.0, step: 0.001 },
-      { key: 'diskRadDamp', label: 'Radial Damp', min: 0.0, max: 2.0, step: 0.001 },
-      { key: 'diskTangGain', label: 'Tangential Nudge', min: 0.0, max: 2.0, step: 0.001 },
-      { key: 'diskTangSpeed', label: 'Orbit Speed', min: 0.0, max: 2.0, step: 0.01 },
-      { key: 'diskVertSpring', label: 'Plane Spring', min: 0.0, max: 2.0, step: 0.001 },
-      { key: 'diskAlignGain', label: 'Flow Align', min: 0.0, max: 2.0, step: 0.001 },
+      { key: 'diskVertDamp', label: 'Vertical Damp', min: 0.0, max: 8.0, step: 0.05 },
+      { key: 'diskRadDamp', label: 'Radial Damp', min: 0.0, max: 3.0, step: 0.01 },
+      { key: 'diskTangGain', label: 'Tangential Nudge', min: 0.0, max: 3.0, step: 0.01 },
+      { key: 'diskTangSpeed', label: 'Orbit Speed', min: 0.1, max: 4.0, step: 0.01 },
+      { key: 'diskVertSpring', label: 'Plane Spring', min: 0.0, max: 5.0, step: 0.05 },
+      { key: 'diskAlignGain', label: 'Flow Align', min: 0.0, max: 1.5, step: 0.01 },
     ]},
   ],
   physics_classic: [
@@ -308,7 +313,7 @@ function modeParams(mode: SimMode): Record<string, number | string> {
 }
 
 const state: AppState = {
-  mode: 'boids',
+  mode: 'physics',
   colorTheme: 'Dracula',
   xrEnabled: false,
   paused: false,
@@ -354,7 +359,7 @@ const FLUID_WORLD_SIZE = 4; // full width/depth of the fluid volume in world uni
 // Each view's 192-byte Camera struct is placed at a 256-byte aligned offset so
 // both eyes can coexist in one buffer. writeBuffer calls go to different offsets,
 // so neither overwrites the other before the command buffer executes.
-const CAMERA_SIZE = 192;   // sizeof(Camera) in WGSL
+const CAMERA_SIZE = 208;   // sizeof(Camera) in WGSL — includes interaction state
 const CAMERA_STRIDE = 256; // >= CAMERA_SIZE, multiple of minUniformBufferOffsetAlignment
 // [LAW:one-source-of-truth] Desktop projection range is owned here so every pass sees the same far-plane budget.
 const DESKTOP_CAMERA_FAR = 160.0;
@@ -608,7 +613,7 @@ function initPostFx(): void {
     postFx.downsampleUBO.push(device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST }));
     postFx.upsampleUBO.push(device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST }));
   }
-  postFx.compositeUBO = device.createBuffer({ size: 64, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+  postFx.compositeUBO = device.createBuffer({ size: 80, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
 }
 
 function ensureCompositePipeline(format: GPUTextureFormat): GPURenderPipeline {
@@ -702,7 +707,7 @@ function destroyDepthRef(_depthRef: DepthRef) {
 
 function getCameraUniformData(aspect: number) {
   const tc = getThemeColors();
-  const data = new Float32Array(48);
+  const data = new Float32Array(52);
 
   if (xrCameraOverride) {
     // Use XR-provided matrices (correct FOV, stereo offset, world-locked)
@@ -723,6 +728,13 @@ function getCameraUniformData(aspect: number) {
   data.set(tc.primary, 36);
   data.set(tc.secondary, 40);
   data.set(tc.accent, 44);
+
+  // Interaction state — packed into camera buffer padding so render shaders can visualize it.
+  const m = state.mouse;
+  data[48] = m.worldX;
+  data[49] = m.worldY;
+  data[50] = m.worldZ;
+  data[51] = m.down ? 1.0 : 0.0;
   return data;
 }
 
@@ -889,7 +901,8 @@ const XR_UI_GRAB_HALF_H = 0.035;
 // aspect matches the panel rect it will be sampled into (no squishing):
 //   [0.00 .. 0.25] PREV   — sub-rect 256×128, aspect 2:1 (matches button label)
 //   [0.25 .. 0.50] NEXT   — sub-rect 256×128, aspect 2:1
-//   [0.50 .. 1.00] slider — sub-rect 512×128, aspect 4:1 (matches slider label)
+//   [0.50 .. 0.82] slider — sub-rect 328×128, aspect ~2.6:1 (matches slider label)
+//   [0.82 .. 1.00] FPS    — sub-rect 184×128, aspect ~1.4:1 (small stats readout)
 // u-ranges are mirrored in src/shaders/xr.ui.wgsl.
 const XR_UI_LABEL_CANVAS_W = 1024;
 const XR_UI_LABEL_CANVAS_H = 128;
@@ -992,11 +1005,15 @@ function drawXrUiLabel(
   ctx.fillText(text, rectX + rectW / 2, rectY + rectH / 2);
 }
 
-// Rasterize the three label strings to the canvas and upload to the label texture.
-// No-op if the mode hasn't changed since the last call.
+// Rasterize label strings to the canvas and upload to the label texture.
+// Redraws when mode changes or FPS updates (once per second).
+let xrUiLastFps = -1;
 function updateXrUiLabels(mode: SimMode): void {
-  if (xrUiLabelCurrentMode === mode) return;
+  const fpsChanged = currentFps !== xrUiLastFps;
+  const modeChanged = xrUiLabelCurrentMode !== mode;
+  if (!modeChanged && !fpsChanged) return;
   xrUiLabelCurrentMode = mode;
+  xrUiLastFps = currentFps;
   const ctx = xrUiLabelCtx;
   const w = XR_UI_LABEL_CANVAS_W;
   const h = XR_UI_LABEL_CANVAS_H;
@@ -1006,14 +1023,20 @@ function updateXrUiLabels(mode: SimMode): void {
   ctx.textBaseline = 'middle';
 
   // Sub-rects (matching LABEL_*_U0/U1 in xr.ui.wgsl):
-  //   PREV:   [0, 0]    .. [0.25w, h]  → 256×128
-  //   NEXT:   [0.25w, 0].. [0.50w, h]  → 256×128
-  //   SLIDER: [0.50w, 0].. [w, h]      → 512×128
+  //   PREV:   [0.00w .. 0.25w]  → 256×128
+  //   NEXT:   [0.25w .. 0.50w]  → 256×128
+  //   SLIDER: [0.50w .. 0.82w]  → 328×128
+  //   FPS:    [0.82w .. 1.00w]  → 184×128
   const quarter = w / 4;
-  drawXrUiLabel(ctx, 'PREV', 0,             0, quarter,     h);
-  drawXrUiLabel(ctx, 'NEXT', quarter,       0, quarter,     h);
+  const sliderEnd = Math.floor(w * 0.82);
+  const sliderW = sliderEnd - quarter * 2;
+  const fpsX = sliderEnd;
+  const fpsW = w - sliderEnd;
+  drawXrUiLabel(ctx, 'PREV', 0,             0, quarter,  h);
+  drawXrUiLabel(ctx, 'NEXT', quarter,       0, quarter,  h);
   drawXrUiLabel(ctx, XR_UI_SLIDER_DEFS[mode].label.toUpperCase(),
-                      quarter * 2,   0, quarter * 2, h);
+                      quarter * 2,   0, sliderW, h);
+  drawXrUiLabel(ctx, `${currentFps} FPS`, fpsX, 0, fpsW, h);
 
   device.queue.copyExternalImageToTexture(
     { source: xrUiLabelCanvas },
@@ -1226,23 +1249,26 @@ function createPhysicsSimulation() {
   const bodyBytes = count * 48; // pos(12) + mass(4) + vel(12) + pad(4) + home(12) + pad(4) = 48
 
   // [LAW:one-source-of-truth] N-body orbit shaping constants live together so position thickness and velocity tilt stay in sync.
-  const ORBITAL_TILT = 0.45;
-  const DISK_THICKNESS = 0.35;
+  const DISK_THICKNESS = 0.2;
   const VERTICAL_DRIFT = 0.18;
   // [LAW:one-source-of-truth] Massive-body seeding lives here so orbital structure and tracer distribution share one initialization model.
-  const BIG_BODY_COUNT = Math.min(count, Math.max(1, Math.round(count * 0.05)));
-  const MEDIUM_BODY_COUNT = Math.min(count - BIG_BODY_COUNT, Math.max(1, Math.round(count * 0.2)));
-  const MASSIVE_BODY_COUNT = BIG_BODY_COUNT + MEDIUM_BODY_COUNT;
-  const TRACER_MASS = 0.0;
-  const CORE_BODY_MASS = 42.0;
-  const BIG_BODY_MASS_MIN = 14.0;
-  const BIG_BODY_MASS_MAX = 30.0;
-  const MEDIUM_BODY_MASS_MIN = 2.5;
-  const MEDIUM_BODY_MASS_MAX = 9.0;
-  const BIG_BODY_RADIUS_MIN = 0.2;
-  const BIG_BODY_RADIUS_MAX = 0.85;
-  const MEDIUM_BODY_RADIUS_MIN = 0.95;
-  const MEDIUM_BODY_RADIUS_MAX = 1.85;
+  // Source bodies drive the O(N*S) force loop — cap S to keep high particle counts interactive.
+  const BIG_BODY_COUNT = Math.min(count, Math.max(1, Math.round(count * 0.03)));
+  const MEDIUM_BODY_COUNT = Math.min(count - BIG_BODY_COUNT, Math.max(1, Math.round(count * 0.1)));
+  const MASSIVE_BODY_COUNT = Math.min(BIG_BODY_COUNT + MEDIUM_BODY_COUNT, 8192);
+  const CORE_BODY_MASS = 3.0;
+  const BIG_BODY_MASS_MIN = 1.5;
+  const BIG_BODY_MASS_MAX = 3.0;
+  const MEDIUM_BODY_MASS_MIN = 0.5;
+  const MEDIUM_BODY_MASS_MAX = 1.5;
+  // Tracer subpopulations (fractions of non-massive particles)
+  const RETROGRADE_FRAC = 0.03;   // orbit backwards
+  const ECCENTRIC_FRAC = 0.04;    // plunging elliptical orbits
+  const HALO_FRAC = 0.05;         // high-inclination, above/below disk
+  const BIG_BODY_RADIUS_MIN = 0.4;
+  const BIG_BODY_RADIUS_MAX = 2.0;
+  const MEDIUM_BODY_RADIUS_MIN = 1.5;
+  const MEDIUM_BODY_RADIUS_MAX = 3.5;
   const BIG_BODY_HEIGHT = 0.12;
   const MEDIUM_BODY_HEIGHT = 0.2;
   const BIG_BODY_SWIRL = 0.9;
@@ -1256,7 +1282,7 @@ function createPhysicsSimulation() {
   for (let i = 0; i < count; i++) {
     const off = i * 12;
     let x, y, z, vx = 0, vy = 0, vz = 0;
-    let mass = TRACER_MASS;
+    let mass = 0.0;
     const isCoreBody = i === 0;
     const isBigBody = i < BIG_BODY_COUNT;
     const isMediumBody = i >= BIG_BODY_COUNT && i < MASSIVE_BODY_COUNT;
@@ -1305,34 +1331,75 @@ function createPhysicsSimulation() {
         : MEDIUM_BODY_MASS_MIN + Math.pow(Math.random(), 0.7) * (MEDIUM_BODY_MASS_MAX - MEDIUM_BODY_MASS_MIN);
     } else if (dist === 'disk') {
       const angle = Math.random() * Math.PI * 2;
-      const r = Math.random() * 2;
-      const normal = normalize3([
-        (Math.random() - 0.5) * ORBITAL_TILT,
-        1.0,
-        (Math.random() - 0.5) * ORBITAL_TILT,
-      ]);
-      const tangent = normalize3(cross3([0, 1, 0], normal));
-      const bitangent = cross3(normal, tangent);
-      const heightOffset = (Math.random() - 0.5) * DISK_THICKNESS * (0.35 + r * 0.4);
-      const orbitOffset = [
-        tangent[0] * Math.cos(angle) * r + bitangent[0] * Math.sin(angle) * r + normal[0] * heightOffset,
-        tangent[1] * Math.cos(angle) * r + bitangent[1] * Math.sin(angle) * r + normal[1] * heightOffset,
-        tangent[2] * Math.cos(angle) * r + bitangent[2] * Math.sin(angle) * r + normal[2] * heightOffset,
-      ];
-      x = orbitOffset[0];
-      y = orbitOffset[1];
-      z = orbitOffset[2];
+      const r = Math.sqrt(Math.random()) * 4.5;
+      // Continuous mass distribution for tracers: most are dust, some have noticeable mass.
+      // Power-law gives mostly small values with occasional heavier particles.
+      mass = Math.pow(Math.random(), 3.0) * 0.8;
 
-      const speed = 0.5 / Math.sqrt(r + 0.1);
-      const orbitVelocity = [
-        (-Math.sin(angle) * tangent[0] + Math.cos(angle) * bitangent[0]) * speed,
-        (-Math.sin(angle) * tangent[1] + Math.cos(angle) * bitangent[1]) * speed,
-        (-Math.sin(angle) * tangent[2] + Math.cos(angle) * bitangent[2]) * speed,
-      ];
-      const drift = heightOffset * VERTICAL_DRIFT;
-      vx = orbitVelocity[0] + normal[0] * drift;
-      vy = orbitVelocity[1] + normal[1] * drift;
-      vz = orbitVelocity[2] + normal[2] * drift;
+      // Determine subpopulation via index fraction within tracers
+      const tracerIndex = i - MASSIVE_BODY_COUNT;
+      const tracerCount = count - MASSIVE_BODY_COUNT;
+      const tracerFrac = tracerIndex / tracerCount;
+
+      if (tracerFrac < RETROGRADE_FRAC) {
+        // Retrograde: orbit backwards in the disk plane
+        const heightOffset = (Math.random() - 0.5) * DISK_THICKNESS * 0.5;
+        x = orbitalTangent[0] * Math.cos(angle) * r + orbitalBitangent[0] * Math.sin(angle) * r + orbitalNormal[0] * heightOffset;
+        y = orbitalTangent[1] * Math.cos(angle) * r + orbitalBitangent[1] * Math.sin(angle) * r + orbitalNormal[1] * heightOffset;
+        z = orbitalTangent[2] * Math.cos(angle) * r + orbitalBitangent[2] * Math.sin(angle) * r + orbitalNormal[2] * heightOffset;
+        const speed = 0.6 / Math.sqrt(r + 0.15);
+        // Flip the tangential direction for retrograde orbit
+        vx = (Math.sin(angle) * orbitalTangent[0] - Math.cos(angle) * orbitalBitangent[0]) * speed;
+        vy = (Math.sin(angle) * orbitalTangent[1] - Math.cos(angle) * orbitalBitangent[1]) * speed;
+        vz = (Math.sin(angle) * orbitalTangent[2] - Math.cos(angle) * orbitalBitangent[2]) * speed;
+        mass = 0.1 + Math.random() * 0.3; // slightly heavier so they're visible
+      } else if (tracerFrac < RETROGRADE_FRAC + ECCENTRIC_FRAC) {
+        // Eccentric: plunging elliptical orbits with radial velocity
+        const heightOffset = (Math.random() - 0.5) * DISK_THICKNESS * 0.3;
+        x = orbitalTangent[0] * Math.cos(angle) * r + orbitalBitangent[0] * Math.sin(angle) * r + orbitalNormal[0] * heightOffset;
+        y = orbitalTangent[1] * Math.cos(angle) * r + orbitalBitangent[1] * Math.sin(angle) * r + orbitalNormal[1] * heightOffset;
+        z = orbitalTangent[2] * Math.cos(angle) * r + orbitalBitangent[2] * Math.sin(angle) * r + orbitalNormal[2] * heightOffset;
+        // Mix of tangential and radial velocity creates an elliptical orbit
+        const tangSpeed = 0.5 / Math.sqrt(r + 0.15);
+        const radSpeed = (Math.random() * 0.4 + 0.2) * (Math.random() < 0.5 ? 1 : -1);
+        const radDir = normalize3([x, y, z]);
+        vx = (-Math.sin(angle) * orbitalTangent[0] + Math.cos(angle) * orbitalBitangent[0]) * tangSpeed + radDir[0] * radSpeed;
+        vy = (-Math.sin(angle) * orbitalTangent[1] + Math.cos(angle) * orbitalBitangent[1]) * tangSpeed + radDir[1] * radSpeed;
+        vz = (-Math.sin(angle) * orbitalTangent[2] + Math.cos(angle) * orbitalBitangent[2]) * tangSpeed + radDir[2] * radSpeed;
+        mass = 0.05 + Math.random() * 0.2;
+      } else if (tracerFrac < RETROGRADE_FRAC + ECCENTRIC_FRAC + HALO_FRAC) {
+        // Halo: spherical distribution above/below the disk, high inclination
+        const theta = Math.random() * Math.PI * 2;
+        const phi = Math.acos(2 * Math.random() - 1);
+        const haloR = 0.5 + Math.sqrt(Math.random()) * 3.5;
+        x = haloR * Math.sin(phi) * Math.cos(theta);
+        y = haloR * Math.sin(phi) * Math.sin(theta);
+        z = haloR * Math.cos(phi);
+        // Slow random velocity — loosely bound halo orbit
+        const haloSpeed = 0.15 + Math.random() * 0.15;
+        const radial = normalize3([x, y, z]);
+        const tangent = normalize3(cross3(radial, [0.3 + Math.random() * 0.2, 1.0, -0.2]));
+        vx = tangent[0] * haloSpeed;
+        vy = tangent[1] * haloSpeed;
+        vz = tangent[2] * haloSpeed;
+        mass = 0.02 + Math.random() * 0.1; // faint halo particles
+      } else {
+        // Standard disk tracer
+        const heightOffset = (Math.random() - 0.5) * DISK_THICKNESS * (0.35 + r * 0.4);
+        x = orbitalTangent[0] * Math.cos(angle) * r + orbitalBitangent[0] * Math.sin(angle) * r + orbitalNormal[0] * heightOffset;
+        y = orbitalTangent[1] * Math.cos(angle) * r + orbitalBitangent[1] * Math.sin(angle) * r + orbitalNormal[1] * heightOffset;
+        z = orbitalTangent[2] * Math.cos(angle) * r + orbitalBitangent[2] * Math.sin(angle) * r + orbitalNormal[2] * heightOffset;
+        const speed = 0.8 / Math.sqrt(r + 0.15);
+        const ov = [
+          (-Math.sin(angle) * orbitalTangent[0] + Math.cos(angle) * orbitalBitangent[0]) * speed,
+          (-Math.sin(angle) * orbitalTangent[1] + Math.cos(angle) * orbitalBitangent[1]) * speed,
+          (-Math.sin(angle) * orbitalTangent[2] + Math.cos(angle) * orbitalBitangent[2]) * speed,
+        ];
+        const drift = heightOffset * VERTICAL_DRIFT;
+        vx = ov[0] + orbitalNormal[0] * drift;
+        vy = ov[1] + orbitalNormal[1] * drift;
+        vz = ov[2] + orbitalNormal[2] * drift;
+      }
     } else if (dist === 'shell') {
       const theta = Math.random() * Math.PI * 2;
       const phi = Math.acos(2 * Math.random() - 1);
@@ -1347,6 +1414,7 @@ function createPhysicsSimulation() {
       vx = (tangent[0] + bitangent[0] * 0.35) * swirl;
       vy = (tangent[1] + bitangent[1] * 0.35) * swirl;
       vz = (tangent[2] + bitangent[2] * 0.35) * swirl;
+      mass = Math.pow(Math.random(), 3.0) * 0.8;
     } else {
       x = (Math.random() - 0.5) * 4;
       y = (Math.random() - 0.5) * 4;
@@ -1354,6 +1422,7 @@ function createPhysicsSimulation() {
       vx = (Math.random() - 0.5) * 0.12;
       vy = (Math.random() - 0.5) * 0.12;
       vz = (Math.random() - 0.5) * 0.12;
+      mass = Math.pow(Math.random(), 3.0) * 0.8;
     }
     initData[off] = x; initData[off + 1] = y; initData[off + 2] = z;
     initData[off + 3] = mass;
@@ -1483,10 +1552,13 @@ function createPhysicsSimulation() {
     compute(encoder: GPUCommandEncoder) {
       const p = state.physics;
       const m = state.mouse;
-      f32[0] = 0.016 * state.fx.timeScale; f32[1] = p.G * 0.001; f32[2] = p.softening; f32[3] = p.damping;
+      // [LAW:one-source-of-truth] G is normalized by source count so total gravitational pull stays consistent
+      // regardless of particle count. Without this, 50K particles would have 50x the gravity of 1K.
+      f32[0] = 0.016 * state.fx.timeScale; f32[1] = p.G * 0.001 * (1000 / Math.max(1, MASSIVE_BODY_COUNT)); f32[2] = p.softening; f32[3] = p.damping;
       u32[4] = count;
       u32[5] = MASSIVE_BODY_COUNT;
       f32[6] = p.coreOrbit;
+      f32[7] = performance.now() * 0.001;
       f32[8] = m.down ? m.worldX : 0.0;
       f32[9] = m.down ? m.worldY : 0.0;
       f32[10] = m.down ? m.worldZ : 0.0;
@@ -1501,12 +1573,13 @@ function createPhysicsSimulation() {
       f32[20] = p.diskAlignGain ?? 0;
       f32[21] = p.interactionStrength ?? 1;
       f32[22] = p.diskTangSpeed ?? 0.5;
+      f32[23] = p.tidalStrength ?? 0.0008;
       device.queue.writeBuffer(paramsBuffer, 0, paramsBytes);
 
       const pass = encoder.beginComputePass();
       pass.setPipeline(computePipeline);
       pass.setBindGroup(0, computeBG[pingPong]);
-      pass.dispatchWorkgroups(Math.ceil(count / 128));
+      pass.dispatchWorkgroups(Math.ceil(count / 256));
       pass.end();
 
       // Reduction reads the freshly-written buffer (= input to next main pass).
@@ -3553,13 +3626,13 @@ type XrUiElement = 'none' | 'prev' | 'next' | 'slider' | 'grab';
 interface XrUiSliderDef { key: string; label: string; min: number; max: number; }
 const XR_UI_SLIDER_DEFS: Record<SimMode, XrUiSliderDef> = {
   boids:           { key: 'maxSpeed',      label: 'Speed',   min: 0.1,  max: 10  },
-  physics:         { key: 'G',             label: 'Gravity', min: 0.01, max: 100 },
+  physics:         { key: 'G',             label: 'Gravity', min: 0.05, max: 5.0 },
   physics_classic: { key: 'G',             label: 'Gravity', min: 0.01, max: 100 },
   fluid:           { key: 'forceStrength', label: 'Force',   min: 1,    max: 500 },
   parametric:      { key: 'scale',         label: 'Scale',   min: 0.1,  max: 5   },
   reaction:        { key: 'feed',          label: 'Feed',    min: 0.0,  max: 0.1 },
 };
-const XR_UI_MODE_ORDER: SimMode[] = ['boids', 'physics', 'physics_classic', 'fluid', 'parametric', 'reaction'];
+const XR_UI_MODE_ORDER: SimMode[] = ['physics', 'boids', 'physics_classic', 'fluid', 'parametric', 'reaction'];
 
 const xrUiState = {
   hover:              'none' as XrUiElement,
@@ -3985,6 +4058,14 @@ function xrFrame(time: DOMHighResTimeStamp, xrFrameData: XRFrame) {
   xrSession.requestAnimationFrame(xrFrame);
   refreshThemeColors(time);
 
+  // FPS counter for XR — same logic as desktop frame loop
+  frameCount++;
+  if (time - fpsTime >= 1000) {
+    currentFps = frameCount;
+    frameCount = 0;
+    fpsTime = time;
+  }
+
   try {
     const pose = xrFrameData.getViewerPose(xrRefSpace!);
     if (!pose) return;
@@ -4267,17 +4348,42 @@ function runBloomChain(encoder: GPUCommandEncoder, sceneTex: GPUTexture) {
 function runComposite(encoder: GPUCommandEncoder, sceneTex: GPUTexture, finalView: GPUTextureView, finalFormat: GPUTextureFormat, viewport: number[] | null = null) {
   const fx = state.fx;
   const tc = getThemeColors();
-  const buf = new Float32Array(16);
+  const m = state.mouse;
+  const buf = new Float32Array(20);
   buf[0] = fx.bloomIntensity;
   buf[1] = fx.exposure;
   buf[2] = fx.vignette;
   buf[3] = fx.chromaticAberration;
   buf[4] = fx.grading;
-  // pad 5,6,7
+
+  // [LAW:dataflow-not-control-flow] Interaction screen projection always runs; interactActive of zero makes the shader term inert.
+  // Project world-space interaction point to screen UV for composite shockwave.
+  const aspect = viewport ? (viewport[2] / viewport[3]) : (canvas.width / canvas.height);
+  const fovRad = state.camera.fov * Math.PI / 180;
+  const orbitCam = getOrbitCamera();
+  const viewMat = xrCameraOverride ? xrCameraOverride.viewMatrix : orbitCam.view;
+  const projMat = xrCameraOverride ? xrCameraOverride.projMatrix : mat4.perspective(fovRad, aspect, 0.01, DESKTOP_CAMERA_FAR);
+  // Transform world pos through view then projection
+  const wx = m.worldX, wy = m.worldY, wz = m.worldZ;
+  const vx = viewMat[0]*wx + viewMat[4]*wy + viewMat[8]*wz + viewMat[12];
+  const vy = viewMat[1]*wx + viewMat[5]*wy + viewMat[9]*wz + viewMat[13];
+  const vz = viewMat[2]*wx + viewMat[6]*wy + viewMat[10]*wz + viewMat[14];
+  const vw = viewMat[3]*wx + viewMat[7]*wy + viewMat[11]*wz + viewMat[15];
+  const cx = projMat[0]*vx + projMat[4]*vy + projMat[8]*vz + projMat[12]*vw;
+  const cy = projMat[1]*vx + projMat[5]*vy + projMat[9]*vz + projMat[13]*vw;
+  const cw = projMat[3]*vx + projMat[7]*vy + projMat[11]*vz + projMat[15]*vw;
+  const ndcX = cw !== 0 ? cx / cw : 0;
+  const ndcY = cw !== 0 ? cy / cw : 0;
+  // NDC [-1,1] → UV [0,1], with Y flipped to match texture coords
+  buf[5] = ndcX * 0.5 + 0.5;
+  buf[6] = 1.0 - (ndcY * 0.5 + 0.5);
+  buf[7] = m.down ? 1.0 : 0.0;
+
   buf[8] = tc.primary[0]; buf[9] = tc.primary[1]; buf[10] = tc.primary[2];
   // pad 11
   buf[12] = tc.accent[0]; buf[13] = tc.accent[1]; buf[14] = tc.accent[2];
   // pad 15
+  buf[16] = performance.now() * 0.001;
   device.queue.writeBuffer(postFx.compositeUBO!, 0, buf);
 
   const pipeline = ensureCompositePipeline(finalFormat);

@@ -15,7 +15,7 @@ struct Params {
   count: u32,
   sourceCount: u32,
   coreOrbit: f32,
-  _pad3: f32,
+  time: f32,
   targetX: f32,
   targetY: f32,
   targetZ: f32,
@@ -30,7 +30,7 @@ struct Params {
   diskAlignGain: f32,
   interactionStrength: f32,
   diskTangSpeed: f32,
-  _pad7: f32,
+  tidalStrength: f32,
 }
 
 @group(0) @binding(0) var<storage, read> bodiesIn: array<Body>;
@@ -38,39 +38,31 @@ struct Params {
 @group(0) @binding(2) var<uniform> params: Params;
 
 // [LAW:one-source-of-truth] Long-run N-body stability thresholds are owned here so containment and anti-collapse stay coherent.
-const N_BODY_OUTER_RADIUS = 3.6;
-const N_BODY_BOUNDARY_PULL = 0.012;
-const INTERACTION_WELL_STRENGTH = 42.0;
-const INTERACTION_WELL_SOFTENING = 0.18;
+const N_BODY_OUTER_RADIUS = 8.0;
+const N_BODY_BOUNDARY_PULL = 0.006;
+const INTERACTION_WELL_STRENGTH = 12.0;
+const INTERACTION_WELL_SOFTENING = 0.25;
 const INTERACTION_CORE_RADIUS = 0.3;
-const INTERACTION_CORE_PRESSURE = 54.0;
+const INTERACTION_CORE_PRESSURE = 16.0;
 const HOME_WELL_STRENGTH = 0.0;
 const HOME_WELL_SOFTENING = 1.8;
 const HOME_CORE_RADIUS = 0.0;
 const HOME_CORE_PRESSURE = 0.0;
-// [LAW:dataflow-not-control-flow] Interaction and recovery share one force pipeline; only the strengths change.
 const HOME_RESTORE_STIFFNESS_ACTIVE = 0.14;
 const HOME_RESTORE_DAMPING_ACTIVE = 0.18;
-const INTERACTION_DRAG_GAIN = 1.9;
-// [LAW:dataflow-not-control-flow] Recovery always runs; the central-well fade changes the home-anchor strength instead of branching the solver.
-const HOME_ANCHOR_WELL_RADIUS = 2.2;
-const HOME_ANCHOR_FADE_RADIUS = 3.0;
-const HOME_REENTRY_KICK = 0.48;
-const HOME_REENTRY_DAMPING = 0.12;
-// [LAW:one-source-of-truth] Anti-collapse pressure is centralized here so the simulation keeps one coherent stability model.
-const PARTICLE_PRESSURE_RADIUS = 0.2;
-const PARTICLE_PRESSURE_SOFTENING = 0.03;
-const PARTICLE_PRESSURE_STRENGTH = 0.012;
-const PARTICLE_PRESSURE_MASS_CAP = 3.0;
-// [LAW:dataflow-not-control-flow] Core-speed damping is always evaluated; distance and speed decide whether it contributes.
-const CORE_FRICTION_RADIUS = 0.95;
-const CORE_FRICTION_INNER_RADIUS = 0.14;
-const CORE_FRICTION_SPEED_START = 0.9;
-const CORE_FRICTION_GAIN = 3.4;
+const INTERACTION_DRAG_GAIN = 0.6;
+const HOME_ANCHOR_WELL_RADIUS = 5.0;
+const HOME_ANCHOR_FADE_RADIUS = 7.0;
+const HOME_REENTRY_KICK = 0.04;
+const HOME_REENTRY_DAMPING = 0.02;
+const CORE_FRICTION_RADIUS = 0.8;
+const CORE_FRICTION_INNER_RADIUS = 0.1;
+const CORE_FRICTION_SPEED_START = 1.5;
+const CORE_FRICTION_GAIN = 1.2;
 
 // Shared memory tile for source bodies — only pos + mass needed for force computation.
 // [LAW:one-source-of-truth] TILE_SIZE matches @workgroup_size so every thread loads exactly one body per tile.
-const TILE_SIZE = 128u;
+const TILE_SIZE = 256u;
 var<workgroup> tile: array<vec4f, TILE_SIZE>;
 
 @compute @workgroup_size(TILE_SIZE)
@@ -85,6 +77,7 @@ fn main(@builtin(global_invocation_id) gid: vec3u, @builtin(local_invocation_id)
   let softeningSq = params.softening * params.softening;
   let G = params.G;
   let numTiles = (params.sourceCount + TILE_SIZE - 1u) / TILE_SIZE;
+  let myPos = me.pos;
 
   for (var t = 0u; t < numTiles; t++) {
     // Cooperative tile load: each thread loads one source body into shared memory.
@@ -96,41 +89,32 @@ fn main(@builtin(global_invocation_id) gid: vec3u, @builtin(local_invocation_id)
     );
     workgroupBarrier();
 
-    // Accumulate forces from all bodies in this tile.
+    // Accumulate gravity from all bodies in this tile.
+    // [LAW:dataflow-not-control-flow] Tight inner loop: gravity only, no branching besides self-skip.
     let tileEnd = min(TILE_SIZE, params.sourceCount - t * TILE_SIZE);
     for (var j = 0u; j < tileEnd; j++) {
       let globalJ = t * TILE_SIZE + j;
       if (globalJ == idx) { continue; }
 
-      let otherPosM = tile[j];
-      let diff = otherPosM.xyz - me.pos;
+      let other = tile[j];
+      let diff = other.xyz - myPos;
       let dist2 = dot(diff, diff) + softeningSq;
       let inv = inverseSqrt(dist2);
-      let inv3 = inv * inv * inv;
-
-      // Gravity — scales by mass, so zero-mass tracers contribute nothing naturally.
-      acc += diff * (G * otherPosM.w * inv3);
-
-      // Pressure — multiply mass into scale early so zero-mass tracers skip the expensive path at negligible cost.
-      let pressureMass = min(otherPosM.w, PARTICLE_PRESSURE_MASS_CAP);
-      let rawDist2 = dot(diff, diff);
-      let pressureDist = sqrt(rawDist2 + 0.0001);
-      let pressureFade = 1.0 - smoothstep(0.0, PARTICLE_PRESSURE_RADIUS, pressureDist);
-      let pressureScale = pressureFade * pressureFade * (PARTICLE_PRESSURE_STRENGTH * pressureMass / (rawDist2 + PARTICLE_PRESSURE_SOFTENING));
-      acc -= (diff / pressureDist) * pressureScale;
+      acc += diff * (G * other.w * inv * inv * inv);
     }
     workgroupBarrier();
   }
 
   let targetPos = vec3f(params.targetX, params.targetY, params.targetZ);
   let interactionOn = params.interactionActive > 0.5;
-  let wellStrength = select(HOME_WELL_STRENGTH, INTERACTION_WELL_STRENGTH * params.interactionStrength, interactionOn);
+  let countScale = sqrt(f32(params.count) / 1000.0);
+  let wellStrength = select(HOME_WELL_STRENGTH, INTERACTION_WELL_STRENGTH * params.interactionStrength * countScale, interactionOn);
   let wellSoftening = select(HOME_WELL_SOFTENING, INTERACTION_WELL_SOFTENING, interactionOn);
   let coreRadius = select(HOME_CORE_RADIUS, INTERACTION_CORE_RADIUS, interactionOn);
-  let corePressure = select(HOME_CORE_PRESSURE, INTERACTION_CORE_PRESSURE * params.interactionStrength, interactionOn);
+  let corePressure = select(HOME_CORE_PRESSURE, INTERACTION_CORE_PRESSURE * params.interactionStrength * countScale, interactionOn);
   let homeRestoreStiffness = select(0.0, HOME_RESTORE_STIFFNESS_ACTIVE, interactionOn);
   let homeRestoreDamping = select(0.0, HOME_RESTORE_DAMPING_ACTIVE, interactionOn);
-  let interactionDrag = select(0.0, INTERACTION_DRAG_GAIN, interactionOn);
+  let interactionDrag = select(0.0, INTERACTION_DRAG_GAIN * countScale, interactionOn);
   let homeReentryKick = select(HOME_REENTRY_KICK, 0.0, interactionOn);
   let homeReentryDamping = select(HOME_REENTRY_DAMPING, 0.0, interactionOn);
   let coreDist = length(me.pos);
@@ -162,13 +146,10 @@ fn main(@builtin(global_invocation_id) gid: vec3u, @builtin(local_invocation_id)
   acc -= me.vel * coreFrictionStrength;
 
   // [LAW:dataflow-not-control-flow] Disk recovery always runs; gains of zero make individual terms inert without branching the solver.
-  // All five corrections are applied as accelerations only — never as direct velocity edits — so the integrator preserves frame-rate independence.
-  // [LAW:dataflow-not-control-flow] When R is degenerate, basis vectors become zero (not NaN); zero-weighted terms then contribute zero acceleration.
   let n = params.diskNormal;
-  let r = me.pos;
-  let z = dot(r, n);
+  let z = dot(me.pos, n);
   let vz = dot(me.vel, n);
-  let rPlane = r - z * n;
+  let rPlane = me.pos - z * n;
   let R2 = dot(rPlane, rPlane);
   let valid = R2 > 1e-8;
   let safeR = sqrt(max(R2, 1e-8));
@@ -178,26 +159,27 @@ fn main(@builtin(global_invocation_id) gid: vec3u, @builtin(local_invocation_id)
   let ePhi = select(vec3f(0.0), crossNE / sqrt(max(crossLen2, 1e-8)), crossLen2 > 1e-8);
   let vR = dot(me.vel, eR);
   let vPhi = dot(me.vel, ePhi);
-  // Term 1: vertical velocity damping (primary flattener).
-  acc -= n * (vz * params.diskVertDamp);
-  // Term 2: radial velocity damping (orbit circularization).
-  acc -= eR * (vR * params.diskRadDamp);
-  // Term 3: vertical position spring (z^2 potential — opt-in via slider).
-  acc -= n * (z * params.diskVertSpring);
-  // Term 4: tangential target-speed nudge toward a Keplerian-ish circular speed.
-  // diskTangSpeed sets the orbital speed at R=1; falloff matches the seeded disk init (1/sqrt(R+0.1)).
+  // Disk recovery fades to zero beyond the disk region — scattered particles are free.
+  let diskFade = 1.0 - smoothstep(3.0, 5.0, coreDist);
+  acc -= n * (vz * params.diskVertDamp * diskFade);
+  acc -= eR * (vR * params.diskRadDamp * diskFade);
+  acc -= n * (z * params.diskVertSpring * diskFade);
   let vc = params.diskTangSpeed / sqrt(safeR + 0.1);
-  acc += ePhi * ((vc - vPhi) * params.diskTangGain);
-  // Term 5: bias non-tangential velocity components toward the disk's coherent flow.
+  acc += ePhi * (max(0.0, vc - vPhi) * params.diskTangGain * diskFade);
   let vNonTan = me.vel - n * vz - eR * vR;
-  acc -= vNonTan * params.diskAlignGain;
+  acc -= vNonTan * (params.diskAlignGain * diskFade);
 
-  // A soft outer boundary keeps the toy system readable without letting the system escape to infinity.
-  let centerDist = length(me.pos);
-  if (centerDist > N_BODY_OUTER_RADIUS) {
-    let toCenter = -normalize(me.pos);
-    acc += toCenter * ((centerDist - N_BODY_OUTER_RADIUS) * N_BODY_BOUNDARY_PULL);
-  }
+  // Soft outer boundary.
+  let boundaryExcess = max(0.0, coreDist - N_BODY_OUTER_RADIUS);
+  acc -= normalize(me.pos + vec3f(0.0001)) * (boundaryExcess * N_BODY_BOUNDARY_PULL);
+
+  // Slowly rotating tidal quadrupole — seeds spiral arms via differential rotation.
+  let tidalAngle = params.time * 0.15;
+  let tidalCos = cos(tidalAngle);
+  let tidalSin = sin(tidalAngle);
+  let axisA = vec3f(tidalCos, 0.0, tidalSin);
+  let axisB = vec3f(-tidalSin, 0.0, tidalCos);
+  acc += params.tidalStrength * (axisA * dot(me.pos, axisA) - axisB * dot(me.pos, axisB));
 
   let effectiveDamping = 1.0 - (1.0 - params.damping) * params.dt;
   var vel = (me.vel + acc * params.dt) * effectiveDamping;

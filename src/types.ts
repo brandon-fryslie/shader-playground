@@ -35,6 +35,7 @@ export interface PhysicsParams {
   diskVertSpring: number;
   diskAlignGain: number;
   interactionStrength: number;
+  tidalStrength: number;
 }
 
 export interface ClassicPhysicsParams {

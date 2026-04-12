@@ -1,4 +1,5 @@
-// Final HDR composite: combine scene + bloom, ACES tone-map, color grade, vignette, chromatic aberration.
+// Final HDR composite: combine scene + bloom, ACES tone-map, color grade, vignette, chromatic aberration,
+// and interaction shockwave distortion.
 
 struct CompositeParams {
   bloomIntensity: f32,
@@ -6,13 +7,18 @@ struct CompositeParams {
   vignette: f32,
   chromaticAberration: f32,
   grading: f32,
-  _pad0: f32,
-  _pad1: f32,
-  _pad2: f32,
+  // Interaction shockwave — screen-space position of the interaction point + activation + time.
+  interactScreenX: f32,
+  interactScreenY: f32,
+  interactActive: f32,
   primary: vec3f,
   _pad3: f32,
   accent: vec3f,
   _pad4: f32,
+  interactTime: f32,
+  _pad5: f32,
+  _pad6: f32,
+  _pad7: f32,
 }
 
 @group(0) @binding(0) var sceneTex: texture_2d<f32>;
@@ -50,24 +56,39 @@ fn luminance(c: vec3f) -> f32 {
 
 @fragment
 fn fs_main(@location(0) uv: vec2f) -> @location(0) vec4f {
-  // Chromatic aberration: sample R/G/B at slightly offset UVs that diverge toward the edges.
+  // [LAW:dataflow-not-control-flow] Gravitational lensing: smoothly warp UVs toward the interaction point.
+  // Strength falls off with distance squared — near the cursor the scene bends inward, far away it's untouched.
+  let interactScreenPos = vec2f(params.interactScreenX, params.interactScreenY);
+  let toI = interactScreenPos - uv;
+  let iDist2 = dot(toI, toI) + 0.001;
+  let lensStrength = params.interactActive * 0.0004 / (iDist2 + 0.03);
+  let sampleUV = uv + toI * lensStrength;
+
+  // Chromatic aberration: applied to dim background (grid/walls) but not bright simulation content.
+  // Sample the scene at center UV first to measure brightness, then blend between CA'd and clean
+  // based on luminance — bright particles stay sharp, dark surroundings get the prismatic split.
   let center = vec2f(0.5, 0.5);
-  let dir = uv - center;
+  let dir = sampleUV - center;
   let dist2 = dot(dir, dir);
   let caStrength = params.chromaticAberration * 0.012;
-  let caR = uv + dir * dist2 * caStrength * 2.0;
-  let caB = uv - dir * dist2 * caStrength * 2.0;
+  let caR = sampleUV + dir * dist2 * caStrength * 2.0;
+  let caB = sampleUV - dir * dist2 * caStrength * 2.0;
 
-  let sceneR = textureSample(sceneTex, linSampler, caR).r;
-  let sceneG = textureSample(sceneTex, linSampler, uv).g;
-  let sceneB = textureSample(sceneTex, linSampler, caB).b;
-  var hdr = vec3f(sceneR, sceneG, sceneB);
+  let sceneClean = textureSample(sceneTex, linSampler, sampleUV).rgb;
+  let sceneCa = vec3f(
+    textureSample(sceneTex, linSampler, caR).r,
+    sceneClean.g,
+    textureSample(sceneTex, linSampler, caB).b
+  );
 
-  // Bloom add (chromatic-aberrated as well so glow stays consistent).
-  let bloomR = textureSample(bloomTex, linSampler, caR).r;
-  let bloomG = textureSample(bloomTex, linSampler, uv).g;
-  let bloomB = textureSample(bloomTex, linSampler, caB).b;
-  hdr = hdr + vec3f(bloomR, bloomG, bloomB) * params.bloomIntensity;
+  // Bright pixels (simulation) → use clean sample. Dim pixels (grid/room) → use CA'd sample.
+  let sceneLum = dot(sceneClean, vec3f(0.2126, 0.7152, 0.0722));
+  let caFade = 1.0 - smoothstep(0.03, 0.25, sceneLum);
+  var hdr = mix(sceneClean, sceneCa, caFade);
+
+  // Bloom add (always clean — CA on bloom looks messy).
+  let bloom = textureSample(bloomTex, linSampler, sampleUV).rgb;
+  hdr = hdr + bloom * params.bloomIntensity;
 
   // Exposure
   hdr = hdr * params.exposure;

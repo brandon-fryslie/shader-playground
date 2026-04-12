@@ -18,13 +18,16 @@ struct Camera {
 // Label atlas layout (matches updateXrUiLabels in main.ts):
 // [0.00 .. 0.25] → "PREV"   (sub-rect aspect 2:1 → matches button label rect)
 // [0.25 .. 0.50] → "NEXT"   (same 2:1)
-// [0.50 .. 1.00] → slider label (aspect 4:1 → matches slider label rect)
+// [0.50 .. 0.82] → slider label (aspect ~2.6:1 → matches slider label rect)
+// [0.82 .. 1.00] → FPS readout (aspect ~1.4:1 → small stats text)
 const LABEL_PREV_U0: f32 = 0.0;
 const LABEL_PREV_U1: f32 = 0.25;
 const LABEL_NEXT_U0: f32 = 0.25;
 const LABEL_NEXT_U1: f32 = 0.50;
 const LABEL_SLIDER_U0: f32 = 0.50;
-const LABEL_SLIDER_U1: f32 = 1.00;
+const LABEL_SLIDER_U1: f32 = 0.82;
+const LABEL_FPS_U0: f32 = 0.82;
+const LABEL_FPS_U1: f32 = 1.00;
 
 struct UIParams {
   center: vec3f,
@@ -209,6 +212,15 @@ fn fs_main(@location(0) uv: vec2f) -> @location(0) vec4f {
   let grabColor = mix(vec3f(0.22, 0.24, 0.32), camera.accent * 0.9, grabHover);
   col = mix(col, grabColor, grabMask);
   alpha = max(alpha, grabMask * 0.95);
+
+  // --- FPS readout (top-right corner of panel) ---
+  let fpsC = vec2f(aspect * 0.32, 0.38);
+  let fpsHalf = vec2f(0.12, 0.04);
+  let fpsPx = p - fpsC;
+  if (abs(fpsPx.x) < fpsHalf.x && abs(fpsPx.y) < fpsHalf.y) {
+    let labelCol = sampleLabel(fpsPx, fpsHalf, LABEL_FPS_U0, LABEL_FPS_U1);
+    col = mix(col, vec3f(0.6, 0.65, 0.7), labelCol.a * 0.8);
+  }
 
   // --- Reticle where the XR ray currently intersects the panel ---
   if (ui.hitActive > 0.5) {
