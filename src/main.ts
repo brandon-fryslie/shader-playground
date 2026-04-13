@@ -77,8 +77,8 @@ const PRESETS: Record<SimMode, Record<string, Record<string, number | string>>> 
   },
   physics: {
     'Default':    { ...DEFAULTS.physics },
-    'Spiral Galaxy': { count: 100000, G: 0.5, softening: 1.8, damping: 1.0, coreOrbit: 0.3, distribution: 'spiral',
-                    interactionStrength: 1.0, tidalStrength: 0.035, diskVertDamp: 5.0, diskRadDamp: 0.15, diskTangGain: 0.6, diskTangSpeed: 0.6, diskVertSpring: 2.0, diskAlignGain: 0.1 },
+    'Spiral Galaxy': { count: 100000, G: 0.5, softening: 1.8, damping: 1.0, coreOrbit: 0.0, distribution: 'spiral',
+                    interactionStrength: 1.0, tidalStrength: 0.02, diskVertDamp: 4.0, diskRadDamp: 0.0, diskTangGain: 0.0, diskTangSpeed: 0.6, diskVertSpring: 1.5, diskAlignGain: 0.0 },
     'Cosmic Web':  { count: 80000, G: 0.8, softening: 2.0, damping: 1.0, coreOrbit: 0.0, distribution: 'web',
                     interactionStrength: 1.0, tidalStrength: 0.025, diskVertDamp: 0.0, diskRadDamp: 0.0, diskTangGain: 0.0, diskTangSpeed: 0.5, diskVertSpring: 0.0, diskAlignGain: 0.0 },
     'Star Cluster': { count: 60000, G: 0.3, softening: 1.2, damping: 1.0, coreOrbit: 0.15, distribution: 'cluster',
