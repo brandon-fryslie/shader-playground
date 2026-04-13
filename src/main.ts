@@ -78,7 +78,7 @@ const PRESETS: Record<SimMode, Record<string, Record<string, number | string>>> 
   physics: {
     'Default':    { ...DEFAULTS.physics },
     'Spiral Galaxy': { count: 100000, G: 1.5, softening: 0.15, damping: 1.0, coreOrbit: 0.0, distribution: 'spiral',
-                    interactionStrength: 1.0, tidalStrength: 0.005, diskVertDamp: 3.0, diskRadDamp: 0.0, diskTangGain: 0.0, diskTangSpeed: 0.5, diskVertSpring: 1.0, diskAlignGain: 0.0 },
+                    interactionStrength: 1.0, tidalStrength: 0.005, diskVertDamp: 0.0, diskRadDamp: 0.0, diskTangGain: 0.0, diskTangSpeed: 0.5, diskVertSpring: 0.0, diskAlignGain: 0.0 },
     'Cosmic Web':  { count: 80000, G: 0.8, softening: 2.0, damping: 1.0, coreOrbit: 0.0, distribution: 'web',
                     interactionStrength: 1.0, tidalStrength: 0.025, diskVertDamp: 0.0, diskRadDamp: 0.0, diskTangGain: 0.0, diskTangSpeed: 0.5, diskVertSpring: 0.0, diskAlignGain: 0.0 },
     'Star Cluster': { count: 60000, G: 0.3, softening: 1.2, damping: 1.0, coreOrbit: 0.15, distribution: 'cluster',
@@ -1292,16 +1292,26 @@ function createPhysicsSimulation() {
       mass = CORE_BODY_MASS;
     } else if (isBigBody || isMediumBody) {
       if (dist === 'spiral') {
-        // Dark matter halo: invisible massive particles in a wide isothermal-like profile.
-        // Spread across the full disk extent so the rotation curve is flat (constant circular velocity).
-        // Stationary (v=0) so the potential is smooth and stable.
-        const haloR = Math.sqrt(Math.random()) * 5.0;
-        const theta = Math.random() * Math.PI * 2;
-        const phi = Math.acos(2 * Math.random() - 1);
-        x = haloR * Math.sin(phi) * Math.cos(theta);
-        y = haloR * Math.sin(phi) * Math.sin(theta);
-        z = haloR * Math.cos(phi);
-        vx = 0; vy = 0; vz = 0;
+        // Massive bodies follow the same exponential disk as tracers — no dark matter distinction.
+        // Same profile, same circular velocities, just heavier. This matches the barnes-hut approach
+        // where all bodies are equal participants in the gravitational dynamics.
+        const LAMBDA_M = 5.0;
+        const SCALE_M = 3.5;
+        const r_m = Math.exp(-LAMBDA_M * Math.random()) * SCALE_M;
+        const angle_m = Math.random() * Math.PI * 2;
+        const h_m = (Math.random() - 0.5) * 0.03;
+        x = orbitalTangent[0]*Math.cos(angle_m)*r_m + orbitalBitangent[0]*Math.sin(angle_m)*r_m + orbitalNormal[0]*h_m;
+        y = orbitalTangent[1]*Math.cos(angle_m)*r_m + orbitalBitangent[1]*Math.sin(angle_m)*r_m + orbitalNormal[1]*h_m;
+        z = orbitalTangent[2]*Math.cos(angle_m)*r_m + orbitalBitangent[2]*Math.sin(angle_m)*r_m + orbitalNormal[2]*h_m;
+        // Circular velocity from enclosed mass
+        const intR_m = (-1/LAMBDA_M) * Math.exp(-LAMBDA_M * r_m / SCALE_M) + (1/LAMBDA_M);
+        const intMax_m = (-1/LAMBDA_M) * Math.exp(-LAMBDA_M) + (1/LAMBDA_M);
+        const totalM = MASSIVE_BODY_COUNT * ((BIG_BODY_MASS_MIN+BIG_BODY_MASS_MAX+MEDIUM_BODY_MASS_MIN+MEDIUM_BODY_MASS_MAX)/4);
+        const Geff_m = (state.physics.G ?? 1.5) * 0.001 / Math.sqrt(Math.max(1, MASSIVE_BODY_COUNT) / 1000);
+        const vC_m = Math.sqrt(Math.max(0.001, Geff_m * (intR_m/intMax_m) * totalM / Math.max(r_m, 0.05)));
+        vx = (-Math.sin(angle_m)*orbitalTangent[0] + Math.cos(angle_m)*orbitalBitangent[0]) * vC_m;
+        vy = (-Math.sin(angle_m)*orbitalTangent[1] + Math.cos(angle_m)*orbitalBitangent[1]) * vC_m;
+        vz = (-Math.sin(angle_m)*orbitalTangent[2] + Math.cos(angle_m)*orbitalBitangent[2]) * vC_m;
         mass = isBigBody
           ? BIG_BODY_MASS_MIN + Math.pow(Math.random(), 0.4) * (BIG_BODY_MASS_MAX - BIG_BODY_MASS_MIN)
           : MEDIUM_BODY_MASS_MIN + Math.pow(Math.random(), 0.7) * (MEDIUM_BODY_MASS_MAX - MEDIUM_BODY_MASS_MIN);
@@ -1335,8 +1345,8 @@ function createPhysicsSimulation() {
       // Based on barnes-hut approach: exponential radial profile with enclosed-mass
       // circular velocities. Pure gravity + tidal perturbation creates arms via
       // swing amplification of N-body noise in the differentially rotating disk.
-      const LAMBDA = 3.0;           // exponential steepness (higher = more concentrated)
-      const DISK_SCALE = 4.0;       // max radius
+      const LAMBDA = 5.0;           // exponential steepness (higher = more concentrated)
+      const DISK_SCALE = 3.5;       // max radius
       const HALO_FRAC_S = 0.04;
 
       const tracerFrac = (i - MASSIVE_BODY_COUNT) / Math.max(1, count - MASSIVE_BODY_COUNT);
