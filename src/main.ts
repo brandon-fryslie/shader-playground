@@ -1789,10 +1789,18 @@ function createPhysicsSimulation() {
     async diagnose(): Promise<Record<string, number | number[]>> {
       if (diagPending) return { error: 1 };
       diagPending = true;
-      const sampleCount = Math.min(count, DIAG_SAMPLE);
+      // Copy several large chunks from evenly-spaced regions across the tracer population.
+      const tracerCount = count - MASSIVE_BODY_COUNT;
+      const sampleCount = Math.min(tracerCount, DIAG_SAMPLE);
+      const NUM_CHUNKS = 8;
+      const chunkBodies = Math.floor(sampleCount / NUM_CHUNKS);
+      const regionSize = Math.floor(tracerCount / NUM_CHUNKS);
       const srcBuf = pingPong === 0 ? bufferA : bufferB;
       const encoder = device.createCommandEncoder();
-      encoder.copyBufferToBuffer(srcBuf, 0, diagStaging, 0, sampleCount * 48);
+      for (let c = 0; c < NUM_CHUNKS; c++) {
+        const srcIdx = MASSIVE_BODY_COUNT + c * regionSize;
+        encoder.copyBufferToBuffer(srcBuf, srcIdx * 48, diagStaging, c * chunkBodies * 48, chunkBodies * 48);
+      }
       device.queue.submit([encoder.finish()]);
       await device.queue.onSubmittedWorkDone();
       await diagStaging.mapAsync(GPUMapMode.READ);

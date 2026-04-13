@@ -102,9 +102,10 @@ fn fill(dist: f32, aa: f32) -> f32 {
 fn sampleLabel(localP: vec2f, halfSize: vec2f, u0: f32, u1: f32) -> vec4f {
   let lu = (localP.x / halfSize.x) * 0.5 + 0.5;
   let lv = 1.0 - ((localP.y / halfSize.y) * 0.5 + 0.5);
-  if (lu < 0.0 || lu > 1.0 || lv < 0.0 || lv > 1.0) { return vec4f(0.0); }
-  let u = mix(u0, u1, lu);
-  return textureSample(labelTex, labelSamp, vec2f(u, lv));
+  // [LAW:dataflow-not-control-flow] Always sample, mask with bounds check — avoids non-uniform control flow.
+  let inBounds = select(0.0, 1.0, lu >= 0.0 && lu <= 1.0 && lv >= 0.0 && lv <= 1.0);
+  let u = mix(u0, u1, clamp(lu, 0.0, 1.0));
+  return textureSample(labelTex, labelSamp, vec2f(u, clamp(lv, 0.0, 1.0))) * inBounds;
 }
 
 @fragment
@@ -117,7 +118,8 @@ fn fs_main(@location(0) uv: vec2f) -> @location(0) vec4f {
   let bgHalf = vec2f(aspect * 0.5 - 0.02, 0.5 - 0.02);
   let bgDist = sdBox(p, bgHalf, 0.06);
   let bgMask = fill(bgDist, aa);
-  if (bgMask < 0.01) { discard; }
+  // [LAW:dataflow-not-control-flow] No discard here — texture samples must run in uniform control flow.
+  // Discard moves to the very end after all texture samples are done.
 
   var col = mix(vec3f(0.0), vec3f(0.07, 0.09, 0.15), bgMask);
   var alpha = bgMask * 0.88;
@@ -149,10 +151,8 @@ fn fs_main(@location(0) uv: vec2f) -> @location(0) vec4f {
   let prevLabelC = vec2f(prevC.x + 0.06, prevC.y);
   let prevLabelHalf = vec2f(0.08, 0.04);
   let prevLabelPx = p - prevLabelC;
-  if (abs(prevLabelPx.x) < prevLabelHalf.x && abs(prevLabelPx.y) < prevLabelHalf.y) {
-    let labelCol = sampleLabel(prevLabelPx, prevLabelHalf, LABEL_PREV_U0, LABEL_PREV_U1);
-    col = mix(col, vec3f(0.97), labelCol.a * prevMask);
-  }
+  let prevLabelCol = sampleLabel(prevLabelPx, prevLabelHalf, LABEL_PREV_U0, LABEL_PREV_U1);
+  col = mix(col, vec3f(0.97), prevLabelCol.a * prevMask);
 
   // Next
   let nextDist = sdBox(p - nextC, btnHalf, btnR);
@@ -169,20 +169,16 @@ fn fs_main(@location(0) uv: vec2f) -> @location(0) vec4f {
   let nextLabelC = vec2f(nextC.x - 0.06, nextC.y);
   let nextLabelHalf = vec2f(0.08, 0.04);
   let nextLabelPx = p - nextLabelC;
-  if (abs(nextLabelPx.x) < nextLabelHalf.x && abs(nextLabelPx.y) < nextLabelHalf.y) {
-    let labelCol = sampleLabel(nextLabelPx, nextLabelHalf, LABEL_NEXT_U0, LABEL_NEXT_U1);
-    col = mix(col, vec3f(0.97), labelCol.a * nextMask);
-  }
+  let nextLabelCol = sampleLabel(nextLabelPx, nextLabelHalf, LABEL_NEXT_U0, LABEL_NEXT_U1);
+  col = mix(col, vec3f(0.97), nextLabelCol.a * nextMask);
 
   // --- Slider label (above the track) ---
   let sliderLabelC = vec2f(0.0, -0.04);
   let sliderLabelHalf = vec2f(0.24, 0.06);
   let sliderLabelPx = p - sliderLabelC;
-  if (abs(sliderLabelPx.x) < sliderLabelHalf.x && abs(sliderLabelPx.y) < sliderLabelHalf.y) {
-    let labelCol = sampleLabel(sliderLabelPx, sliderLabelHalf, LABEL_SLIDER_U0, LABEL_SLIDER_U1);
-    col = mix(col, camera.accent, labelCol.a * 0.95);
-    alpha = max(alpha, labelCol.a);
-  }
+  let sliderLabelCol = sampleLabel(sliderLabelPx, sliderLabelHalf, LABEL_SLIDER_U0, LABEL_SLIDER_U1);
+  col = mix(col, camera.accent, sliderLabelCol.a * 0.95);
+  alpha = max(alpha, sliderLabelCol.a);
 
   // --- Slider ---
   let sliderY = -0.20;
@@ -217,10 +213,8 @@ fn fs_main(@location(0) uv: vec2f) -> @location(0) vec4f {
   let fpsC = vec2f(aspect * 0.32, 0.38);
   let fpsHalf = vec2f(0.12, 0.04);
   let fpsPx = p - fpsC;
-  if (abs(fpsPx.x) < fpsHalf.x && abs(fpsPx.y) < fpsHalf.y) {
-    let labelCol = sampleLabel(fpsPx, fpsHalf, LABEL_FPS_U0, LABEL_FPS_U1);
-    col = mix(col, vec3f(0.6, 0.65, 0.7), labelCol.a * 0.8);
-  }
+  let fpsLabelCol = sampleLabel(fpsPx, fpsHalf, LABEL_FPS_U0, LABEL_FPS_U1);
+  col = mix(col, vec3f(0.6, 0.65, 0.7), fpsLabelCol.a * 0.8);
 
   // --- Reticle where the XR ray currently intersects the panel ---
   if (ui.hitActive > 0.5) {
@@ -237,5 +231,7 @@ fn fs_main(@location(0) uv: vec2f) -> @location(0) vec4f {
 
   col = col * 1.3;
   alpha = max(alpha, max(prevMask, max(nextMask, max(trackMask, knobMask))));
+  // [LAW:dataflow-not-control-flow] Discard after all texture samples to maintain uniform control flow.
+  if (bgMask < 0.01) { discard; }
   return vec4f(col, alpha);
 }
