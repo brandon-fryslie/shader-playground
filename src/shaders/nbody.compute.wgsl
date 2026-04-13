@@ -155,12 +155,14 @@ fn main(@builtin(global_invocation_id) gid: vec3u, @builtin(local_invocation_id)
   let vR = dot(me.vel, eR);
   let vPhi = dot(me.vel, ePhi);
   // Disk recovery fades to zero beyond the disk region — scattered particles are free.
-  let diskFade = 1.0 - smoothstep(3.0, 5.0, coreDist);
+  let diskFade = 1.0 - smoothstep(5.0, 7.5, coreDist);
   acc -= n * (vz * params.diskVertDamp * diskFade);
   acc -= eR * (vR * params.diskRadDamp * diskFade);
   acc -= n * (z * params.diskVertSpring * diskFade);
+  // Bidirectional tangential nudge: accelerates slow particles, brakes fast ones toward the target.
+  // This acts as an energy regulator — without braking, the system injects energy without limit.
   let vc = params.diskTangSpeed / sqrt(safeR + 0.1);
-  acc += ePhi * (max(0.0, vc - vPhi) * params.diskTangGain * diskFade);
+  acc += ePhi * ((vc - vPhi) * params.diskTangGain * diskFade);
   let vNonTan = me.vel - n * vz - eR * vR;
   acc -= vNonTan * (params.diskAlignGain * diskFade);
 

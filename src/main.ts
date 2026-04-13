@@ -36,9 +36,9 @@ const DEFAULTS: ModeParamsMap = {
     maxSpeed: 2.0, maxForce: 0.05, visualRange: 100
   },
   physics: {
-    count: 80000, G: 0.4, softening: 1.5, damping: 1.0, coreOrbit: 0.28, distribution: 'disk',
+    count: 80000, G: 1.0, softening: 1.5, damping: 1.0, coreOrbit: 0.28, distribution: 'disk',
     interactionStrength: 1.0, tidalStrength: 0.008,
-    diskVertDamp: 3.0, diskRadDamp: 0.8, diskTangGain: 0.8, diskTangSpeed: 1.5,
+    diskVertDamp: 3.0, diskRadDamp: 0.8, diskTangGain: 0.8, diskTangSpeed: 0.6,
     diskVertSpring: 1.5, diskAlignGain: 0.4,
   },
   physics_classic: {
@@ -1269,8 +1269,13 @@ function createPhysicsSimulation() {
   const MEDIUM_BODY_RADIUS_MAX = 3.5;
   const BIG_BODY_HEIGHT = 0.12;
   const MEDIUM_BODY_HEIGHT = 0.2;
-  const BIG_BODY_SWIRL = 0.9;
-  const MEDIUM_BODY_SWIRL = 0.6;
+  // Match massive body speeds to diskTangSpeed so init is in equilibrium with disk recovery target.
+  // Init speed is deliberately below the disk recovery target — the tangential nudge boosts particles
+  // up to equilibrium over the first few seconds. Starting below prevents escape from the inner region
+  // where enclosed mass is small and circular velocity is low.
+  const initTangSpeed = (state.physics.diskTangSpeed ?? 0.6) * 0.3;
+  const BIG_BODY_SWIRL = initTangSpeed;
+  const MEDIUM_BODY_SWIRL = initTangSpeed;
 
   const initData = new Float32Array(count * 12);
   const dist = state.physics.distribution;
@@ -1419,7 +1424,7 @@ function createPhysicsSimulation() {
         x = orbitalTangent[0]*Math.cos(angle)*r + orbitalBitangent[0]*Math.sin(angle)*r + orbitalNormal[0]*h;
         y = orbitalTangent[1]*Math.cos(angle)*r + orbitalBitangent[1]*Math.sin(angle)*r + orbitalNormal[1]*h;
         z = orbitalTangent[2]*Math.cos(angle)*r + orbitalBitangent[2]*Math.sin(angle)*r + orbitalNormal[2]*h;
-        const s = 0.8 / Math.sqrt(r + 0.15);
+        const s = initTangSpeed / Math.sqrt(r + 0.1);
         vx = (-Math.sin(angle)*orbitalTangent[0] + Math.cos(angle)*orbitalBitangent[0])*s + orbitalNormal[0]*h*VERTICAL_DRIFT;
         vy = (-Math.sin(angle)*orbitalTangent[1] + Math.cos(angle)*orbitalBitangent[1])*s + orbitalNormal[1]*h*VERTICAL_DRIFT;
         vz = (-Math.sin(angle)*orbitalTangent[2] + Math.cos(angle)*orbitalBitangent[2])*s + orbitalNormal[2]*h*VERTICAL_DRIFT;
@@ -1684,9 +1689,9 @@ function createPhysicsSimulation() {
     compute(encoder: GPUCommandEncoder) {
       const p = state.physics;
       const m = state.mouse;
-      // [LAW:one-source-of-truth] G is normalized by source count so total gravitational pull stays consistent
-      // regardless of particle count. Without this, 50K particles would have 50x the gravity of 1K.
-      f32[0] = 0.016 * state.fx.timeScale; f32[1] = p.G * 0.001 * (1000 / Math.max(1, MASSIVE_BODY_COUNT)); f32[2] = p.softening; f32[3] = p.damping;
+      // [LAW:one-source-of-truth] G normalized by sqrt(sourceCount) so gravity scales sub-linearly with particle count.
+      // Without normalization, 50K particles would have 50x the gravity of 1K. sqrt keeps it manageable.
+      f32[0] = 0.016 * state.fx.timeScale; f32[1] = p.G * 0.001 / Math.sqrt(Math.max(1, MASSIVE_BODY_COUNT) / 1000); f32[2] = p.softening; f32[3] = p.damping;
       u32[4] = count;
       u32[5] = MASSIVE_BODY_COUNT;
       f32[6] = p.coreOrbit;
