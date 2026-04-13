@@ -77,8 +77,8 @@ const PRESETS: Record<SimMode, Record<string, Record<string, number | string>>> 
   },
   physics: {
     'Default':    { ...DEFAULTS.physics },
-    'Spiral Galaxy': { count: 100000, G: 0.5, softening: 1.8, damping: 1.0, coreOrbit: 0.0, distribution: 'spiral',
-                    interactionStrength: 1.0, tidalStrength: 0.02, diskVertDamp: 4.0, diskRadDamp: 0.0, diskTangGain: 0.0, diskTangSpeed: 0.6, diskVertSpring: 1.5, diskAlignGain: 0.0 },
+    'Spiral Galaxy': { count: 100000, G: 0.8, softening: 1.8, damping: 1.0, coreOrbit: 0.1, distribution: 'spiral',
+                    interactionStrength: 1.0, tidalStrength: 0.015, diskVertDamp: 4.0, diskRadDamp: 0.3, diskTangGain: 0.4, diskTangSpeed: 0.5, diskVertSpring: 1.5, diskAlignGain: 0.15 },
     'Cosmic Web':  { count: 80000, G: 0.8, softening: 2.0, damping: 1.0, coreOrbit: 0.0, distribution: 'web',
                     interactionStrength: 1.0, tidalStrength: 0.025, diskVertDamp: 0.0, diskRadDamp: 0.0, diskTangGain: 0.0, diskTangSpeed: 0.5, diskVertSpring: 0.0, diskAlignGain: 0.0 },
     'Star Cluster': { count: 60000, G: 0.3, softening: 1.2, damping: 1.0, coreOrbit: 0.15, distribution: 'cluster',
@@ -1258,15 +1258,15 @@ function createPhysicsSimulation() {
   const BIG_BODY_COUNT = Math.min(count, Math.max(1, Math.round(count * 0.03)));
   const MEDIUM_BODY_COUNT = Math.min(count - BIG_BODY_COUNT, Math.max(1, Math.round(count * 0.1)));
   const MASSIVE_BODY_COUNT = Math.min(BIG_BODY_COUNT + MEDIUM_BODY_COUNT, 8192);
-  const CORE_BODY_MASS = 3.0;
-  const BIG_BODY_MASS_MIN = 1.5;
-  const BIG_BODY_MASS_MAX = 3.0;
-  const MEDIUM_BODY_MASS_MIN = 0.5;
-  const MEDIUM_BODY_MASS_MAX = 1.5;
-  const BIG_BODY_RADIUS_MIN = 0.15;
-  const BIG_BODY_RADIUS_MAX = 1.5;
+  const CORE_BODY_MASS = 2.0;
+  const BIG_BODY_MASS_MIN = 0.8;
+  const BIG_BODY_MASS_MAX = 1.8;
+  const MEDIUM_BODY_MASS_MIN = 0.3;
+  const MEDIUM_BODY_MASS_MAX = 0.9;
+  const BIG_BODY_RADIUS_MIN = 0.2;
+  const BIG_BODY_RADIUS_MAX = 2.5;
   const MEDIUM_BODY_RADIUS_MIN = 0.5;
-  const MEDIUM_BODY_RADIUS_MAX = 3.0;
+  const MEDIUM_BODY_RADIUS_MAX = 4.0;
   const BIG_BODY_HEIGHT = 0.12;
   const MEDIUM_BODY_HEIGHT = 0.2;
   // Match massive body speeds to diskTangSpeed so init is in equilibrium with disk recovery target.
@@ -1290,48 +1290,49 @@ function createPhysicsSimulation() {
     const isBigBody = i < BIG_BODY_COUNT;
     const isMediumBody = i >= BIG_BODY_COUNT && i < MASSIVE_BODY_COUNT;
     if (isCoreBody) {
-      // [LAW:one-source-of-truth] The dominant well is seeded once here so orbital structure does not depend on emergent drift.
-      x = 0;
-      y = 0;
-      z = 0;
-      vx = 0;
-      vy = 0;
-      vz = 0;
+      x = 0; y = 0; z = 0; vx = 0; vy = 0; vz = 0;
       mass = CORE_BODY_MASS;
     } else if (isBigBody || isMediumBody) {
-      const bodyIndex = isBigBody ? i - 1 : i - BIG_BODY_COUNT;
-      const bodyCount = isBigBody ? Math.max(1, BIG_BODY_COUNT - 1) : MEDIUM_BODY_COUNT;
-      const bodyProgress = bodyCount > 1 ? bodyIndex / (bodyCount - 1) : 0.5;
-      const radiusMin = isBigBody ? BIG_BODY_RADIUS_MIN : MEDIUM_BODY_RADIUS_MIN;
-      const radiusMax = isBigBody ? BIG_BODY_RADIUS_MAX : MEDIUM_BODY_RADIUS_MAX;
-      const radiusJitter = isBigBody ? 0.05 : 0.1;
-      const radius = radiusMin + (radiusMax - radiusMin) * bodyProgress + (Math.random() - 0.5) * radiusJitter;
-      const heightScale = isBigBody ? BIG_BODY_HEIGHT : MEDIUM_BODY_HEIGHT;
-      const heightOffset = (Math.random() - 0.5) * heightScale;
-      const angleOffset = isBigBody ? Math.PI * 0.18 : Math.PI / Math.max(3, MEDIUM_BODY_COUNT);
-      const angle = (bodyIndex / Math.max(1, bodyCount)) * Math.PI * 2 + angleOffset;
-      const orbitOffset = [
-        orbitalTangent[0] * Math.cos(angle) * radius + orbitalBitangent[0] * Math.sin(angle) * radius + orbitalNormal[0] * heightOffset,
-        orbitalTangent[1] * Math.cos(angle) * radius + orbitalBitangent[1] * Math.sin(angle) * radius + orbitalNormal[1] * heightOffset,
-        orbitalTangent[2] * Math.cos(angle) * radius + orbitalBitangent[2] * Math.sin(angle) * radius + orbitalNormal[2] * heightOffset,
-      ];
-      x = orbitOffset[0];
-      y = orbitOffset[1];
-      z = orbitOffset[2];
-
-      const swirl = isBigBody ? BIG_BODY_SWIRL : MEDIUM_BODY_SWIRL;
-      const speed = swirl / Math.sqrt(radius + 0.05);
-      const orbitVelocity = [
-        (-Math.sin(angle) * orbitalTangent[0] + Math.cos(angle) * orbitalBitangent[0]) * speed,
-        (-Math.sin(angle) * orbitalTangent[1] + Math.cos(angle) * orbitalBitangent[1]) * speed,
-        (-Math.sin(angle) * orbitalTangent[2] + Math.cos(angle) * orbitalBitangent[2]) * speed,
-      ];
-      vx = orbitVelocity[0];
-      vy = orbitVelocity[1];
-      vz = orbitVelocity[2];
-      mass = isBigBody
-        ? BIG_BODY_MASS_MIN + Math.pow(Math.random(), 0.4) * (BIG_BODY_MASS_MAX - BIG_BODY_MASS_MIN)
-        : MEDIUM_BODY_MASS_MIN + Math.pow(Math.random(), 0.7) * (MEDIUM_BODY_MASS_MAX - MEDIUM_BODY_MASS_MIN);
+      if (dist === 'spiral') {
+        // Dark matter halo: invisible massive particles in a spherical NFW-like profile.
+        // They create the gravitational well that visible tracers orbit in.
+        // Stationary (v=0) so the potential is smooth and stable.
+        const u = Math.random();
+        const haloR = 0.3 * Math.pow(u, 0.33) / Math.pow(1 - u * 0.95 + 0.01, 0.5);
+        const theta = Math.random() * Math.PI * 2;
+        const phi = Math.acos(2 * Math.random() - 1);
+        x = haloR * Math.sin(phi) * Math.cos(theta);
+        y = haloR * Math.sin(phi) * Math.sin(theta);
+        z = haloR * Math.cos(phi);
+        vx = 0; vy = 0; vz = 0;
+        mass = isBigBody
+          ? BIG_BODY_MASS_MIN + Math.pow(Math.random(), 0.4) * (BIG_BODY_MASS_MAX - BIG_BODY_MASS_MIN)
+          : MEDIUM_BODY_MASS_MIN + Math.pow(Math.random(), 0.7) * (MEDIUM_BODY_MASS_MAX - MEDIUM_BODY_MASS_MIN);
+      } else {
+        // Standard massive body placement for non-spiral presets
+        const bodyIndex = isBigBody ? i - 1 : i - BIG_BODY_COUNT;
+        const bodyCount = isBigBody ? Math.max(1, BIG_BODY_COUNT - 1) : MEDIUM_BODY_COUNT;
+        const bodyProgress = bodyCount > 1 ? bodyIndex / (bodyCount - 1) : 0.5;
+        const radiusMin = isBigBody ? BIG_BODY_RADIUS_MIN : MEDIUM_BODY_RADIUS_MIN;
+        const radiusMax = isBigBody ? BIG_BODY_RADIUS_MAX : MEDIUM_BODY_RADIUS_MAX;
+        const radiusJitter = isBigBody ? 0.05 : 0.1;
+        const radius = radiusMin + (radiusMax - radiusMin) * bodyProgress + (Math.random() - 0.5) * radiusJitter;
+        const heightScale = isBigBody ? BIG_BODY_HEIGHT : MEDIUM_BODY_HEIGHT;
+        const heightOffset = (Math.random() - 0.5) * heightScale;
+        const angleOffset = isBigBody ? Math.PI * 0.18 : Math.PI / Math.max(3, MEDIUM_BODY_COUNT);
+        const angle = (bodyIndex / Math.max(1, bodyCount)) * Math.PI * 2 + angleOffset;
+        x = orbitalTangent[0]*Math.cos(angle)*radius + orbitalBitangent[0]*Math.sin(angle)*radius + orbitalNormal[0]*heightOffset;
+        y = orbitalTangent[1]*Math.cos(angle)*radius + orbitalBitangent[1]*Math.sin(angle)*radius + orbitalNormal[1]*heightOffset;
+        z = orbitalTangent[2]*Math.cos(angle)*radius + orbitalBitangent[2]*Math.sin(angle)*radius + orbitalNormal[2]*heightOffset;
+        const swirl = isBigBody ? BIG_BODY_SWIRL : MEDIUM_BODY_SWIRL;
+        const speed = swirl / Math.sqrt(radius + 0.05);
+        vx = (-Math.sin(angle)*orbitalTangent[0] + Math.cos(angle)*orbitalBitangent[0])*speed;
+        vy = (-Math.sin(angle)*orbitalTangent[1] + Math.cos(angle)*orbitalBitangent[1])*speed;
+        vz = (-Math.sin(angle)*orbitalTangent[2] + Math.cos(angle)*orbitalBitangent[2])*speed;
+        mass = isBigBody
+          ? BIG_BODY_MASS_MIN + Math.pow(Math.random(), 0.4) * (BIG_BODY_MASS_MAX - BIG_BODY_MASS_MIN)
+          : MEDIUM_BODY_MASS_MIN + Math.pow(Math.random(), 0.7) * (MEDIUM_BODY_MASS_MAX - MEDIUM_BODY_MASS_MIN);
+      }
     } else if (dist === 'spiral') {
       // Spiral galaxy with visible arms seeded as density waves.
       // Arm particles get epicyclic velocity perturbations that keep them oscillating
