@@ -77,8 +77,8 @@ const PRESETS: Record<SimMode, Record<string, Record<string, number | string>>> 
   },
   physics: {
     'Default':    { ...DEFAULTS.physics },
-    'Spiral Galaxy': { count: 100000, G: 0.8, softening: 1.8, damping: 1.0, coreOrbit: 0.1, distribution: 'spiral',
-                    interactionStrength: 1.0, tidalStrength: 0.015, diskVertDamp: 4.0, diskRadDamp: 0.3, diskTangGain: 0.4, diskTangSpeed: 0.5, diskVertSpring: 1.5, diskAlignGain: 0.15 },
+    'Spiral Galaxy': { count: 100000, G: 0.6, softening: 2.0, damping: 1.0, coreOrbit: 0.0, distribution: 'spiral',
+                    interactionStrength: 1.0, tidalStrength: 0.012, diskVertDamp: 4.0, diskRadDamp: 0.0, diskTangGain: 0.0, diskTangSpeed: 0.5, diskVertSpring: 1.5, diskAlignGain: 0.0 },
     'Cosmic Web':  { count: 80000, G: 0.8, softening: 2.0, damping: 1.0, coreOrbit: 0.0, distribution: 'web',
                     interactionStrength: 1.0, tidalStrength: 0.025, diskVertDamp: 0.0, diskRadDamp: 0.0, diskTangGain: 0.0, diskTangSpeed: 0.5, diskVertSpring: 0.0, diskAlignGain: 0.0 },
     'Star Cluster': { count: 60000, G: 0.3, softening: 1.2, damping: 1.0, coreOrbit: 0.15, distribution: 'cluster',
@@ -1269,11 +1269,9 @@ function createPhysicsSimulation() {
   const MEDIUM_BODY_RADIUS_MAX = 4.0;
   const BIG_BODY_HEIGHT = 0.12;
   const MEDIUM_BODY_HEIGHT = 0.2;
-  // Match massive body speeds to diskTangSpeed so init is in equilibrium with disk recovery target.
-  // Init speed is deliberately below the disk recovery target — the tangential nudge boosts particles
-  // up to equilibrium over the first few seconds. Starting below prevents escape from the inner region
-  // where enclosed mass is small and circular velocity is low.
-  const initTangSpeed = (state.physics.diskTangSpeed ?? 0.6) * 0.3;
+  // Init speed matches diskTangSpeed — the disk recovery tangential nudge targets this speed,
+  // so seeding at the same value means the system starts in equilibrium.
+  const initTangSpeed = state.physics.diskTangSpeed ?? 0.6;
   const BIG_BODY_SWIRL = initTangSpeed;
   const MEDIUM_BODY_SWIRL = initTangSpeed;
 
@@ -1294,11 +1292,10 @@ function createPhysicsSimulation() {
       mass = CORE_BODY_MASS;
     } else if (isBigBody || isMediumBody) {
       if (dist === 'spiral') {
-        // Dark matter halo: invisible massive particles in a spherical NFW-like profile.
-        // They create the gravitational well that visible tracers orbit in.
+        // Dark matter halo: invisible massive particles in a wide isothermal-like profile.
+        // Spread across the full disk extent so the rotation curve is flat (constant circular velocity).
         // Stationary (v=0) so the potential is smooth and stable.
-        const u = Math.random();
-        const haloR = 0.3 * Math.pow(u, 0.33) / Math.pow(1 - u * 0.95 + 0.01, 0.5);
+        const haloR = Math.sqrt(Math.random()) * 5.0;
         const theta = Math.random() * Math.PI * 2;
         const phi = Math.acos(2 * Math.random() - 1);
         x = haloR * Math.sin(phi) * Math.cos(theta);
