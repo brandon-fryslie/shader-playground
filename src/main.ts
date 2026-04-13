@@ -36,7 +36,7 @@ const DEFAULTS: ModeParamsMap = {
     maxSpeed: 2.0, maxForce: 0.05, visualRange: 100
   },
   physics: {
-    count: 10000, G: 0.4, softening: 1.5, damping: 1.0, coreOrbit: 0.28, distribution: 'disk',
+    count: 80000, G: 0.4, softening: 1.5, damping: 1.0, coreOrbit: 0.28, distribution: 'disk',
     interactionStrength: 1.0, tidalStrength: 0.008,
     diskVertDamp: 3.0, diskRadDamp: 0.8, diskTangGain: 0.8, diskTangSpeed: 1.5,
     diskVertSpring: 1.5, diskAlignGain: 0.4,
@@ -77,16 +77,18 @@ const PRESETS: Record<SimMode, Record<string, Record<string, number | string>>> 
   },
   physics: {
     'Default':    { ...DEFAULTS.physics },
-    'Galaxy':     { count: 3000, G: 0.35, softening: 1.5, damping: 1.0, coreOrbit: 0.32, distribution: 'disk',
-                    interactionStrength: 1.0, tidalStrength: 0.006, diskVertDamp: 3.0, diskRadDamp: 0.8, diskTangGain: 0.8, diskTangSpeed: 1.5, diskVertSpring: 1.5, diskAlignGain: 0.4 },
-    'Spiral':     { count: 5000, G: 0.4, softening: 1.5, damping: 1.0, coreOrbit: 0.2, distribution: 'disk',
-                    interactionStrength: 1.0, tidalStrength: 0.012, diskVertDamp: 3.5, diskRadDamp: 0.6, diskTangGain: 1.0, diskTangSpeed: 1.8, diskVertSpring: 1.2, diskAlignGain: 0.3 },
-    'Filaments':  { count: 3000, G: 0.3, softening: 2.5, damping: 1.0, coreOrbit: 0.1, distribution: 'shell',
-                    interactionStrength: 1.0, tidalStrength: 0.015, diskVertDamp: 0.1, diskRadDamp: 0.05, diskTangGain: 0.0, diskTangSpeed: 0.5, diskVertSpring: 0.0, diskAlignGain: 0.0 },
-    'Collapse':   { count: 2000, G: 3.0, softening: 0.5, damping: 0.998, coreOrbit: 0.14, distribution: 'shell',
-                    interactionStrength: 1.0, tidalStrength: 0.002, diskVertDamp: 0.1, diskRadDamp: 0.05, diskTangGain: 0.0, diskTangSpeed: 0.5, diskVertSpring: 0.0, diskAlignGain: 0.0 },
-    'Gentle':     { count: 1000, G: 0.15, softening: 2.0, damping: 1.0, coreOrbit: 0.2, distribution: 'random',
-                    interactionStrength: 1.0, tidalStrength: 0.003, diskVertDamp: 1.5, diskRadDamp: 0.4, diskTangGain: 0.5, diskTangSpeed: 1.0, diskVertSpring: 0.8, diskAlignGain: 0.2 },
+    'Spiral Galaxy': { count: 100000, G: 0.5, softening: 1.8, damping: 1.0, coreOrbit: 0.3, distribution: 'spiral',
+                    interactionStrength: 1.0, tidalStrength: 0.02, diskVertDamp: 5.0, diskRadDamp: 0.6, diskTangGain: 1.2, diskTangSpeed: 2.0, diskVertSpring: 2.0, diskAlignGain: 0.5 },
+    'Cosmic Web':  { count: 80000, G: 0.8, softening: 2.0, damping: 1.0, coreOrbit: 0.0, distribution: 'web',
+                    interactionStrength: 1.0, tidalStrength: 0.025, diskVertDamp: 0.0, diskRadDamp: 0.0, diskTangGain: 0.0, diskTangSpeed: 0.5, diskVertSpring: 0.0, diskAlignGain: 0.0 },
+    'Star Cluster': { count: 60000, G: 0.3, softening: 1.2, damping: 1.0, coreOrbit: 0.15, distribution: 'cluster',
+                    interactionStrength: 1.0, tidalStrength: 0.001, diskVertDamp: 0.0, diskRadDamp: 0.0, diskTangGain: 0.0, diskTangSpeed: 0.5, diskVertSpring: 0.0, diskAlignGain: 0.0 },
+    'Maelstrom':  { count: 120000, G: 0.25, softening: 2.5, damping: 1.0, coreOrbit: 0.4, distribution: 'maelstrom',
+                    interactionStrength: 1.5, tidalStrength: 0.005, diskVertDamp: 7.0, diskRadDamp: 1.5, diskTangGain: 2.0, diskTangSpeed: 3.5, diskVertSpring: 3.0, diskAlignGain: 0.8 },
+    'Dust Cloud': { count: 150000, G: 0.08, softening: 3.5, damping: 1.0, coreOrbit: 0.0, distribution: 'dust',
+                    interactionStrength: 0.5, tidalStrength: 0.003, diskVertDamp: 0.0, diskRadDamp: 0.0, diskTangGain: 0.0, diskTangSpeed: 0.5, diskVertSpring: 0.0, diskAlignGain: 0.0 },
+    'Binary':     { count: 80000, G: 0.6, softening: 1.0, damping: 1.0, coreOrbit: 0.2, distribution: 'binary',
+                    interactionStrength: 1.0, tidalStrength: 0.04, diskVertDamp: 2.0, diskRadDamp: 0.3, diskTangGain: 0.5, diskTangSpeed: 1.2, diskVertSpring: 0.8, diskAlignGain: 0.15 },
   },
   physics_classic: {
     'Default':  { ...DEFAULTS.physics_classic },
@@ -1261,10 +1263,6 @@ function createPhysicsSimulation() {
   const BIG_BODY_MASS_MAX = 3.0;
   const MEDIUM_BODY_MASS_MIN = 0.5;
   const MEDIUM_BODY_MASS_MAX = 1.5;
-  // Tracer subpopulations (fractions of non-massive particles)
-  const RETROGRADE_FRAC = 0.03;   // orbit backwards
-  const ECCENTRIC_FRAC = 0.04;    // plunging elliptical orbits
-  const HALO_FRAC = 0.05;         // high-inclination, above/below disk
   const BIG_BODY_RADIUS_MIN = 0.4;
   const BIG_BODY_RADIUS_MAX = 2.0;
   const MEDIUM_BODY_RADIUS_MIN = 1.5;
@@ -1329,99 +1327,227 @@ function createPhysicsSimulation() {
       mass = isBigBody
         ? BIG_BODY_MASS_MIN + Math.pow(Math.random(), 0.4) * (BIG_BODY_MASS_MAX - BIG_BODY_MASS_MIN)
         : MEDIUM_BODY_MASS_MIN + Math.pow(Math.random(), 0.7) * (MEDIUM_BODY_MASS_MAX - MEDIUM_BODY_MASS_MIN);
-    } else if (dist === 'disk') {
-      const angle = Math.random() * Math.PI * 2;
-      const r = Math.sqrt(Math.random()) * 4.5;
-      // Continuous mass distribution for tracers: most are dust, some have noticeable mass.
-      // Power-law gives mostly small values with occasional heavier particles.
-      mass = Math.pow(Math.random(), 3.0) * 0.8;
+    } else if (dist === 'spiral') {
+      // Picture-perfect logarithmic spiral galaxy seeded in equilibrium.
+      // Particles are distributed along 2 trailing spiral arms with Gaussian spread,
+      // plus a smooth exponential-disk background and a spherical halo.
+      // Velocities match the disk recovery target exactly: diskTangSpeed / sqrt(r + 0.1).
+      const NUM_ARMS = 2;
+      const ARM_WIND = 0.45;       // radians of wind per unit radius (tighter = more wound)
+      const ARM_WIDTH = 0.35;      // Gaussian σ of arm spread in angle (radians)
+      const ARM_FRAC = 0.65;       // fraction of particles in arms vs inter-arm
+      const HALO_FRAC_S = 0.06;    // spherical halo fraction
+      const DISK_RADIUS = 4.5;
+      const tangSpeed = state.physics.diskTangSpeed ?? 2.0;
 
-      // Determine subpopulation via index fraction within tracers
-      const tracerIndex = i - MASSIVE_BODY_COUNT;
-      const tracerCount = count - MASSIVE_BODY_COUNT;
-      const tracerFrac = tracerIndex / tracerCount;
+      const tracerFrac = (i - MASSIVE_BODY_COUNT) / Math.max(1, count - MASSIVE_BODY_COUNT);
 
-      if (tracerFrac < RETROGRADE_FRAC) {
-        // Retrograde: orbit backwards in the disk plane
-        const heightOffset = (Math.random() - 0.5) * DISK_THICKNESS * 0.5;
-        x = orbitalTangent[0] * Math.cos(angle) * r + orbitalBitangent[0] * Math.sin(angle) * r + orbitalNormal[0] * heightOffset;
-        y = orbitalTangent[1] * Math.cos(angle) * r + orbitalBitangent[1] * Math.sin(angle) * r + orbitalNormal[1] * heightOffset;
-        z = orbitalTangent[2] * Math.cos(angle) * r + orbitalBitangent[2] * Math.sin(angle) * r + orbitalNormal[2] * heightOffset;
-        const speed = 0.6 / Math.sqrt(r + 0.15);
-        // Flip the tangential direction for retrograde orbit
-        vx = (Math.sin(angle) * orbitalTangent[0] - Math.cos(angle) * orbitalBitangent[0]) * speed;
-        vy = (Math.sin(angle) * orbitalTangent[1] - Math.cos(angle) * orbitalBitangent[1]) * speed;
-        vz = (Math.sin(angle) * orbitalTangent[2] - Math.cos(angle) * orbitalBitangent[2]) * speed;
-        mass = 0.1 + Math.random() * 0.3; // slightly heavier so they're visible
-      } else if (tracerFrac < RETROGRADE_FRAC + ECCENTRIC_FRAC) {
-        // Eccentric: plunging elliptical orbits with radial velocity
-        const heightOffset = (Math.random() - 0.5) * DISK_THICKNESS * 0.3;
-        x = orbitalTangent[0] * Math.cos(angle) * r + orbitalBitangent[0] * Math.sin(angle) * r + orbitalNormal[0] * heightOffset;
-        y = orbitalTangent[1] * Math.cos(angle) * r + orbitalBitangent[1] * Math.sin(angle) * r + orbitalNormal[1] * heightOffset;
-        z = orbitalTangent[2] * Math.cos(angle) * r + orbitalBitangent[2] * Math.sin(angle) * r + orbitalNormal[2] * heightOffset;
-        // Mix of tangential and radial velocity creates an elliptical orbit
-        const tangSpeed = 0.5 / Math.sqrt(r + 0.15);
-        const radSpeed = (Math.random() * 0.4 + 0.2) * (Math.random() < 0.5 ? 1 : -1);
-        const radDir = normalize3([x, y, z]);
-        vx = (-Math.sin(angle) * orbitalTangent[0] + Math.cos(angle) * orbitalBitangent[0]) * tangSpeed + radDir[0] * radSpeed;
-        vy = (-Math.sin(angle) * orbitalTangent[1] + Math.cos(angle) * orbitalBitangent[1]) * tangSpeed + radDir[1] * radSpeed;
-        vz = (-Math.sin(angle) * orbitalTangent[2] + Math.cos(angle) * orbitalBitangent[2]) * tangSpeed + radDir[2] * radSpeed;
-        mass = 0.05 + Math.random() * 0.2;
-      } else if (tracerFrac < RETROGRADE_FRAC + ECCENTRIC_FRAC + HALO_FRAC) {
-        // Halo: spherical distribution above/below the disk, high inclination
+      if (tracerFrac < HALO_FRAC_S) {
+        // Spherical halo — diffuse cloud around the disk
         const theta = Math.random() * Math.PI * 2;
         const phi = Math.acos(2 * Math.random() - 1);
-        const haloR = 0.5 + Math.sqrt(Math.random()) * 3.5;
-        x = haloR * Math.sin(phi) * Math.cos(theta);
-        y = haloR * Math.sin(phi) * Math.sin(theta);
-        z = haloR * Math.cos(phi);
-        // Slow random velocity — loosely bound halo orbit
-        const haloSpeed = 0.15 + Math.random() * 0.15;
-        const radial = normalize3([x, y, z]);
-        const tangent = normalize3(cross3(radial, [0.3 + Math.random() * 0.2, 1.0, -0.2]));
-        vx = tangent[0] * haloSpeed;
-        vy = tangent[1] * haloSpeed;
-        vz = tangent[2] * haloSpeed;
-        mass = 0.02 + Math.random() * 0.1; // faint halo particles
+        const hr = 0.3 + Math.pow(Math.random(), 0.5) * 4.0;
+        x = hr*Math.sin(phi)*Math.cos(theta); y = hr*Math.sin(phi)*Math.sin(theta); z = hr*Math.cos(phi);
+        const hs = 0.12 + Math.random() * 0.1;
+        const rd = normalize3([x,y,z]); const tg = normalize3(cross3(rd, [0.3,1,-0.2]));
+        vx = tg[0]*hs; vy = tg[1]*hs; vz = tg[2]*hs;
+        mass = 0.01 + Math.random() * 0.05;
       } else {
-        // Standard disk tracer
-        const heightOffset = (Math.random() - 0.5) * DISK_THICKNESS * (0.35 + r * 0.4);
-        x = orbitalTangent[0] * Math.cos(angle) * r + orbitalBitangent[0] * Math.sin(angle) * r + orbitalNormal[0] * heightOffset;
-        y = orbitalTangent[1] * Math.cos(angle) * r + orbitalBitangent[1] * Math.sin(angle) * r + orbitalNormal[1] * heightOffset;
-        z = orbitalTangent[2] * Math.cos(angle) * r + orbitalBitangent[2] * Math.sin(angle) * r + orbitalNormal[2] * heightOffset;
-        const speed = 0.8 / Math.sqrt(r + 0.15);
-        const ov = [
-          (-Math.sin(angle) * orbitalTangent[0] + Math.cos(angle) * orbitalBitangent[0]) * speed,
-          (-Math.sin(angle) * orbitalTangent[1] + Math.cos(angle) * orbitalBitangent[1]) * speed,
-          (-Math.sin(angle) * orbitalTangent[2] + Math.cos(angle) * orbitalBitangent[2]) * speed,
-        ];
-        const drift = heightOffset * VERTICAL_DRIFT;
-        vx = ov[0] + orbitalNormal[0] * drift;
-        vy = ov[1] + orbitalNormal[1] * drift;
-        vz = ov[2] + orbitalNormal[2] * drift;
+        // Exponential disk radius: denser toward center
+        const r = -1.5 * Math.log(1 - Math.random() * 0.95);  // exponential profile, capped
+        const clampR = Math.min(r, DISK_RADIUS);
+
+        // Determine base angle — spiral arm or inter-arm
+        let angle: number;
+        const inArm = Math.random() < ARM_FRAC;
+        if (inArm) {
+          // Pick an arm, then place along the logarithmic spiral: θ = ARM_WIND * r + armOffset
+          const armIdx = Math.floor(Math.random() * NUM_ARMS);
+          const armOffset = (armIdx / NUM_ARMS) * Math.PI * 2;
+          const spiralAngle = armOffset + ARM_WIND * clampR;
+          // Gaussian spread perpendicular to the arm
+          const spread = ARM_WIDTH * (0.3 + clampR / DISK_RADIUS); // wider arms at outer radius
+          const u1 = Math.random(), u2 = Math.random();
+          const gauss = Math.sqrt(-2 * Math.log(u1 + 0.0001)) * Math.cos(2 * Math.PI * u2);
+          angle = spiralAngle + gauss * spread;
+          mass = Math.pow(Math.random(), 2.0) * 0.9; // arm particles slightly brighter
+        } else {
+          // Inter-arm: uniform angle, fainter
+          angle = Math.random() * Math.PI * 2;
+          mass = Math.pow(Math.random(), 4.0) * 0.4;
+        }
+
+        // Very thin disk — height decreases toward center (like a real galaxy)
+        const h = (Math.random() - 0.5) * DISK_THICKNESS * (0.2 + clampR * 0.08);
+        x = orbitalTangent[0]*Math.cos(angle)*clampR + orbitalBitangent[0]*Math.sin(angle)*clampR + orbitalNormal[0]*h;
+        y = orbitalTangent[1]*Math.cos(angle)*clampR + orbitalBitangent[1]*Math.sin(angle)*clampR + orbitalNormal[1]*h;
+        z = orbitalTangent[2]*Math.cos(angle)*clampR + orbitalBitangent[2]*Math.sin(angle)*clampR + orbitalNormal[2]*h;
+
+        // Exact equilibrium velocity — matches the disk recovery target so structure persists.
+        const s = tangSpeed / Math.sqrt(clampR + 0.1);
+        vx = (-Math.sin(angle)*orbitalTangent[0] + Math.cos(angle)*orbitalBitangent[0])*s;
+        vy = (-Math.sin(angle)*orbitalTangent[1] + Math.cos(angle)*orbitalBitangent[1])*s;
+        vz = (-Math.sin(angle)*orbitalTangent[2] + Math.cos(angle)*orbitalBitangent[2])*s;
       }
+    } else if (dist === 'disk') {
+      // Generic disk with subpopulations (default distribution)
+      const angle = Math.random() * Math.PI * 2;
+      const r = Math.sqrt(Math.random()) * 4.5;
+      mass = Math.pow(Math.random(), 3.0) * 0.8;
+      const tracerFrac = (i - MASSIVE_BODY_COUNT) / Math.max(1, count - MASSIVE_BODY_COUNT);
+      if (tracerFrac < 0.03) {
+        const h = (Math.random() - 0.5) * DISK_THICKNESS * 0.5;
+        x = orbitalTangent[0]*Math.cos(angle)*r + orbitalBitangent[0]*Math.sin(angle)*r + orbitalNormal[0]*h;
+        y = orbitalTangent[1]*Math.cos(angle)*r + orbitalBitangent[1]*Math.sin(angle)*r + orbitalNormal[1]*h;
+        z = orbitalTangent[2]*Math.cos(angle)*r + orbitalBitangent[2]*Math.sin(angle)*r + orbitalNormal[2]*h;
+        const s = 0.6 / Math.sqrt(r + 0.15);
+        vx = (Math.sin(angle)*orbitalTangent[0] - Math.cos(angle)*orbitalBitangent[0])*s;
+        vy = (Math.sin(angle)*orbitalTangent[1] - Math.cos(angle)*orbitalBitangent[1])*s;
+        vz = (Math.sin(angle)*orbitalTangent[2] - Math.cos(angle)*orbitalBitangent[2])*s;
+        mass = 0.1 + Math.random() * 0.3;
+      } else if (tracerFrac < 0.12) {
+        const theta = Math.random() * Math.PI * 2;
+        const phi = Math.acos(2 * Math.random() - 1);
+        const hr = 0.5 + Math.sqrt(Math.random()) * 3.5;
+        x = hr*Math.sin(phi)*Math.cos(theta); y = hr*Math.sin(phi)*Math.sin(theta); z = hr*Math.cos(phi);
+        const hs = 0.15 + Math.random() * 0.15;
+        const rd = normalize3([x,y,z]); const tg = normalize3(cross3(rd, [0.3,1,-0.2]));
+        vx = tg[0]*hs; vy = tg[1]*hs; vz = tg[2]*hs;
+        mass = 0.02 + Math.random() * 0.1;
+      } else {
+        const h = (Math.random() - 0.5) * DISK_THICKNESS * (0.35 + r * 0.4);
+        x = orbitalTangent[0]*Math.cos(angle)*r + orbitalBitangent[0]*Math.sin(angle)*r + orbitalNormal[0]*h;
+        y = orbitalTangent[1]*Math.cos(angle)*r + orbitalBitangent[1]*Math.sin(angle)*r + orbitalNormal[1]*h;
+        z = orbitalTangent[2]*Math.cos(angle)*r + orbitalBitangent[2]*Math.sin(angle)*r + orbitalNormal[2]*h;
+        const s = 0.8 / Math.sqrt(r + 0.15);
+        vx = (-Math.sin(angle)*orbitalTangent[0] + Math.cos(angle)*orbitalBitangent[0])*s + orbitalNormal[0]*h*VERTICAL_DRIFT;
+        vy = (-Math.sin(angle)*orbitalTangent[1] + Math.cos(angle)*orbitalBitangent[1])*s + orbitalNormal[1]*h*VERTICAL_DRIFT;
+        vz = (-Math.sin(angle)*orbitalTangent[2] + Math.cos(angle)*orbitalBitangent[2])*s + orbitalNormal[2]*h*VERTICAL_DRIFT;
+      }
+    } else if (dist === 'web') {
+      // Cosmic web: particles on a large thin shell with density perturbations seeded by
+      // a 3D grid of attractors. Creates filaments at intersections and voids between them.
+      const theta = Math.random() * Math.PI * 2;
+      const phi = Math.acos(2 * Math.random() - 1);
+      const shellR = 3.0 + (Math.random() - 0.5) * 1.5;
+      x = shellR * Math.sin(phi) * Math.cos(theta);
+      y = shellR * Math.sin(phi) * Math.sin(theta);
+      z = shellR * Math.cos(phi);
+      // Perturb toward nearest grid node to seed filamentary structure
+      const gridSpacing = 2.5;
+      const nx = Math.round(x / gridSpacing) * gridSpacing;
+      const ny = Math.round(y / gridSpacing) * gridSpacing;
+      const nz = Math.round(z / gridSpacing) * gridSpacing;
+      const pull = 0.15 + Math.random() * 0.1;
+      x += (nx - x) * pull; y += (ny - y) * pull; z += (nz - z) * pull;
+      // Very slow inward drift
+      const radial = normalize3([x, y, z]);
+      const infall = 0.02 + Math.random() * 0.03;
+      vx = -radial[0] * infall; vy = -radial[1] * infall; vz = -radial[2] * infall;
+      mass = Math.pow(Math.random(), 2.0) * 0.6;
+    } else if (dist === 'cluster') {
+      // Star cluster: dense Plummer-sphere-like profile — concentrated core, power-law halo.
+      // Multiple sub-clumps offset from center to create a merging cluster scenario.
+      const clumpCount = 5;
+      const clumpIdx = i % clumpCount;
+      // Each clump has a unique center offset
+      const clumpAngle = (clumpIdx / clumpCount) * Math.PI * 2 + 0.7;
+      const clumpR = 1.2 + clumpIdx * 0.3;
+      const cx = Math.cos(clumpAngle) * clumpR;
+      const cy = (clumpIdx - 2) * 0.4;
+      const cz = Math.sin(clumpAngle) * clumpR;
+      // Plummer profile: r = a / sqrt(u^(-2/3) - 1) approximated with power-law
+      const u = Math.random();
+      const pr = 0.6 * Math.pow(u, 0.33) / Math.pow(1 - u * u + 0.01, 0.25);
+      const pTheta = Math.random() * Math.PI * 2;
+      const pPhi = Math.acos(2 * Math.random() - 1);
+      x = cx + pr * Math.sin(pPhi) * Math.cos(pTheta);
+      y = cy + pr * Math.sin(pPhi) * Math.sin(pTheta);
+      z = cz + pr * Math.cos(pPhi);
+      // Slow random orbits within each clump + drift toward center
+      const orbSpeed = 0.1 + Math.random() * 0.12;
+      const rd = normalize3([x - cx, y - cy, z - cz]);
+      const tg = normalize3(cross3(rd, [0.2, 1.0, -0.3]));
+      vx = tg[0] * orbSpeed; vy = tg[1] * orbSpeed; vz = tg[2] * orbSpeed;
+      mass = Math.pow(Math.random(), 2.5) * 1.0;
+    } else if (dist === 'maelstrom') {
+      // Maelstrom: multiple concentric rings at different inclinations, all spinning fast.
+      // Creates a turbulent whirlpool as rings interact and merge into a disk.
+      const ringCount = 4;
+      const ringIdx = i % ringCount;
+      const ringR = 1.0 + ringIdx * 1.2 + (Math.random() - 0.5) * 0.4;
+      const ringTilt = (ringIdx - 1.5) * 0.35;
+      const rn = normalize3([Math.sin(ringTilt * 1.3), Math.cos(ringTilt), Math.sin(ringTilt * 0.7)]);
+      const rt = normalize3(cross3([0, 1, 0], rn));
+      const rb = cross3(rn, rt);
+      const angle = Math.random() * Math.PI * 2;
+      const h = (Math.random() - 0.5) * 0.15;
+      x = rt[0]*Math.cos(angle)*ringR + rb[0]*Math.sin(angle)*ringR + rn[0]*h;
+      y = rt[1]*Math.cos(angle)*ringR + rb[1]*Math.sin(angle)*ringR + rn[1]*h;
+      z = rt[2]*Math.cos(angle)*ringR + rb[2]*Math.sin(angle)*ringR + rn[2]*h;
+      // Fast co-rotating velocity — alternating ring directions for turbulence
+      const spinDir = (ringIdx % 2 === 0) ? 1 : -1;
+      const s = spinDir * (1.2 + ringIdx * 0.3) / Math.sqrt(ringR + 0.1);
+      vx = (-Math.sin(angle)*rt[0] + Math.cos(angle)*rb[0])*s;
+      vy = (-Math.sin(angle)*rt[1] + Math.cos(angle)*rb[1])*s;
+      vz = (-Math.sin(angle)*rt[2] + Math.cos(angle)*rb[2])*s;
+      mass = Math.pow(Math.random(), 3.0) * 0.5;
+    } else if (dist === 'dust') {
+      // Dust cloud: vast uniform volume with gentle turbulent velocity field.
+      // Seeded with large-scale coherent flow patterns (curl noise approximation).
+      const span = 6.0;
+      x = (Math.random() - 0.5) * span;
+      y = (Math.random() - 0.5) * span;
+      z = (Math.random() - 0.5) * span;
+      // Approximate large-scale turbulent flow with sinusoidal curl
+      const freq = 0.8;
+      const amp = 0.08;
+      vx = Math.sin(y * freq + 1.3) * Math.cos(z * freq + 0.7) * amp;
+      vy = Math.sin(z * freq + 2.1) * Math.cos(x * freq + 1.1) * amp;
+      vz = Math.sin(x * freq + 0.5) * Math.cos(y * freq + 2.5) * amp;
+      mass = Math.pow(Math.random(), 4.0) * 0.4;
+    } else if (dist === 'binary') {
+      // Binary: two offset disks orbiting each other with a bridge of particles between them.
+      const isSecond = Math.random() < 0.45;
+      const diskR = Math.sqrt(Math.random()) * 2.2;
+      const angle = Math.random() * Math.PI * 2;
+      // Each sub-disk has its own slightly tilted plane
+      const tilt = isSecond ? 0.25 : -0.15;
+      const dn = normalize3([tilt, 1.0, tilt * 0.5]);
+      const dt = normalize3(cross3([0, 1, 0], dn));
+      const db = cross3(dn, dt);
+      const h = (Math.random() - 0.5) * 0.15;
+      x = dt[0]*Math.cos(angle)*diskR + db[0]*Math.sin(angle)*diskR + dn[0]*h + (isSecond ? 1.8 : -1.8);
+      y = dt[1]*Math.cos(angle)*diskR + db[1]*Math.sin(angle)*diskR + dn[1]*h + (isSecond ? 0.3 : -0.3);
+      z = dt[2]*Math.cos(angle)*diskR + db[2]*Math.sin(angle)*diskR + dn[2]*h;
+      // Orbital velocity within each sub-disk + orbital velocity of the pair
+      const diskSpeed = 0.7 / Math.sqrt(diskR + 0.15);
+      const pairSpeed = isSecond ? 0.12 : -0.12;
+      vx = (-Math.sin(angle)*dt[0] + Math.cos(angle)*db[0])*diskSpeed + pairSpeed * 0.3;
+      vy = (-Math.sin(angle)*dt[1] + Math.cos(angle)*db[1])*diskSpeed;
+      vz = (-Math.sin(angle)*dt[2] + Math.cos(angle)*db[2])*diskSpeed + pairSpeed;
+      // 10% bridge particles connecting the two
+      if (Math.random() < 0.1) {
+        const t = Math.random();
+        x = -1.8 + t * 3.6 + (Math.random() - 0.5) * 0.8;
+        y = -0.3 + t * 0.6 + (Math.random() - 0.5) * 0.5;
+        z = (Math.random() - 0.5) * 0.6;
+        vx = (Math.random() - 0.5) * 0.1; vy = (Math.random() - 0.5) * 0.05; vz = (Math.random() - 0.5) * 0.1;
+      }
+      mass = Math.pow(Math.random(), 2.5) * 0.7;
     } else if (dist === 'shell') {
       const theta = Math.random() * Math.PI * 2;
       const phi = Math.acos(2 * Math.random() - 1);
       const r = 1.5 + Math.random() * 0.1;
-      x = r * Math.sin(phi) * Math.cos(theta);
-      y = r * Math.sin(phi) * Math.sin(theta);
-      z = r * Math.cos(phi);
-      const radial = normalize3([x, y, z]);
-      const tangent = normalize3(cross3(radial, [0.3, 1.0, -0.2]));
+      x = r*Math.sin(phi)*Math.cos(theta); y = r*Math.sin(phi)*Math.sin(theta); z = r*Math.cos(phi);
+      const radial = normalize3([x,y,z]); const tangent = normalize3(cross3(radial, [0.3,1,-0.2]));
       const bitangent = cross3(radial, tangent);
       const swirl = 0.18 + Math.random() * 0.08;
-      vx = (tangent[0] + bitangent[0] * 0.35) * swirl;
-      vy = (tangent[1] + bitangent[1] * 0.35) * swirl;
-      vz = (tangent[2] + bitangent[2] * 0.35) * swirl;
+      vx = (tangent[0]+bitangent[0]*0.35)*swirl; vy = (tangent[1]+bitangent[1]*0.35)*swirl; vz = (tangent[2]+bitangent[2]*0.35)*swirl;
       mass = Math.pow(Math.random(), 3.0) * 0.8;
     } else {
-      x = (Math.random() - 0.5) * 4;
-      y = (Math.random() - 0.5) * 4;
-      z = (Math.random() - 0.5) * 4;
-      vx = (Math.random() - 0.5) * 0.12;
-      vy = (Math.random() - 0.5) * 0.12;
-      vz = (Math.random() - 0.5) * 0.12;
+      x = (Math.random()-0.5)*4; y = (Math.random()-0.5)*4; z = (Math.random()-0.5)*4;
+      vx = (Math.random()-0.5)*0.12; vy = (Math.random()-0.5)*0.12; vz = (Math.random()-0.5)*0.12;
       mass = Math.pow(Math.random(), 3.0) * 0.8;
     }
     initData[off] = x; initData[off + 1] = y; initData[off + 2] = z;

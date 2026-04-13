@@ -1,6 +1,6 @@
 export type SimMode = 'boids' | 'physics' | 'physics_classic' | 'fluid' | 'parametric' | 'reaction';
 export type ShapeName = 'torus' | 'klein' | 'mobius' | 'sphere' | 'trefoil';
-export type Distribution = 'random' | 'disk' | 'shell';
+export type Distribution = 'random' | 'disk' | 'shell' | 'spiral' | 'web' | 'cluster' | 'maelstrom' | 'dust' | 'binary';
 export type DyeMode = 'rainbow' | 'single' | 'temperature';
 
 export interface Simulation {

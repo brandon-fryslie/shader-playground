@@ -68,34 +68,29 @@ var<workgroup> tile: array<vec4f, TILE_SIZE>;
 @compute @workgroup_size(TILE_SIZE)
 fn main(@builtin(global_invocation_id) gid: vec3u, @builtin(local_invocation_id) lid: vec3u) {
   let idx = gid.x;
-  if (idx >= params.count) { return; }
+  // [LAW:dataflow-not-control-flow] All threads participate in barriers; the alive flag gates writes only.
+  let alive = idx < params.count;
 
-  let me = bodiesIn[idx];
+  let me = bodiesIn[min(idx, params.count - 1u)];
   var acc = vec3f(0.0);
 
-  // Hoist loop-invariant values.
   let softeningSq = params.softening * params.softening;
   let G = params.G;
   let numTiles = (params.sourceCount + TILE_SIZE - 1u) / TILE_SIZE;
   let myPos = me.pos;
 
   for (var t = 0u; t < numTiles; t++) {
-    // Cooperative tile load: each thread loads one source body into shared memory.
     let loadIdx = t * TILE_SIZE + lid.x;
     tile[lid.x] = select(
       vec4f(0.0),
-      vec4f(bodiesIn[loadIdx].pos, bodiesIn[loadIdx].mass),
+      vec4f(bodiesIn[min(loadIdx, params.sourceCount - 1u)].pos, bodiesIn[min(loadIdx, params.sourceCount - 1u)].mass),
       loadIdx < params.sourceCount
     );
     workgroupBarrier();
 
-    // Accumulate gravity from all bodies in this tile.
-    // [LAW:dataflow-not-control-flow] Tight inner loop: gravity only, no branching besides self-skip.
+    // Tight inner loop: gravity only. Self-interaction produces zero force via softening (no branch needed).
     let tileEnd = min(TILE_SIZE, params.sourceCount - t * TILE_SIZE);
     for (var j = 0u; j < tileEnd; j++) {
-      let globalJ = t * TILE_SIZE + j;
-      if (globalJ == idx) { continue; }
-
       let other = tile[j];
       let diff = other.xyz - myPos;
       let dist2 = dot(diff, diff) + softeningSq;
@@ -185,5 +180,7 @@ fn main(@builtin(global_invocation_id) gid: vec3u, @builtin(local_invocation_id)
   var vel = (me.vel + acc * params.dt) * effectiveDamping;
   let pos = me.pos + vel * params.dt;
 
-  bodiesOut[idx] = Body(pos, me.mass, vel, 0.0, me.home, 0.0);
+  if (alive) {
+    bodiesOut[idx] = Body(pos, me.mass, vel, 0.0, me.home, 0.0);
+  }
 }
