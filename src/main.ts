@@ -1333,22 +1333,23 @@ function createPhysicsSimulation() {
         ? BIG_BODY_MASS_MIN + Math.pow(Math.random(), 0.4) * (BIG_BODY_MASS_MAX - BIG_BODY_MASS_MIN)
         : MEDIUM_BODY_MASS_MIN + Math.pow(Math.random(), 0.7) * (MEDIUM_BODY_MASS_MAX - MEDIUM_BODY_MASS_MIN);
     } else if (dist === 'spiral') {
-      // Picture-perfect logarithmic spiral galaxy seeded in equilibrium.
-      // Particles are distributed along 2 trailing spiral arms with Gaussian spread,
-      // plus a smooth exponential-disk background and a spherical halo.
-      // Velocities match the disk recovery target exactly: diskTangSpeed / sqrt(r + 0.1).
+      // Spiral galaxy with visible arms seeded as density waves.
+      // Arm particles get epicyclic velocity perturbations that keep them oscillating
+      // around the arm centerline — they slow down entering the arm and speed up leaving,
+      // creating the "traffic jam" density wave that maintains visible spiral structure.
       const NUM_ARMS = 2;
-      const ARM_WIND = 0.45;       // radians of wind per unit radius (tighter = more wound)
-      const ARM_WIDTH = 0.35;      // Gaussian σ of arm spread in angle (radians)
-      const ARM_FRAC = 0.65;       // fraction of particles in arms vs inter-arm
-      const HALO_FRAC_S = 0.06;    // spherical halo fraction
+      const ARM_WIND = 1.2;        // tighter winding = more visible spiral turns
+      const ARM_WIDTH = 0.18;      // narrow Gaussian σ for high arm contrast
+      const ARM_FRAC = 0.80;       // 80% in arms for strong visual density contrast
+      const HALO_FRAC_S = 0.04;    // small spherical halo
       const DISK_RADIUS = 4.5;
-      const tangSpeed = state.physics.diskTangSpeed ?? 2.0;
+      const tangSpeed = state.physics.diskTangSpeed ?? 0.6;
+      const EPICYCLIC_AMP = 0.08;  // radial velocity amplitude for arm-following orbits
 
       const tracerFrac = (i - MASSIVE_BODY_COUNT) / Math.max(1, count - MASSIVE_BODY_COUNT);
 
       if (tracerFrac < HALO_FRAC_S) {
-        // Spherical halo — diffuse cloud around the disk
+        // Spherical halo
         const theta = Math.random() * Math.PI * 2;
         const phi = Math.acos(2 * Math.random() - 1);
         const hr = 0.3 + Math.pow(Math.random(), 0.5) * 4.0;
@@ -1358,41 +1359,48 @@ function createPhysicsSimulation() {
         vx = tg[0]*hs; vy = tg[1]*hs; vz = tg[2]*hs;
         mass = 0.01 + Math.random() * 0.05;
       } else {
-        // Exponential disk radius: denser toward center
-        const r = -1.5 * Math.log(1 - Math.random() * 0.95);  // exponential profile, capped
+        // Exponential disk with spiral arm density wave
+        const r = -1.2 * Math.log(Math.max(1e-6, 1 - Math.random() * 0.92));
         const clampR = Math.min(r, DISK_RADIUS);
 
-        // Determine base angle — spiral arm or inter-arm
         let angle: number;
+        let radialKick = 0;
         const inArm = Math.random() < ARM_FRAC;
         if (inArm) {
-          // Pick an arm, then place along the logarithmic spiral: θ = ARM_WIND * r + armOffset
           const armIdx = Math.floor(Math.random() * NUM_ARMS);
           const armOffset = (armIdx / NUM_ARMS) * Math.PI * 2;
           const spiralAngle = armOffset + ARM_WIND * clampR;
-          // Gaussian spread perpendicular to the arm
-          const spread = ARM_WIDTH * (0.3 + clampR / DISK_RADIUS); // wider arms at outer radius
+          // Gaussian spread — narrow for visible arms
+          const spread = ARM_WIDTH * (0.5 + clampR * 0.15);
           const u1 = Math.random(), u2 = Math.random();
           const gauss = Math.sqrt(-2 * Math.log(u1 + 0.0001)) * Math.cos(2 * Math.PI * u2);
-          angle = spiralAngle + gauss * spread;
-          mass = Math.pow(Math.random(), 2.0) * 0.9; // arm particles slightly brighter
+          const angularOffset = gauss * spread;
+          angle = spiralAngle + angularOffset;
+          // Epicyclic kick: particles displaced ahead of the arm get a small inward radial velocity
+          // (slowing down as they enter the arm), particles behind get outward (speeding up as they leave).
+          // This creates the density wave oscillation that maintains the arm.
+          radialKick = -angularOffset * EPICYCLIC_AMP * clampR;
+          mass = Math.pow(Math.random(), 1.5) * 1.0;
         } else {
-          // Inter-arm: uniform angle, fainter
+          // Inter-arm: uniform, very faint
           angle = Math.random() * Math.PI * 2;
-          mass = Math.pow(Math.random(), 4.0) * 0.4;
+          mass = Math.pow(Math.random(), 5.0) * 0.2;
         }
 
-        // Very thin disk — height decreases toward center (like a real galaxy)
-        const h = (Math.random() - 0.5) * DISK_THICKNESS * (0.2 + clampR * 0.08);
+        const h = (Math.random() - 0.5) * DISK_THICKNESS * (0.15 + clampR * 0.06);
         x = orbitalTangent[0]*Math.cos(angle)*clampR + orbitalBitangent[0]*Math.sin(angle)*clampR + orbitalNormal[0]*h;
         y = orbitalTangent[1]*Math.cos(angle)*clampR + orbitalBitangent[1]*Math.sin(angle)*clampR + orbitalNormal[1]*h;
         z = orbitalTangent[2]*Math.cos(angle)*clampR + orbitalBitangent[2]*Math.sin(angle)*clampR + orbitalNormal[2]*h;
 
-        // Exact equilibrium velocity — matches the disk recovery target so structure persists.
+        // Tangential velocity matching disk recovery target
         const s = tangSpeed / Math.sqrt(clampR + 0.1);
-        vx = (-Math.sin(angle)*orbitalTangent[0] + Math.cos(angle)*orbitalBitangent[0])*s;
-        vy = (-Math.sin(angle)*orbitalTangent[1] + Math.cos(angle)*orbitalBitangent[1])*s;
-        vz = (-Math.sin(angle)*orbitalTangent[2] + Math.cos(angle)*orbitalBitangent[2])*s;
+        // Radial direction (outward from center in disk plane)
+        const rDirX = Math.cos(angle)*orbitalTangent[0] + Math.sin(angle)*orbitalBitangent[0];
+        const rDirY = Math.cos(angle)*orbitalTangent[1] + Math.sin(angle)*orbitalBitangent[1];
+        const rDirZ = Math.cos(angle)*orbitalTangent[2] + Math.sin(angle)*orbitalBitangent[2];
+        vx = (-Math.sin(angle)*orbitalTangent[0] + Math.cos(angle)*orbitalBitangent[0])*s + rDirX*radialKick;
+        vy = (-Math.sin(angle)*orbitalTangent[1] + Math.cos(angle)*orbitalBitangent[1])*s + rDirY*radialKick;
+        vz = (-Math.sin(angle)*orbitalTangent[2] + Math.cos(angle)*orbitalBitangent[2])*s + rDirZ*radialKick;
       }
     } else if (dist === 'disk') {
       // Generic disk with subpopulations (default distribution)
