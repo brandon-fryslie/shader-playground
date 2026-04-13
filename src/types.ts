@@ -9,6 +9,7 @@ export interface Simulation {
   render(encoder: GPUCommandEncoder, textureView: GPUTextureView, viewport: number[] | null, viewIndex?: number): void;
   getCount(): string | number;
   destroy(): void;
+  diagnose?(): Promise<Record<string, number | number[]>>;
 }
 
 export interface BoidsParams {

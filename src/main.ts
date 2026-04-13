@@ -1558,10 +1558,10 @@ function createPhysicsSimulation() {
     initData[off + 10] = z;
   }
 
-  const bufferA = device.createBuffer({ size: bodyBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST, mappedAtCreation: true });
+  const bufferA = device.createBuffer({ size: bodyBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC, mappedAtCreation: true });
   new Float32Array(bufferA.getMappedRange()).set(initData);
   bufferA.unmap();
-  const bufferB = device.createBuffer({ size: bodyBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+  const bufferB = device.createBuffer({ size: bodyBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC });
 
   const paramsBuffer = device.createBuffer({ size: 96, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
   const cameraBuffer = device.createBuffer({ size: CAMERA_STRIDE * 2, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
@@ -1659,6 +1659,12 @@ function createPhysicsSimulation() {
       { binding: 1, resource: { buffer: cameraBuffer, offset: vi * CAMERA_STRIDE, size: CAMERA_SIZE } },
     ]}))
   );
+
+  // Diagnostic readback: sample particles from the GPU for analysis.
+  const DIAG_SAMPLE = 2048;
+  const diagSampleBytes = Math.min(count, DIAG_SAMPLE) * 48;
+  const diagStaging = device.createBuffer({ size: diagSampleBytes, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+  let diagPending = false;
 
   let pingPong = 0;
   const depthRef: DepthRef = {};
@@ -1766,10 +1772,109 @@ function createPhysicsSimulation() {
 
     getCount() { return count; },
 
+    async diagnose(): Promise<Record<string, number | number[]>> {
+      if (diagPending) return { error: 1 };
+      diagPending = true;
+      const sampleCount = Math.min(count, DIAG_SAMPLE);
+      const srcBuf = pingPong === 0 ? bufferA : bufferB;
+      const encoder = device.createCommandEncoder();
+      encoder.copyBufferToBuffer(srcBuf, 0, diagStaging, 0, sampleCount * 48);
+      device.queue.submit([encoder.finish()]);
+      await device.queue.onSubmittedWorkDone();
+      await diagStaging.mapAsync(GPUMapMode.READ);
+      const raw = new Float32Array(diagStaging.getMappedRange().slice(0));
+      diagStaging.unmap();
+      diagPending = false;
+
+      // Body layout: pos(3) mass(1) vel(3) pad(1) home(3) pad(1) = 12 floats
+      const n = diskNormal;
+      let comX = 0, comY = 0, comZ = 0;
+      let rmsHeight = 0, rmsRadius = 0, rmsSpeed = 0;
+      let totalMass = 0, maxR = 0;
+      let tangVelSum = 0, tangVelCount = 0;
+      // Radial bins (10 bins from 0 to 5)
+      const radialBins = new Float64Array(10);
+      // Angular bins (12 bins, 30° each) for arm detection
+      const angularBins = new Float64Array(12);
+
+      for (let i = 0; i < sampleCount; i++) {
+        const o = i * 12;
+        const px = raw[o], py = raw[o+1], pz = raw[o+2], m = raw[o+3];
+        const vx = raw[o+4], vy = raw[o+5], vz = raw[o+6];
+        comX += px; comY += py; comZ += pz;
+        totalMass += m;
+
+        const r = Math.sqrt(px*px + py*py + pz*pz);
+        if (r > maxR) maxR = r;
+        rmsRadius += r * r;
+
+        // Height above disk plane
+        const h = px*n[0] + py*n[1] + pz*n[2];
+        rmsHeight += h * h;
+
+        // Speed
+        const spd = Math.sqrt(vx*vx + vy*vy + vz*vz);
+        rmsSpeed += spd * spd;
+
+        // Tangential velocity fraction (how circular are the orbits?)
+        if (r > 0.1) {
+          const rPlaneX = px - h*n[0], rPlaneY = py - h*n[1], rPlaneZ = pz - h*n[2];
+          const rPlane = Math.sqrt(rPlaneX*rPlaneX + rPlaneY*rPlaneY + rPlaneZ*rPlaneZ);
+          if (rPlane > 0.05) {
+            const eRx = rPlaneX/rPlane, eRy = rPlaneY/rPlane, eRz = rPlaneZ/rPlane;
+            const crossX = n[1]*eRz - n[2]*eRy, crossY = n[2]*eRx - n[0]*eRz, crossZ = n[0]*eRy - n[1]*eRx;
+            const crossLen = Math.sqrt(crossX*crossX + crossY*crossY + crossZ*crossZ) || 1;
+            const ePhiX = crossX/crossLen, ePhiY = crossY/crossLen, ePhiZ = crossZ/crossLen;
+            const vPhi = vx*ePhiX + vy*ePhiY + vz*ePhiZ;
+            tangVelSum += Math.abs(vPhi) / (spd + 0.001);
+            tangVelCount++;
+          }
+        }
+
+        // Radial bin
+        const bin = Math.min(9, Math.floor(r * 2));
+        radialBins[bin]++;
+
+        // Angular bin (project onto disk plane, compute angle)
+        const rPlaneX2 = px - h*n[0], rPlaneY2 = py - h*n[1], rPlaneZ2 = pz - h*n[2];
+        const ang = Math.atan2(
+          rPlaneX2 * orbitalBitangent[0] + rPlaneY2 * orbitalBitangent[1] + rPlaneZ2 * orbitalBitangent[2],
+          rPlaneX2 * orbitalTangent[0] + rPlaneY2 * orbitalTangent[1] + rPlaneZ2 * orbitalTangent[2]
+        );
+        const aBin = Math.floor(((ang + Math.PI) / (2 * Math.PI)) * 12) % 12;
+        angularBins[aBin]++;
+      }
+
+      const invN = 1 / sampleCount;
+      const angularArr = Array.from(angularBins);
+      const angMean = angularArr.reduce((a, b) => a + b, 0) / 12;
+      const angVar = angularArr.reduce((a, b) => a + (b - angMean) ** 2, 0) / 12;
+      const armContrast = angMean > 0 ? Math.sqrt(angVar) / angMean : 0;
+
+      return {
+        count,
+        sampleCount,
+        comX: comX * invN,
+        comY: comY * invN,
+        comZ: comZ * invN,
+        rmsHeight: Math.sqrt(rmsHeight * invN),
+        rmsRadius: Math.sqrt(rmsRadius * invN),
+        rmsSpeed: Math.sqrt(rmsSpeed * invN),
+        maxRadius: maxR,
+        totalMass: totalMass * (count / sampleCount),
+        tangentialFraction: tangVelCount > 0 ? tangVelSum / tangVelCount : 0,
+        armContrast,
+        radialProfile: Array.from(radialBins),
+        angularProfile: angularArr,
+        diskNormalX: n[0], diskNormalY: n[1], diskNormalZ: n[2],
+      };
+    },
+
     destroy() {
       bufferA.destroy(); bufferB.destroy();
       paramsBuffer.destroy(); cameraBuffer.destroy();
       reduceParamsBuffer.destroy(); reduceOutBuffer.destroy(); reduceStaging.destroy();
+      diagStaging.destroy();
       destroyDepthRef(depthRef);
     }
   };
@@ -4710,6 +4815,18 @@ async function main() {
   resizeObserver.observe(document.getElementById('canvas-container')!);
 
   requestAnimationFrame(frame);
+
+  // Expose diagnostic tools for external analysis (Chrome DevTools MCP, etc.)
+  (window as any).__simDiagnose = () => {
+    const sim = simulations[state.mode];
+    return sim?.diagnose ? sim.diagnose() : Promise.resolve({ error: 1, msg: 'no diagnose on this sim' });
+  };
+  (window as any).__simPreset = (name: string) => {
+    const buttons = document.querySelectorAll('button');
+    for (const b of buttons) { if (b.textContent?.trim() === name) { (b as HTMLButtonElement).click(); return 'ok'; } }
+    return 'preset not found';
+  };
+  (window as any).__simState = () => ({ mode: state.mode, ...state[state.mode] as any, fps: currentFps });
 }
 
 main();
