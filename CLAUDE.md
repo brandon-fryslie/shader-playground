@@ -58,3 +58,43 @@ Safari visionOS requires: `requiredFeatures: ['webgpu']` (not `'layers'`). Use `
 ### WGSL Shaders
 
 13 shader files in `src/shaders/`, imported as raw strings. The parametric compute shader contains ALL 5 shape equations in one file — shape selection is via a `shapeId` uniform, not pipeline recompilation.
+
+### N-Body Diagnostic System
+
+The N-body simulation exposes GPU readback diagnostics via three global functions, callable from Chrome DevTools MCP (`mcp__electric-cherry__renderer_evaluate`) or the browser console:
+
+**`window.__simDiagnose()`** — Returns a Promise that resolves to a stats object from a 2048-particle GPU buffer sample. Uses a staging buffer with `COPY_SRC` on the particle buffers and async `mapAsync` readback. Stats returned:
+
+| Stat | Type | Meaning |
+|------|------|---------|
+| `rmsRadius` | float | RMS distance from origin — spatial extent. Healthy disk: 1-5 |
+| `rmsHeight` | float | RMS height above disk plane. Flat disk: < 0.01 |
+| `rmsSpeed` | float | RMS velocity magnitude. Stable: < 1.5 |
+| `maxRadius` | float | Farthest particle. Should stay under ~8 (boundary) |
+| `tangentialFraction` | float | How circular the orbits are (1.0 = perfect circles) |
+| `armContrast` | float | Angular density variation — higher = more spiral arm structure |
+| `radialProfile` | float[10] | Particle count in 10 radial bins (0-0.5, 0.5-1.0, ... 4.5-5.0) |
+| `angularProfile` | float[12] | Particle count in 12 angular bins (30° each) |
+| `comX/Y/Z` | float | Center of mass — should stay near origin |
+| `diskNormalX/Y/Z` | float | Current disk plane normal from angular momentum reduction |
+
+**`window.__simPreset(name)`** — Clicks a preset button by name. Returns `'ok'` or `'preset not found'`.
+
+**`window.__simState()`** — Returns current simulation parameters + FPS as a JSON object.
+
+**Typical diagnostic workflow (via Electric Cherry MCP):**
+```js
+// Switch preset and measure at t=1s and t=10s
+window.__simPreset('Spiral Galaxy');
+setTimeout(() => window.__simDiagnose().then(d => { window.__t1 = d; }), 1300);
+setTimeout(() => window.__simDiagnose().then(d => { window.__t10 = d; }), 10300);
+```
+
+**Healthy baseline values (disk presets after 10s):**
+- `rmsRadius`: 3-6 (contained within disk recovery fade zone)
+- `rmsHeight`: < 0.01 (flat)
+- `maxRadius`: < 7 (within boundary at 8.0)
+- `tangentialFraction`: > 0.9 (circular orbits)
+- `rmsSpeed`: 0.3-1.0 (bound orbits, not escaping)
+
+**Implementation:** The `diagnose()` method lives on the physics simulation return object (`createPhysicsSimulation`). It copies the first 2048 bodies (96KB) from the active ping-pong buffer to a pre-allocated staging buffer, waits for GPU completion, then computes stats in JS. The `COPY_SRC` flag is on both particle buffers to support this.
