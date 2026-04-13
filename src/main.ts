@@ -78,7 +78,7 @@ const PRESETS: Record<SimMode, Record<string, Record<string, number | string>>> 
   physics: {
     'Default':    { ...DEFAULTS.physics },
     'Spiral Galaxy': { count: 100000, G: 0.5, softening: 1.8, damping: 1.0, coreOrbit: 0.3, distribution: 'spiral',
-                    interactionStrength: 1.0, tidalStrength: 0.02, diskVertDamp: 5.0, diskRadDamp: 0.6, diskTangGain: 1.2, diskTangSpeed: 2.0, diskVertSpring: 2.0, diskAlignGain: 0.5 },
+                    interactionStrength: 1.0, tidalStrength: 0.035, diskVertDamp: 5.0, diskRadDamp: 0.15, diskTangGain: 0.6, diskTangSpeed: 0.6, diskVertSpring: 2.0, diskAlignGain: 0.1 },
     'Cosmic Web':  { count: 80000, G: 0.8, softening: 2.0, damping: 1.0, coreOrbit: 0.0, distribution: 'web',
                     interactionStrength: 1.0, tidalStrength: 0.025, diskVertDamp: 0.0, diskRadDamp: 0.0, diskTangGain: 0.0, diskTangSpeed: 0.5, diskVertSpring: 0.0, diskAlignGain: 0.0 },
     'Star Cluster': { count: 60000, G: 0.3, softening: 1.2, damping: 1.0, coreOrbit: 0.15, distribution: 'cluster',
@@ -1263,10 +1263,10 @@ function createPhysicsSimulation() {
   const BIG_BODY_MASS_MAX = 3.0;
   const MEDIUM_BODY_MASS_MIN = 0.5;
   const MEDIUM_BODY_MASS_MAX = 1.5;
-  const BIG_BODY_RADIUS_MIN = 0.4;
-  const BIG_BODY_RADIUS_MAX = 2.0;
-  const MEDIUM_BODY_RADIUS_MIN = 1.5;
-  const MEDIUM_BODY_RADIUS_MAX = 3.5;
+  const BIG_BODY_RADIUS_MIN = 0.15;
+  const BIG_BODY_RADIUS_MAX = 1.5;
+  const MEDIUM_BODY_RADIUS_MIN = 0.5;
+  const MEDIUM_BODY_RADIUS_MAX = 3.0;
   const BIG_BODY_HEIGHT = 0.12;
   const MEDIUM_BODY_HEIGHT = 0.2;
   // Match massive body speeds to diskTangSpeed so init is in equilibrium with disk recovery target.
