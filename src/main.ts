@@ -1305,9 +1305,10 @@ function createPhysicsSimulation() {
         z = orbitalTangent[2]*Math.cos(angle_m)*r_m + orbitalBitangent[2]*Math.sin(angle_m)*r_m + orbitalNormal[2]*h_m;
         const intR_m = (-1/LAMBDA_M) * Math.exp(-LAMBDA_M * r_m / SCALE_M) + (1/LAMBDA_M);
         const intMax_m = (-1/LAMBDA_M) * Math.exp(-LAMBDA_M) + (1/LAMBDA_M);
-        const totalM = MASSIVE_BODY_COUNT * ((BIG_BODY_MASS_MIN+BIG_BODY_MASS_MAX+MEDIUM_BODY_MASS_MIN+MEDIUM_BODY_MASS_MAX)/4);
+        const avgM = ((BIG_BODY_MASS_MIN+BIG_BODY_MASS_MAX+MEDIUM_BODY_MASS_MIN+MEDIUM_BODY_MASS_MAX)/4);
+        const refTotalM = 1000 * avgM;
         const Geff_m = (state.physics.G ?? 1.5) * 0.001 / Math.sqrt(Math.max(1, MASSIVE_BODY_COUNT) / 1000);
-        const vC_m = Math.sqrt(Math.max(0.001, Geff_m * (intR_m/intMax_m) * totalM / Math.max(r_m, 0.05)));
+        const vC_m = Math.sqrt(Math.max(0.001, Geff_m * (intR_m/intMax_m) * refTotalM / Math.max(r_m, 0.05)));
         vx = (-Math.sin(angle_m)*orbitalTangent[0] + Math.cos(angle_m)*orbitalBitangent[0]) * vC_m;
         vy = (-Math.sin(angle_m)*orbitalTangent[1] + Math.cos(angle_m)*orbitalBitangent[1]) * vC_m;
         vz = (-Math.sin(angle_m)*orbitalTangent[2] + Math.cos(angle_m)*orbitalBitangent[2]) * vC_m;
@@ -1371,13 +1372,13 @@ function createPhysicsSimulation() {
         const intMax = (-1/LAMBDA) * Math.exp(-LAMBDA) + (1/LAMBDA);
         const massFrac = intR / intMax;
 
-        // Circular velocity from enclosed mass (all source bodies contribute)
-        // Total gravitational mass = sourceCount * avgMass
-        const totalMass = MASSIVE_BODY_COUNT * ((BIG_BODY_MASS_MIN + BIG_BODY_MASS_MAX) / 2 +
-                          (MEDIUM_BODY_MASS_MIN + MEDIUM_BODY_MASS_MAX) / 2) / 2;
-        const enclosedMass = massFrac * totalMass;
-        // G_eff matches the compute shader normalization
-        const Geff = (state.physics.G ?? 0.6) * 0.001 / Math.sqrt(Math.max(1, MASSIVE_BODY_COUNT) / 1000);
+        // Circular velocity from enclosed mass. Use a fixed reference mass (1000 sources * avgMass)
+        // so that vCirc is independent of particle count — the G_eff normalization already handles scaling.
+        const REF_SOURCES = 1000;
+        const avgMass = ((BIG_BODY_MASS_MIN + BIG_BODY_MASS_MAX) / 2 + (MEDIUM_BODY_MASS_MIN + MEDIUM_BODY_MASS_MAX) / 2) / 2;
+        const refTotalMass = REF_SOURCES * avgMass;
+        const enclosedMass = massFrac * refTotalMass;
+        const Geff = (state.physics.G ?? 1.5) * 0.001 / Math.sqrt(Math.max(1, MASSIVE_BODY_COUNT) / 1000);
         const vCirc = Math.sqrt(Math.max(0.001, Geff * enclosedMass / Math.max(r, 0.05)));
 
         // Visible disk has real thickness — thicker at center, thinner at edge (like a real galaxy)
