@@ -66,16 +66,20 @@ fn main(@builtin(local_invocation_id) lid: vec3u) {
     let r2 = dot(b.pos, b.pos);
     let r = sqrt(r2 + 0.0001);
 
-    // Kinetic energy
-    ke += 0.5 * max(m, 0.001) * v2;
+    // Kinetic energy — use actual mass, not clamped, so zero-mass tracers don't inflate KE
+    ke += 0.5 * m * v2;
 
-    // Potential energy estimate: assume enclosed mass grows linearly with r (isothermal-ish)
-    // PE_i ≈ -G * totalSourceMass * (r / rScale) * m / r = -G * totalSourceMass * m / rScale
-    // Better: use the actual particle radius to estimate enclosed fraction
-    // For exponential profile: M_enc(r) ≈ totalMass * (1 - exp(-r/a))
-    // Simplify: M_enc ≈ totalMass * min(1, r²/9) (quadratic approximation within r<3)
-    let encFrac = min(1.0, r2 / 9.0);
-    pe -= G * encFrac * f32(sc) * max(m, 0.001) / (r + softSq);
+    // Potential energy: PE_i = -G_raw * M_enclosed(r) * m_i / sqrt(r² + ε²)
+    // M_enclosed uses the exponential profile integral: (-1/λ)*exp(-λ*r/scale) + 1/λ
+    // normalized by the integral at the full scale.
+    let lambda = 5.0;
+    let scale = 3.5;
+    let intR = (-1.0/lambda) * exp(-lambda * r / scale) + (1.0/lambda);
+    let intMax = (-1.0/lambda) * exp(-lambda) + (1.0/lambda);
+    let encFrac = clamp(intR / intMax, 0.0, 1.0);
+    // Average source body mass ≈ 0.9 (midpoint of big 0.8-1.8 and medium 0.3-0.9 ranges)
+    let totalSourceMass = f32(sc) * 0.9;
+    pe -= G * encFrac * totalSourceMass * m * inverseSqrt(r2 + softSq);
 
     // Radius squared
     r2sum += r2;

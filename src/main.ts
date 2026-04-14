@@ -1802,6 +1802,7 @@ function createPhysicsSimulation() {
       const now = performance.now();
       if (!statsPendingMap && now - lastStatsTime > STATS_INTERVAL_MS) {
         lastStatsTime = now;
+        // Use the same G normalization as the force loop so PE matches the actual potential.
         const Geff = (p.G ?? 1.5) * 0.001 / Math.sqrt(Math.max(1, MASSIVE_BODY_COUNT) / 1000);
         const statsParamsData = new Float32Array(4);
         const statsParamsU32 = new Uint32Array(statsParamsData.buffer);
