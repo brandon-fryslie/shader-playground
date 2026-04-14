@@ -255,6 +255,13 @@ async function main() {
     const wallTime = m === 0 ? 1.5 : 1.5 + m * intervalSecs;
 
     console.error(`Measuring t=${wallTime.toFixed(1)}s...`);
+    // Grab FPS before diagnose (diagnose itself may stall a frame)
+    let fps = 0;
+    try {
+      const stJson = await evaluate(cdp, `JSON.stringify(window.__simState())`);
+      fps = JSON.parse(stJson).fps || 0;
+    } catch { /* */ }
+
     const diagJson = await evaluate(cdp, `
       window.__simDiagnose().then(d => JSON.stringify(d))
     `);
@@ -265,7 +272,7 @@ async function main() {
       const statsJson = await evaluate(cdp, `JSON.stringify(window.__simStats())`);
       vStats = JSON.parse(statsJson);
     } catch { /* stats not available on all sims */ }
-    snapshots.push({ t: Math.round(wallTime * 10) / 10, ...diag, virial: vStats });
+    snapshots.push({ t: Math.round(wallTime * 10) / 10, fps, ...diag, virial: vStats });
   }
 
   // 9. Compute summary
@@ -280,6 +287,7 @@ async function main() {
     G: state.G,
     snapshots: snapshots.map(s => ({
       t: s.t,
+      fps: s.fps,
       rmsRadius: round(s.rmsRadius),
       rmsHeight: round(s.rmsHeight),
       rmsSpeed: round(s.rmsSpeed),
