@@ -6,6 +6,7 @@ import SHADER_BOIDS_COMPUTE from './shaders/boids.compute.wgsl?raw';
 import SHADER_BOIDS_RENDER from './shaders/boids.render.wgsl?raw';
 import SHADER_NBODY_COMPUTE from './shaders/nbody.compute.wgsl?raw';
 import SHADER_NBODY_REDUCE from './shaders/nbody.reduce.wgsl?raw';
+import SHADER_NBODY_STATS from './shaders/nbody.stats.wgsl?raw';
 import SHADER_NBODY_RENDER from './shaders/nbody.render.wgsl?raw';
 import SHADER_NBODY_CLASSIC_COMPUTE from './shaders/nbody.classic.compute.wgsl?raw';
 import SHADER_NBODY_CLASSIC_RENDER from './shaders/nbody.classic.render.wgsl?raw';
@@ -77,8 +78,8 @@ const PRESETS: Record<SimMode, Record<string, Record<string, number | string>>> 
   },
   physics: {
     'Default':    { ...DEFAULTS.physics },
-    'Spiral Galaxy': { count: 100000, G: 1.5, softening: 0.15, damping: 0.98, coreOrbit: 0.0, distribution: 'spiral',
-                    interactionStrength: 1.0, tidalStrength: 0.03, diskVertDamp: 1.0, diskRadDamp: 0.0, diskTangGain: 0.0, diskTangSpeed: 0.5, diskVertSpring: 0.3, diskAlignGain: 0.0 },
+    'Spiral Galaxy': { count: 100000, G: 1.5, softening: 0.15, damping: 1.0, coreOrbit: 0.0, distribution: 'spiral',
+                    interactionStrength: 1.0, tidalStrength: 0.005, diskVertDamp: 1.0, diskRadDamp: 0.0, diskTangGain: 0.0, diskTangSpeed: 0.5, diskVertSpring: 0.3, diskAlignGain: 0.0 },
     'Cosmic Web':  { count: 80000, G: 0.8, softening: 2.0, damping: 1.0, coreOrbit: 0.0, distribution: 'web',
                     interactionStrength: 1.0, tidalStrength: 0.025, diskVertDamp: 0.0, diskRadDamp: 0.0, diskTangGain: 0.0, diskTangSpeed: 0.5, diskVertSpring: 0.0, diskAlignGain: 0.0 },
     'Star Cluster': { count: 60000, G: 0.3, softening: 1.2, damping: 1.0, coreOrbit: 0.15, distribution: 'cluster',
@@ -1615,6 +1616,35 @@ function createPhysicsSimulation() {
   ];
   device.queue.writeBuffer(reduceParamsBuffer, 0, new Uint32Array([count]));
 
+  // --- Stats reduction: KE, PE, rmsRadius, rmsHeight, angular momentum, total mass ---
+  const statsShaderModule = device.createShaderModule({ code: SHADER_NBODY_STATS });
+  const statsBGL = device.createBindGroupLayout({
+    entries: [
+      { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
+      { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
+      { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
+    ]
+  });
+  const statsPipeline = device.createComputePipeline({
+    layout: device.createPipelineLayout({ bindGroupLayouts: [statsBGL] }),
+    compute: { module: statsShaderModule, entryPoint: 'main' }
+  });
+  const statsOutBuffer = device.createBuffer({ size: 32, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
+  const statsStaging = device.createBuffer({ size: 32, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+  const statsParamsBuffer = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+  const statsBG = [
+    device.createBindGroup({ layout: statsBGL, entries: [
+      { binding: 0, resource: { buffer: bufferB } },
+      { binding: 1, resource: { buffer: statsOutBuffer } },
+      { binding: 2, resource: { buffer: statsParamsBuffer } },
+    ]}),
+    device.createBindGroup({ layout: statsBGL, entries: [
+      { binding: 0, resource: { buffer: bufferA } },
+      { binding: 1, resource: { buffer: statsOutBuffer } },
+      { binding: 2, resource: { buffer: statsParamsBuffer } },
+    ]}),
+  ];
+
   const renderBGL = device.createBindGroupLayout({
     entries: [
       { binding: 0, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: 'read-only-storage' } },
@@ -1677,6 +1707,25 @@ function createPhysicsSimulation() {
   const DISK_NORMAL_SMOOTH = 0.02;
   const DISK_L_MIN = 1e-4;
 
+  // --- Virial equilibrium controller ---
+  // Reads KE/PE from the stats reduction once per second.
+  // Bidirectional: adjusts BOTH damping (to cool) AND tidal strength (to heat).
+  // When virial > target: increase damping to remove energy.
+  // When virial < target: increase tidal to inject energy.
+  let statsPendingMap = false;
+  let lastStatsTime = 0;
+  const STATS_INTERVAL_MS = 1000;
+  let dynamicDamping = 1.0;
+  let dynamicTidal = state.physics.tidalStrength ?? 0.005;
+  const TARGET_VIRIAL = 1.0;
+  const DAMPING_ADJUST_RATE = 0.003;
+  const TIDAL_ADJUST_RATE = 0.001;
+  const DAMPING_MIN = 0.9;
+  const DAMPING_MAX = 1.0;
+  const TIDAL_MIN = 0.001;
+  const TIDAL_MAX = 0.05;
+  let lastStats = { ke: 0, pe: 0, virial: 0, rmsR: 0, rmsH: 0, damping: 1.0, tidal: 0.005 };
+
   // Pre-allocated params staging buffer — avoids GC churn from per-frame ArrayBuffer allocation.
   const paramsData = new ArrayBuffer(96);
   const f32 = new Float32Array(paramsData);
@@ -1689,7 +1738,8 @@ function createPhysicsSimulation() {
       const m = state.mouse;
       // [LAW:one-source-of-truth] G normalized by sqrt(sourceCount) so gravity scales sub-linearly with particle count.
       // Without normalization, 50K particles would have 50x the gravity of 1K. sqrt keeps it manageable.
-      f32[0] = 0.016 * state.fx.timeScale; f32[1] = p.G * 0.001 / Math.sqrt(Math.max(1, MASSIVE_BODY_COUNT) / 1000); f32[2] = p.softening; f32[3] = p.damping;
+      // [LAW:one-source-of-truth] dynamicDamping is adjusted by the virial controller — use it instead of p.damping.
+      f32[0] = 0.016 * state.fx.timeScale; f32[1] = p.G * 0.001 / Math.sqrt(Math.max(1, MASSIVE_BODY_COUNT) / 1000); f32[2] = p.softening; f32[3] = dynamicDamping;
       u32[4] = count;
       u32[5] = MASSIVE_BODY_COUNT;
       f32[6] = p.coreOrbit;
@@ -1708,7 +1758,7 @@ function createPhysicsSimulation() {
       f32[20] = p.diskAlignGain ?? 0;
       f32[21] = p.interactionStrength ?? 1;
       f32[22] = p.diskTangSpeed ?? 0.5;
-      f32[23] = p.tidalStrength ?? 0.0008;
+      f32[23] = dynamicTidal;
       device.queue.writeBuffer(paramsBuffer, 0, paramsBytes);
 
       const pass = encoder.beginComputePass();
@@ -1748,6 +1798,64 @@ function createPhysicsSimulation() {
         });
       }
 
+      // --- Stats reduction: once per second, compute KE/PE and adjust damping ---
+      const now = performance.now();
+      if (!statsPendingMap && now - lastStatsTime > STATS_INTERVAL_MS) {
+        lastStatsTime = now;
+        const Geff = (p.G ?? 1.5) * 0.001 / Math.sqrt(Math.max(1, MASSIVE_BODY_COUNT) / 1000);
+        const statsParamsData = new Float32Array(4);
+        const statsParamsU32 = new Uint32Array(statsParamsData.buffer);
+        statsParamsU32[0] = count;
+        statsParamsU32[1] = MASSIVE_BODY_COUNT;
+        statsParamsData[2] = (p.softening ?? 0.15) * (p.softening ?? 0.15);
+        statsParamsData[3] = Geff;
+        device.queue.writeBuffer(statsParamsBuffer, 0, statsParamsData);
+
+        const statsPass = encoder.beginComputePass();
+        statsPass.setPipeline(statsPipeline);
+        statsPass.setBindGroup(0, statsBG[nextPing]);
+        statsPass.dispatchWorkgroups(1);
+        statsPass.end();
+
+        encoder.copyBufferToBuffer(statsOutBuffer, 0, statsStaging, 0, 32);
+        statsPendingMap = true;
+        device.queue.onSubmittedWorkDone().then(() => {
+          statsStaging.mapAsync(GPUMapMode.READ).then(() => {
+            const d = new Float32Array(statsStaging.getMappedRange().slice(0));
+            statsStaging.unmap();
+            statsPendingMap = false;
+
+            const ke = d[0];
+            const pe = d[1];
+            const sumR2 = d[2];
+            const sumH2 = d[3];
+            const virial = Math.abs(pe) > 0.001 ? (2 * ke) / Math.abs(pe) : 1.0;
+            const rmsR = Math.sqrt(sumR2 / Math.max(count, 1));
+            const rmsH = Math.sqrt(sumH2 / Math.max(count, 1));
+
+            lastStats = { ke, pe, virial, rmsR, rmsH, damping: dynamicDamping, tidal: dynamicTidal };
+
+            // Bidirectional virial controller:
+            // virial > target → system overheating → increase damping (remove energy)
+            // virial < target → system collapsing → increase tidal (inject energy)
+            const virialError = virial - TARGET_VIRIAL;
+            if (virialError > 0) {
+              // Too hot: increase damping
+              dynamicDamping -= virialError * DAMPING_ADJUST_RATE;
+              // Also reduce tidal to stop injecting
+              dynamicTidal -= virialError * TIDAL_ADJUST_RATE;
+            } else {
+              // Too cold: increase tidal to inject energy
+              dynamicTidal -= virialError * TIDAL_ADJUST_RATE;
+              // Also reduce damping to stop removing
+              dynamicDamping -= virialError * DAMPING_ADJUST_RATE;
+            }
+            dynamicDamping = Math.max(DAMPING_MIN, Math.min(DAMPING_MAX, dynamicDamping));
+            dynamicTidal = Math.max(TIDAL_MIN, Math.min(TIDAL_MAX, dynamicTidal));
+          }).catch(() => { statsPendingMap = false; });
+        });
+      }
+
       pingPong = 1 - pingPong;
     },
 
@@ -1774,6 +1882,8 @@ function createPhysicsSimulation() {
     },
 
     getCount() { return count; },
+
+    getStats() { return lastStats; },
 
     async diagnose(): Promise<Record<string, number | number[]>> {
       if (diagPending) return { error: 1 };
@@ -1885,6 +1995,7 @@ function createPhysicsSimulation() {
       bufferA.destroy(); bufferB.destroy();
       paramsBuffer.destroy(); cameraBuffer.destroy();
       reduceParamsBuffer.destroy(); reduceOutBuffer.destroy(); reduceStaging.destroy();
+      statsOutBuffer.destroy(); statsStaging.destroy(); statsParamsBuffer.destroy();
       diagStaging.destroy();
       destroyDepthRef(depthRef);
     }
@@ -4838,6 +4949,10 @@ async function main() {
     return 'preset not found';
   };
   (window as any).__simState = () => ({ mode: state.mode, ...state[state.mode] as any, fps: currentFps });
+  (window as any).__simStats = () => {
+    const sim = simulations[state.mode];
+    return (sim as any)?.getStats ? (sim as any).getStats() : { error: 'no stats on this sim' };
+  };
 }
 
 main();

@@ -259,7 +259,13 @@ async function main() {
       window.__simDiagnose().then(d => JSON.stringify(d))
     `);
     const diag = JSON.parse(diagJson);
-    snapshots.push({ t: Math.round(wallTime * 10) / 10, ...diag });
+    // Also grab virial controller stats if available
+    let vStats = {};
+    try {
+      const statsJson = await evaluate(cdp, `JSON.stringify(window.__simStats())`);
+      vStats = JSON.parse(statsJson);
+    } catch { /* stats not available on all sims */ }
+    snapshots.push({ t: Math.round(wallTime * 10) / 10, ...diag, virial: vStats });
   }
 
   // 9. Compute summary
@@ -282,6 +288,13 @@ async function main() {
       armContrast: round(s.armContrast),
       radialProfile: s.radialProfile,
       angularProfile: s.angularProfile,
+      ...(s.virial?.virial != null ? {
+        virialRatio: round(s.virial.virial),
+        ctrlDamping: round(s.virial.damping),
+        ctrlTidal: round(s.virial.tidal),
+        keGpu: round(s.virial.ke),
+        peGpu: round(s.virial.pe),
+      } : {}),
     })),
     trend: dt > 0 ? {
       radiusRate: round((last.rmsRadius - first.rmsRadius) / dt),
