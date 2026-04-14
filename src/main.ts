@@ -1765,7 +1765,7 @@ function createPhysicsSimulation() {
       const pass = encoder.beginComputePass();
       pass.setPipeline(computePipeline);
       pass.setBindGroup(0, computeBG[pingPong]);
-      pass.dispatchWorkgroups(Math.ceil(count / 256));
+      pass.dispatchWorkgroups(Math.ceil(count / 64));
       pass.end();
 
       // Reduction reads the freshly-written buffer (= input to next main pass).

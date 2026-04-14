@@ -62,7 +62,7 @@ const CORE_FRICTION_GAIN = 1.2;
 
 // Shared memory tile for source bodies — only pos + mass needed for force computation.
 // [LAW:one-source-of-truth] TILE_SIZE matches @workgroup_size so every thread loads exactly one body per tile.
-const TILE_SIZE = 256u;
+const TILE_SIZE = 64u;
 var<workgroup> tile: array<vec4f, TILE_SIZE>;
 
 @compute @workgroup_size(TILE_SIZE)
