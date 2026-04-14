@@ -78,7 +78,7 @@ const PRESETS: Record<SimMode, Record<string, Record<string, number | string>>> 
   physics: {
     'Default':    { ...DEFAULTS.physics },
     'Spiral Galaxy': { count: 100000, G: 1.5, softening: 0.15, damping: 1.0, coreOrbit: 0.0, distribution: 'spiral',
-                    interactionStrength: 1.0, tidalStrength: 0.005, diskVertDamp: 0.0, diskRadDamp: 0.0, diskTangGain: 0.0, diskTangSpeed: 0.5, diskVertSpring: 0.0, diskAlignGain: 0.0 },
+                    interactionStrength: 1.0, tidalStrength: 0.005, diskVertDamp: 1.0, diskRadDamp: 0.0, diskTangGain: 0.0, diskTangSpeed: 0.5, diskVertSpring: 0.3, diskAlignGain: 0.0 },
     'Cosmic Web':  { count: 80000, G: 0.8, softening: 2.0, damping: 1.0, coreOrbit: 0.0, distribution: 'web',
                     interactionStrength: 1.0, tidalStrength: 0.025, diskVertDamp: 0.0, diskRadDamp: 0.0, diskTangGain: 0.0, diskTangSpeed: 0.5, diskVertSpring: 0.0, diskAlignGain: 0.0 },
     'Star Cluster': { count: 60000, G: 0.3, softening: 1.2, damping: 1.0, coreOrbit: 0.15, distribution: 'cluster',
@@ -1292,18 +1292,16 @@ function createPhysicsSimulation() {
       mass = CORE_BODY_MASS;
     } else if (isBigBody || isMediumBody) {
       if (dist === 'spiral') {
-        // Massive bodies follow the same exponential disk as tracers — no dark matter distinction.
-        // Same profile, same circular velocities, just heavier. This matches the barnes-hut approach
-        // where all bodies are equal participants in the gravitational dynamics.
+        // Massive bodies follow the same exponential disk as tracers.
+        // Same profile, same circular velocities, just heavier.
         const LAMBDA_M = 5.0;
         const SCALE_M = 3.5;
         const r_m = Math.exp(-LAMBDA_M * Math.random()) * SCALE_M;
         const angle_m = Math.random() * Math.PI * 2;
-        const h_m = (Math.random() - 0.5) * 0.03;
+        const h_m = (Math.random() - 0.5) * 0.2;
         x = orbitalTangent[0]*Math.cos(angle_m)*r_m + orbitalBitangent[0]*Math.sin(angle_m)*r_m + orbitalNormal[0]*h_m;
         y = orbitalTangent[1]*Math.cos(angle_m)*r_m + orbitalBitangent[1]*Math.sin(angle_m)*r_m + orbitalNormal[1]*h_m;
         z = orbitalTangent[2]*Math.cos(angle_m)*r_m + orbitalBitangent[2]*Math.sin(angle_m)*r_m + orbitalNormal[2]*h_m;
-        // Circular velocity from enclosed mass
         const intR_m = (-1/LAMBDA_M) * Math.exp(-LAMBDA_M * r_m / SCALE_M) + (1/LAMBDA_M);
         const intMax_m = (-1/LAMBDA_M) * Math.exp(-LAMBDA_M) + (1/LAMBDA_M);
         const totalM = MASSIVE_BODY_COUNT * ((BIG_BODY_MASS_MIN+BIG_BODY_MASS_MAX+MEDIUM_BODY_MASS_MIN+MEDIUM_BODY_MASS_MAX)/4);
@@ -1381,7 +1379,8 @@ function createPhysicsSimulation() {
         const Geff = (state.physics.G ?? 0.6) * 0.001 / Math.sqrt(Math.max(1, MASSIVE_BODY_COUNT) / 1000);
         const vCirc = Math.sqrt(Math.max(0.001, Geff * enclosedMass / Math.max(r, 0.05)));
 
-        const h = (Math.random() - 0.5) * DISK_THICKNESS * (0.1 + r * 0.04);
+        // Visible disk has real thickness — thicker at center, thinner at edge (like a real galaxy)
+        const h = (Math.random() - 0.5) * (0.25 + r * 0.05);
         x = orbitalTangent[0]*Math.cos(angle)*r + orbitalBitangent[0]*Math.sin(angle)*r + orbitalNormal[0]*h;
         y = orbitalTangent[1]*Math.cos(angle)*r + orbitalBitangent[1]*Math.sin(angle)*r + orbitalNormal[1]*h;
         z = orbitalTangent[2]*Math.cos(angle)*r + orbitalBitangent[2]*Math.sin(angle)*r + orbitalNormal[2]*h;

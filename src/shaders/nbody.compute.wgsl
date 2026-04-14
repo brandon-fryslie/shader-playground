@@ -156,6 +156,7 @@ fn main(@builtin(global_invocation_id) gid: vec3u, @builtin(local_invocation_id)
   let vPhi = dot(me.vel, ePhi);
   // Disk recovery fades to zero beyond the disk region — scattered particles are free.
   let diskFade = 1.0 - smoothstep(5.0, 7.5, coreDist);
+  // Vertical velocity damping — dissipates vertical kinetic energy to maintain disk coherence.
   acc -= n * (vz * params.diskVertDamp * diskFade);
   acc -= eR * (vR * params.diskRadDamp * diskFade);
   acc -= n * (z * params.diskVertSpring * diskFade);
