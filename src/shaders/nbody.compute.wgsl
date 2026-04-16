@@ -7,6 +7,14 @@ struct Body {
   _pad2: f32,
 }
 
+// [LAW:one-source-of-truth] Attractor is the canonical per-interaction force-generator.
+// Each frame the CPU packs up to MAX_ATTRACTORS entries with current strength.
+// strength=0 makes all per-attractor terms zero without any branching (dataflow-not-control-flow).
+struct Attractor {
+  pos: vec3f,
+  strength: f32,
+}
+
 struct Params {
   dt: f32,
   G: f32,
@@ -16,11 +24,10 @@ struct Params {
   sourceCount: u32,
   coreOrbit: f32,
   time: f32,
-  targetX: f32,
-  targetY: f32,
-  targetZ: f32,
-  interactionActive: f32,
-  // [LAW:one-source-of-truth] Disk-recovery state lives in the same Params block so the CPU sends one coherent snapshot per frame.
+  attractorCount: u32,
+  _pad_a: u32,
+  _pad_b: u32,
+  _pad_c: u32,
   diskNormal: vec3f,
   _pad4: f32,
   diskVertDamp: f32,
@@ -28,33 +35,41 @@ struct Params {
   diskTangGain: f32,
   diskVertSpring: f32,
   diskAlignGain: f32,
-  interactionStrength: f32,
+  _pad_d: f32,
   diskTangSpeed: f32,
   tidalStrength: f32,
+  // Attractor array lives at offset 96 (16-aligned). CPU packing must match.
+  attractors: array<Attractor, 32>,
 }
 
 @group(0) @binding(0) var<storage, read> bodiesIn: array<Body>;
 @group(0) @binding(1) var<storage, read_write> bodiesOut: array<Body>;
 @group(0) @binding(2) var<uniform> params: Params;
 
-// [LAW:one-source-of-truth] Long-run N-body stability thresholds are owned here so containment and anti-collapse stay coherent.
+// [LAW:one-source-of-truth] Long-run N-body stability thresholds are owned here so containment stays coherent.
 const N_BODY_OUTER_RADIUS = 8.0;
 const N_BODY_BOUNDARY_PULL = 0.006;
+
+// Per-attractor interaction constants. Strengths are multiplied by each attractor's own `strength` float
+// (0..ceiling), plus sqrt(count/1000) count scaling so the feel is stable across particle counts.
 const INTERACTION_WELL_STRENGTH = 12.0;
 const INTERACTION_WELL_SOFTENING = 0.25;
 const INTERACTION_CORE_RADIUS = 0.3;
 const INTERACTION_CORE_PRESSURE = 16.0;
-const HOME_WELL_STRENGTH = 0.0;
-const HOME_WELL_SOFTENING = 1.8;
-const HOME_CORE_RADIUS = 0.0;
-const HOME_CORE_PRESSURE = 0.0;
-const HOME_RESTORE_STIFFNESS_ACTIVE = 0.14;
-const HOME_RESTORE_DAMPING_ACTIVE = 0.18;
 const INTERACTION_DRAG_GAIN = 0.6;
-const HOME_ANCHOR_WELL_RADIUS = 5.0;
-const HOME_ANCHOR_FADE_RADIUS = 7.0;
-const HOME_REENTRY_KICK = 0.04;
-const HOME_REENTRY_DAMPING = 0.02;
+// Close-range friction: bleeds kinetic energy from particles trapped near an attractor.
+// Radius 0.8 is the capture zone; gain 3.0 is moderate — strong enough to feel, not enough to freeze particles solid.
+const INTERACTION_FRICTION_RADIUS = 0.8;
+const INTERACTION_FRICTION_GAIN = 3.0;
+
+// Home reentry — decoupled from attractor state per capability goal. Always on, but only bites far from origin.
+// This is a containment invariant for escaped particles, not a counterforce to user interaction.
+const HOME_REENTRY_STIFFNESS = 0.04;
+const HOME_REENTRY_DAMPING = 0.05;
+const HOME_REENTRY_FADE_INNER = 5.0;
+const HOME_REENTRY_FADE_OUTER = 7.0;
+
+// Core friction — galactic core speed limiter (unchanged behavior).
 const CORE_FRICTION_RADIUS = 0.8;
 const CORE_FRICTION_INNER_RADIUS = 0.1;
 const CORE_FRICTION_SPEED_START = 1.5;
@@ -62,13 +77,14 @@ const CORE_FRICTION_GAIN = 1.2;
 
 // Shared memory tile for source bodies — only pos + mass needed for force computation.
 // [LAW:one-source-of-truth] TILE_SIZE matches @workgroup_size so every thread loads exactly one body per tile.
-const TILE_SIZE = 64u;
+const TILE_SIZE = 256u;
 var<workgroup> tile: array<vec4f, TILE_SIZE>;
 
 @compute @workgroup_size(TILE_SIZE)
 fn main(@builtin(global_invocation_id) gid: vec3u, @builtin(local_invocation_id) lid: vec3u) {
   let idx = gid.x;
-  // [LAW:dataflow-not-control-flow] All threads participate in barriers; the alive flag gates writes only.
+  // All threads participate in tile-load barriers (WGSL uniform control flow requirement).
+  // Dead threads (idx >= count) load tiles but skip the inner loop and post-tile work via 'alive'.
   let alive = idx < params.count;
 
   let me = bodiesIn[min(idx, params.count - 1u)];
@@ -81,14 +97,12 @@ fn main(@builtin(global_invocation_id) gid: vec3u, @builtin(local_invocation_id)
 
   for (var t = 0u; t < numTiles; t++) {
     let loadIdx = t * TILE_SIZE + lid.x;
-    tile[lid.x] = select(
-      vec4f(0.0),
-      vec4f(bodiesIn[min(loadIdx, params.sourceCount - 1u)].pos, bodiesIn[min(loadIdx, params.sourceCount - 1u)].mass),
-      loadIdx < params.sourceCount
-    );
+    let src = bodiesIn[min(loadIdx, params.sourceCount - 1u)];
+    tile[lid.x] = select(vec4f(0.0), vec4f(src.pos, src.mass), loadIdx < params.sourceCount);
     workgroupBarrier();
 
-    // Tight inner loop: gravity only. Self-interaction produces zero force via softening (no branch needed).
+    // All threads run the inner loop — dead threads waste <0.2% compute, but avoiding
+    // the branch lets Dawn/Metal optimize the hot path without register pressure from divergence.
     let tileEnd = min(TILE_SIZE, params.sourceCount - t * TILE_SIZE);
     for (var j = 0u; j < tileEnd; j++) {
       let other = tile[j];
@@ -100,41 +114,47 @@ fn main(@builtin(global_invocation_id) gid: vec3u, @builtin(local_invocation_id)
     workgroupBarrier();
   }
 
-  let targetPos = vec3f(params.targetX, params.targetY, params.targetZ);
-  let interactionOn = params.interactionActive > 0.5;
-  let countScale = sqrt(f32(params.count) / 1000.0);
-  let wellStrength = select(HOME_WELL_STRENGTH, INTERACTION_WELL_STRENGTH * params.interactionStrength * countScale, interactionOn);
-  let wellSoftening = select(HOME_WELL_SOFTENING, INTERACTION_WELL_SOFTENING, interactionOn);
-  let coreRadius = select(HOME_CORE_RADIUS, INTERACTION_CORE_RADIUS, interactionOn);
-  let corePressure = select(HOME_CORE_PRESSURE, INTERACTION_CORE_PRESSURE * params.interactionStrength * countScale, interactionOn);
-  let homeRestoreStiffness = select(0.0, HOME_RESTORE_STIFFNESS_ACTIVE, interactionOn);
-  let homeRestoreDamping = select(0.0, HOME_RESTORE_DAMPING_ACTIVE, interactionOn);
-  let interactionDrag = select(0.0, INTERACTION_DRAG_GAIN * countScale, interactionOn);
-  let homeReentryKick = select(HOME_REENTRY_KICK, 0.0, interactionOn);
-  let homeReentryDamping = select(HOME_REENTRY_DAMPING, 0.0, interactionOn);
-  let coreDist = length(me.pos);
-  let coreFrictionFade = 1.0 - smoothstep(CORE_FRICTION_INNER_RADIUS, CORE_FRICTION_RADIUS, coreDist);
+  // Early exit for dead threads — all barriers are above, so this is uniform-safe.
+  if (!alive) { return; }
 
-  let toTarget = targetPos - me.pos;
-  let targetDist2 = dot(toTarget, toTarget);
-  let targetDist = sqrt(targetDist2 + 0.0001);
-  let targetDir = toTarget / targetDist;
-  let toHome = me.home - me.pos;
-  let homeAnchorFade = select(
-    smoothstep(HOME_ANCHOR_WELL_RADIUS, HOME_ANCHOR_FADE_RADIUS, targetDist),
-    1.0,
-    interactionOn
-  );
-  let recoveryForceScale = select(homeAnchorFade, 1.0, interactionOn);
-  acc += targetDir * (wellStrength / (targetDist2 + wellSoftening)) * recoveryForceScale;
-  if (targetDist < coreRadius) {
-    acc -= targetDir * ((coreRadius - targetDist) * corePressure * recoveryForceScale);
+  let countScale = sqrt(f32(params.count) / 1000.0);
+  let coreDist = length(me.pos);
+
+  // [LAW:dataflow-not-control-flow] Sum forces from every attractor. Strength=0 makes every term inert,
+  // so we iterate the full count without any "is this one active?" branch.
+  for (var i = 0u; i < params.attractorCount; i++) {
+    let a = params.attractors[i];
+    let s = a.strength;
+    let toA = a.pos - me.pos;
+    let d2 = dot(toA, toA);
+    let d = sqrt(d2 + 0.0001);
+    let dir = toA / d;
+
+    // 1/r² attractive well with softening.
+    acc += dir * (s * INTERACTION_WELL_STRENGTH * countScale / (d2 + INTERACTION_WELL_SOFTENING));
+
+    // Repulsive core prevents singular collapse at the attractor.
+    let corePush = max(0.0, INTERACTION_CORE_RADIUS - d);
+    acc -= dir * (corePush * s * INTERACTION_CORE_PRESSURE * countScale);
+
+    // Constant drag toward attractor (direction-only scoop).
+    acc += dir * (s * INTERACTION_DRAG_GAIN * countScale);
+
+    // Close-range friction bleeds velocity inside the capture zone. This is what lets users
+    // "trap" particles without them flinging back out at release.
+    let fricFade = 1.0 - smoothstep(0.0, INTERACTION_FRICTION_RADIUS, d);
+    acc -= me.vel * (s * INTERACTION_FRICTION_GAIN * fricFade);
   }
-  acc += toHome * (homeRestoreStiffness * homeAnchorFade);
-  acc -= me.vel * (homeRestoreDamping * homeAnchorFade);
-  acc += targetDir * (homeReentryKick * homeAnchorFade);
-  acc -= me.vel * (homeReentryDamping * homeAnchorFade);
-  acc += targetDir * interactionDrag;
+
+  // [LAW:one-source-of-truth] Home reentry — always on, faded by distance from origin.
+  // Decoupled from attractors so users retain full capability over particle trajectories inside the disk.
+  let toHome = me.home - me.pos;
+  let reentryFade = smoothstep(HOME_REENTRY_FADE_INNER, HOME_REENTRY_FADE_OUTER, coreDist);
+  acc += toHome * (HOME_REENTRY_STIFFNESS * reentryFade);
+  acc -= me.vel * (HOME_REENTRY_DAMPING * reentryFade);
+
+  // Core friction — galactic core speed limiter.
+  let coreFrictionFade = 1.0 - smoothstep(CORE_FRICTION_INNER_RADIUS, CORE_FRICTION_RADIUS, coreDist);
   let speed = length(me.vel);
   let coreSpeedExcess = max(0.0, speed - CORE_FRICTION_SPEED_START);
   let coreFrictionStrength = params.coreOrbit * coreFrictionFade * coreSpeedExcess * CORE_FRICTION_GAIN;
@@ -183,7 +203,5 @@ fn main(@builtin(global_invocation_id) gid: vec3u, @builtin(local_invocation_id)
   var vel = (me.vel + acc * params.dt) * effectiveDamping;
   let pos = me.pos + vel * params.dt;
 
-  if (alive) {
-    bodiesOut[idx] = Body(pos, me.mass, vel, 0.0, me.home, 0.0);
-  }
+  bodiesOut[idx] = Body(pos, me.mass, vel, 0.0, me.home, 0.0);
 }

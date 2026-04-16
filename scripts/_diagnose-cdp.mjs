@@ -255,11 +255,14 @@ async function main() {
     const wallTime = m === 0 ? 1.5 : 1.5 + m * intervalSecs;
 
     console.error(`Measuring t=${wallTime.toFixed(1)}s...`);
-    // Grab FPS before diagnose (diagnose itself may stall a frame)
+    // Grab FPS + GPU timing before diagnose (diagnose itself may stall a frame)
     let fps = 0;
+    let gpuMs = 0;
     try {
       const stJson = await evaluate(cdp, `JSON.stringify(window.__simState())`);
-      fps = JSON.parse(stJson).fps || 0;
+      const st = JSON.parse(stJson);
+      fps = st.fps || 0;
+      gpuMs = st.gpuMs || 0;
     } catch { /* */ }
 
     const diagJson = await evaluate(cdp, `
@@ -272,7 +275,7 @@ async function main() {
       const statsJson = await evaluate(cdp, `JSON.stringify(window.__simStats())`);
       vStats = JSON.parse(statsJson);
     } catch { /* stats not available on all sims */ }
-    snapshots.push({ t: Math.round(wallTime * 10) / 10, fps, ...diag, virial: vStats });
+    snapshots.push({ t: Math.round(wallTime * 10) / 10, fps, gpuMs, ...diag, virial: vStats });
   }
 
   // 9. Compute summary
@@ -296,6 +299,7 @@ async function main() {
       armContrast: round(s.armContrast),
       radialProfile: s.radialProfile,
       angularProfile: s.angularProfile,
+      ...(s.gpuMs > 0 ? { gpuFrameMs: round(s.gpuMs) } : {}),
       ...(s.virial?.virial != null ? {
         virialRatio: round(s.virial.virial),
         ctrlDamping: round(s.virial.damping),
