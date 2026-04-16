@@ -2,6 +2,28 @@
   "schema": 2,
   "versions": [
     {
+      "version": "pr-3",
+      "ref": "refs/pull/3/merge",
+      "sha": "d91ca16a446c0d00cda25a12ee6b1af15aacd882",
+      "timestamp": "2026-04-16T07:25:08.694Z",
+      "commits": [
+        {
+          "sha": "d91ca16a446c0d00cda25a12ee6b1af15aacd882",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-16T01:24:54-06:00",
+          "message": "Merge 1585e2d2ac59e7e886605719a924c28c6d5bce08 into d6cf8ad54ce275954125f6f22f27964444c1772f\n"
+        },
+        {
+          "sha": "1585e2d2ac59e7e886605719a924c28c6d5bce08",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-16T01:24:20-06:00",
+          "message": "feat: placeable attractor wand for N-body interaction\n\nReplaces the single always-at-cursor interaction point with a system of\nplaceable, charging attractors. Each pointerdown creates a new attractor\nthat follows the cursor while held (wand behavior), quadratically charges\nup to a ceiling over 1.5s, then decays with a quadratic ease-out over\n2× the hold duration. Multi-touch and XR pinches produce independent\nattractors via per-pointer-id tracking.\n\nShader changes:\n- nbody.compute.wgsl: loops over an array<Attractor, 32> summing\n  per-attractor well, core-repel, drag, and close-range friction forces.\n  Home spring decoupled from interaction state — now a pure distance-faded\n  containment invariant for escaped particles.\n- post.composite.wgsl: per-attractor reticle (aspect-correct ring + dot),\n  size/brightness scaled with strength. Gravitational lensing sums across\n  attractors.\n\nCPU state: state.attractors is the single source of truth, updated once\nper frame (prune + strength compute) before uniform upload. Sub-microsecond\nper-frame cost on top of the existing upload.\n\nUniform buffers:\n- N-body Params: 96 → 608 bytes\n- Composite Params: 80 → 592 bytes\n\nAlso includes in-progress GPU frame-ms tracking in the diagnostic script.\n"
+        }
+      ]
+    },
+    {
       "version": "r57-d6cf8ad",
       "ref": "refs/heads/master",
       "sha": "d6cf8ad54ce275954125f6f22f27964444c1772f",
