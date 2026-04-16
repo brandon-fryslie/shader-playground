@@ -40,6 +40,7 @@ const DEFAULTS: ModeParamsMap = {
     interactionStrength: 1.0, tidalStrength: 0.008,
     diskVertDamp: 3.0, diskRadDamp: 0.8, diskTangGain: 0.8, diskTangSpeed: 0.6,
     diskVertSpring: 1.5, diskAlignGain: 0.4,
+    attractorDecayRatio: 0.5, attractorDecayCap: 2.0,
   },
   physics_classic: {
     // Verbatim defaults from the original shader-playground for fair A/B comparison.
@@ -140,6 +141,8 @@ const PARAM_DEFS: Record<SimMode, ParamSection[]> = {
       { key: 'damping', label: 'Damping', min: 0.98, max: 1.0, step: 0.0005 },
       { key: 'coreOrbit', label: 'Core Friction', min: 0.0, max: 0.8, step: 0.01 },
       { key: 'interactionStrength', label: 'Interaction Pull', min: 0.1, max: 3.0, step: 0.05 },
+      { key: 'attractorDecayRatio', label: 'Decay Ratio', min: 0.1, max: 4.0, step: 0.05 },
+      { key: 'attractorDecayCap', label: 'Decay Cap (s)', min: 0.5, max: 10.0, step: 0.1 },
       { key: 'tidalStrength', label: 'Tidal Field', min: 0.0, max: 0.05, step: 0.0005 },
     ]},
     { section: 'Initial State', params: [
@@ -350,12 +353,21 @@ const state: AppState = {
 // ATTRACTOR LIFECYCLE
 // ═══════════════════════════════════════════════════════════════════════════════
 
-// [LAW:one-source-of-truth] Timing + cap constants own the attractor behavior contract.
+// [LAW:one-source-of-truth] Timing constants own the attractor behavior contract.
+// Decay timing (ratio × cap) is user-tunable via the Decay Ratio and Decay Cap sliders on state.physics.
 const ATTRACTOR_CHARGE_TIME = 1.5;        // seconds to reach full strength (quadratic ramp)
-const ATTRACTOR_DECAY_MULTIPLIER = 2.0;   // decay duration = this × holdDuration
 const ATTRACTOR_MAX = 32;                 // hard cap; oldest evicted if exceeded
+const ATTRACTOR_MIN_DECAY = 0.05;         // seconds — lower bound so releases are always visible
 
 function nowSeconds() { return performance.now() * 0.001; }
+
+// [LAW:single-enforcer] Decay duration is computed in exactly one place, here, from user-tunable ratio/cap.
+// Minimum floor of ATTRACTOR_MIN_DECAY prevents zero-duration decay on instant-release taps.
+function attractorDecayDuration(a: Attractor): number {
+  const ratio = state.physics.attractorDecayRatio ?? 0.5;
+  const cap = state.physics.attractorDecayCap ?? 2.0;
+  return Math.max(ATTRACTOR_MIN_DECAY, Math.min(cap, ratio * a.holdDuration));
+}
 
 // [LAW:dataflow-not-control-flow] Strength is a pure function of (attractor, now). No branches on lifecycle state —
 // the same quadratic formula handles charging and decay through the data (releaseTime < 0 selects which branch of the curve).
@@ -369,16 +381,15 @@ function attractorStrength(a: Attractor, now: number, ceiling: number): number {
   const peakT = Math.min(1, a.holdDuration / ATTRACTOR_CHARGE_TIME);
   const peak = peakT * peakT * ceiling;
   const elapsed = now - a.releaseTime;
-  const decayDur = ATTRACTOR_DECAY_MULTIPLIER * a.holdDuration;
-  if (decayDur <= 0 || elapsed >= decayDur) return 0;
+  const decayDur = attractorDecayDuration(a);
+  if (elapsed >= decayDur) return 0;
   const remaining = 1 - elapsed / decayDur;
   return peak * remaining * remaining;
 }
 
 function attractorDead(a: Attractor, now: number): boolean {
   if (a.releaseTime < 0) return false;
-  const decayDur = ATTRACTOR_DECAY_MULTIPLIER * a.holdDuration;
-  return (now - a.releaseTime) >= decayDur;
+  return (now - a.releaseTime) >= attractorDecayDuration(a);
 }
 
 // [LAW:single-enforcer] Pruning happens in exactly one place per frame, before uniform upload.

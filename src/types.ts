@@ -38,6 +38,8 @@ export interface PhysicsParams {
   diskAlignGain: number;
   interactionStrength: number;
   tidalStrength: number;
+  attractorDecayRatio: number;  // decay duration = this × holdDuration, capped by attractorDecayCap
+  attractorDecayCap: number;    // seconds — upper bound on decay duration
 }
 
 export interface ClassicPhysicsParams {
