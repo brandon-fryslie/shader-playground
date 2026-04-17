@@ -10,7 +10,7 @@ export interface Simulation {
   getCount(): string | number;
   destroy(): void;
   diagnose?(): Promise<Record<string, number | number[]>>;
-  getStats?(): { ke: number; pe: number; virial: number; rmsR: number; rmsH: number; damping: number };
+  getStats?(): { ke: number; pe: number; virial: number; rmsR: number; rmsH: number };
 }
 
 export interface BoidsParams {

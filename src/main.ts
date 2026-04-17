@@ -355,35 +355,39 @@ const state: AppState = {
 // ATTRACTOR LIFECYCLE
 // ═══════════════════════════════════════════════════════════════════════════════
 
-// [LAW:one-source-of-truth] Timing + cap constants own the attractor behavior contract.
+// [LAW:one-source-of-truth] Timing constants own the attractor behavior contract.
+// Decay ratio + cap are user-tunable via sliders on state.physics.
 const ATTRACTOR_CHARGE_TIME = 1.5;        // seconds to reach full strength (quadratic ramp)
-const ATTRACTOR_DECAY_MULTIPLIER = 2.0;   // decay duration = this × holdDuration
 const ATTRACTOR_MAX = 32;                 // hard cap; oldest evicted if exceeded
+const ATTRACTOR_MIN_DECAY = 0.05;         // seconds — floor so instant taps still visually decay
 
 function nowSeconds() { return performance.now() * 0.001; }
 
-// [LAW:dataflow-not-control-flow] Strength is a pure function of (attractor, now). No branches on lifecycle state —
-// the same quadratic formula handles charging and decay through the data (releaseTime < 0 selects which branch of the curve).
+// [LAW:single-enforcer] Decay duration owned here. Ratio/cap from user sliders, clamped at both ends.
+function attractorDecayDuration(a: Attractor): number {
+  const ratio = state.physics.attractorDecayRatio ?? 0.5;
+  const cap = state.physics.attractorDecayCap ?? 2.0;
+  return Math.max(ATTRACTOR_MIN_DECAY, Math.min(cap, ratio * a.holdDuration));
+}
+
+// [LAW:dataflow-not-control-flow] Strength is a pure function of (attractor, now).
 function attractorStrength(a: Attractor, now: number, ceiling: number): number {
   if (a.releaseTime < 0) {
-    // Charging: quadratic ramp. Rate = 2 × ceiling × elapsed / chargeTime² (accelerating).
     const t = Math.min(1, (now - a.chargeStart) / ATTRACTOR_CHARGE_TIME);
     return t * t * ceiling;
   }
-  // Decaying: quadratic ease-out from peak. (1-t)² drops fast then levels.
   const peakT = Math.min(1, a.holdDuration / ATTRACTOR_CHARGE_TIME);
   const peak = peakT * peakT * ceiling;
   const elapsed = now - a.releaseTime;
-  const decayDur = ATTRACTOR_DECAY_MULTIPLIER * a.holdDuration;
-  if (decayDur <= 0 || elapsed >= decayDur) return 0;
+  const decayDur = attractorDecayDuration(a);
+  if (elapsed >= decayDur) return 0;
   const remaining = 1 - elapsed / decayDur;
   return peak * remaining * remaining;
 }
 
 function attractorDead(a: Attractor, now: number): boolean {
   if (a.releaseTime < 0) return false;
-  const decayDur = ATTRACTOR_DECAY_MULTIPLIER * a.holdDuration;
-  return (now - a.releaseTime) >= decayDur;
+  return (now - a.releaseTime) >= attractorDecayDuration(a);
 }
 
 // [LAW:single-enforcer] Pruning happens in exactly one place per frame, before uniform upload.
@@ -408,6 +412,9 @@ function pruneAttractors(now: number) {
 }
 
 function createAttractor(pointerId: number, pos: number[]): void {
+  // [LAW:single-enforcer] Block attractor creation during reverse — the journal owns attractor forces.
+  const sim = simulations[state.mode];
+  if (sim && 'getTimeDirection' in sim && (sim as any).getTimeDirection() < 0) return;
   // Force-evict oldest if we're at the cap. Oldest by insertion order.
   if (state.attractors.length >= ATTRACTOR_MAX) {
     state.attractors.shift();
@@ -1892,9 +1899,21 @@ function createPhysicsSimulation() {
   // [LAW:one-source-of-truth] Simulation clock: monotonic step counter replaces wall-clock.
   // Deterministic tidal angle and attractor timing derive from simStep × dt, not performance.now().
   let simStep = 0;
+  // Time direction: 1 = forward (normal), -1 = reverse (rewind).
+  // Controlled by UI (hold R key / mobile FAB). Negating dt in the DKD leapfrog gives exact reversal.
+  let timeDirection = 1;
   // [LAW:one-source-of-truth] Disk normal is fixed — the dark matter MN potential defines the disk plane.
-  // No longer derived from angular momentum (virial controller removed).
   const diskNormal: [number, number, number] = [0, 1, 0];
+
+  // ── ATTRACTOR JOURNAL ────────────────────────────────────────────────────────
+  // [LAW:one-source-of-truth] The journal is the canonical record of attractor forces at each sim step.
+  // Forward: compute attractor strengths normally, write to journal[simStep].
+  // Reverse: read from journal[simStep], skip live attractor computation.
+  // This ensures the reversed simulation sees the EXACT same forces that were applied forward.
+  const JOURNAL_CAPACITY = 18000;         // 5 minutes at 60fps
+  const JOURNAL_ENTRY_FLOATS = 1 + ATTRACTOR_MAX * 4; // count + 32 × (x, y, z, strength)
+  const journal = new Float32Array(JOURNAL_CAPACITY * JOURNAL_ENTRY_FLOATS);
+  let journalHighWater = 0;               // highest simStep ever written (for reverse boundary)
 
   // --- Diagnostic stats (no feedback into simulation) ---
   // Stats reduction still runs once/second for KE, PE, angular momentum readback.
@@ -1912,47 +1931,74 @@ function createPhysicsSimulation() {
   const paramsBytes = new Uint8Array(paramsData);
 
   return {
+    setTimeDirection(dir: number) { timeDirection = dir; },
+    getSimStep() { return simStep; },
+    getTimeDirection() { return timeDirection; },
+    getJournalCapacity() { return JOURNAL_CAPACITY; },
+    getJournalHighWater() { return journalHighWater; },
+
     compute(encoder: GPUCommandEncoder) {
+      // [LAW:dataflow-not-control-flow] Reverse boundary check: can't rewind past the journal start or step 0.
+      if (timeDirection < 0 && simStep <= 0) {
+        state.paused = true;
+        return;
+      }
+
       const p = state.physics;
-      const dt = 0.016 * state.fx.timeScale;
+      const baseDt = 0.016 * state.fx.timeScale;
+      const dt = baseDt * timeDirection;
       // [LAW:one-source-of-truth] G normalized by sqrt(sourceCount) so gravity scales sub-linearly with particle count.
       f32[0] = dt;
       f32[1] = p.G * 0.001 / Math.sqrt(Math.max(1, MASSIVE_BODY_COUNT) / 1000);
       f32[2] = p.softening;
-      f32[3] = p.haloMass ?? 5.0;        // Plummer halo mass
+      f32[3] = p.haloMass ?? 5.0;
       u32[4] = count;
       u32[5] = MASSIVE_BODY_COUNT;
-      f32[6] = p.haloScale ?? 2.0;       // Plummer halo softening radius
-      // [LAW:one-source-of-truth] Simulation clock: simStep × dt gives deterministic tidal angle.
-      f32[7] = simStep * dt;
-      simStep++;
-      // Attractor packing uses simulation time for strength computation.
-      const nowSec = simStep * dt;
-      const ceiling = p.interactionStrength ?? 1;
-      const attractors = state.attractors;
-      const attractorN = Math.min(attractors.length, ATTRACTOR_MAX);
-      u32[8] = attractorN;
-      u32[9] = 0; u32[10] = 0; u32[11] = 0;
+      f32[6] = p.haloScale ?? 2.0;
+      // [LAW:one-source-of-truth] Simulation clock: simStep × baseDt gives deterministic tidal angle.
+      f32[7] = simStep * baseDt;
       // diskNormal: fixed orientation for the Miyamoto-Nagai potential.
       f32[12] = diskNormal[0]; f32[13] = diskNormal[1]; f32[14] = diskNormal[2];
-      // Dark matter disk params, must match Params struct order in nbody.compute.wgsl
-      f32[16] = p.diskMass ?? 3.0;       // MN disk mass
-      f32[17] = p.diskScaleA ?? 1.5;     // MN radial scale length
-      f32[18] = p.diskScaleB ?? 0.3;     // MN vertical scale height
-      f32[19] = 0; f32[20] = 0; f32[21] = 0; f32[22] = 0; // pad slots
+      f32[16] = p.diskMass ?? 3.0;
+      f32[17] = p.diskScaleA ?? 1.5;
+      f32[18] = p.diskScaleB ?? 0.3;
+      f32[19] = 0; f32[20] = 0; f32[21] = 0; f32[22] = 0;
       f32[23] = p.tidalStrength ?? 0.005;
-      // Attractor array at byte offset 96 = f32 index 24. Stride 4 floats per entry (pos.xyz, strength).
-      for (let i = 0; i < attractorN; i++) {
-        const a = attractors[i];
-        const base = 24 + i * 4;
-        f32[base] = a.x;
-        f32[base + 1] = a.y;
-        f32[base + 2] = a.z;
-        f32[base + 3] = attractorStrength(a, nowSec, ceiling);
-      }
-      for (let i = attractorN; i < ATTRACTOR_MAX; i++) {
-        const base = 24 + i * 4;
-        f32[base] = 0; f32[base + 1] = 0; f32[base + 2] = 0; f32[base + 3] = 0;
+
+      // ── ATTRACTOR DATA: forward computes + journals; reverse reads from journal ──
+      if (timeDirection > 0) {
+        // Forward: compute attractor strengths from live state, write to journal.
+        const nowSec = simStep * baseDt;
+        const ceiling = p.interactionStrength ?? 1;
+        const attractors = state.attractors;
+        const attractorN = Math.min(attractors.length, ATTRACTOR_MAX);
+        u32[8] = attractorN;
+        u32[9] = 0; u32[10] = 0; u32[11] = 0;
+        for (let i = 0; i < attractorN; i++) {
+          const a = attractors[i];
+          const base = 24 + i * 4;
+          f32[base] = a.x;
+          f32[base + 1] = a.y;
+          f32[base + 2] = a.z;
+          f32[base + 3] = attractorStrength(a, nowSec, ceiling);
+        }
+        for (let i = attractorN; i < ATTRACTOR_MAX; i++) {
+          const base = 24 + i * 4;
+          f32[base] = 0; f32[base + 1] = 0; f32[base + 2] = 0; f32[base + 3] = 0;
+        }
+        // Journal write: snapshot the packed attractor data at this simStep.
+        const jBase = (simStep % JOURNAL_CAPACITY) * JOURNAL_ENTRY_FLOATS;
+        journal[jBase] = attractorN;
+        for (let i = 0; i < ATTRACTOR_MAX * 4; i++) journal[jBase + 1 + i] = f32[24 + i];
+        journalHighWater = Math.max(journalHighWater, simStep);
+        simStep++;
+      } else {
+        // Reverse: read attractor data from journal for the CURRENT simStep (before decrement).
+        simStep--;
+        const jBase = (simStep % JOURNAL_CAPACITY) * JOURNAL_ENTRY_FLOATS;
+        u32[8] = journal[jBase]; // attractorCount
+        u32[9] = 0; u32[10] = 0; u32[11] = 0;
+        for (let i = 0; i < ATTRACTOR_MAX * 4; i++) f32[24 + i] = journal[jBase + 1 + i];
       }
       device.queue.writeBuffer(paramsBuffer, 0, paramsBytes);
 
@@ -3358,6 +3404,41 @@ function setupGlobalControls() {
   setupXRButton();
 }
 
+// [LAW:single-enforcer] Time-reverse input is owned here. Desktop: hold R. Mobile: hold rewind FAB.
+// The physics sim's setTimeDirection() is the single channel for changing direction.
+function setupTimeReverseControls() {
+  const setReverse = (active: boolean) => {
+    const sim = simulations[state.mode];
+    if (!sim || !('setTimeDirection' in sim)) return;
+    (sim as any).setTimeDirection(active ? -1 : 1);
+    // Unblock pause if we were auto-paused at the journal boundary.
+    if (!active && state.paused) state.paused = false;
+  };
+
+  // Desktop: hold R key to rewind.
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'r' || e.key === 'R') {
+      if (e.repeat) return;
+      // Don't capture R when typing in an input or the shader editor.
+      const tag = (e.target as HTMLElement)?.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+      setReverse(true);
+    }
+  });
+  document.addEventListener('keyup', (e) => {
+    if (e.key === 'r' || e.key === 'R') setReverse(false);
+  });
+
+  // Mobile: hold rewind FAB.
+  const fabRewind = document.getElementById('fab-rewind');
+  if (fabRewind) {
+    fabRewind.addEventListener('pointerdown', () => setReverse(true));
+    fabRewind.addEventListener('pointerup', () => setReverse(false));
+    fabRewind.addEventListener('pointercancel', () => setReverse(false));
+    fabRewind.addEventListener('pointerleave', () => setReverse(false));
+  }
+}
+
 function buildThemeSelector() {
   const container = document.getElementById('theme-presets')!;
   for (const name of Object.keys(COLOR_THEMES)) {
@@ -3889,8 +3970,12 @@ function describeParam(_mode: string, key: string, val: number | string): string
     visualRange: () => `visual range ${val}`,
     G: () => n > 5 ? `strong gravity (G=${val})` : n < 0.5 ? `weak gravity (G=${val})` : `G=${val}`,
     softening: () => `softening ${val}`,
-    damping: () => n < 0.995 ? `high damping (${val})` : `damping ${val}`,
-    coreOrbit: () => n < 0.1 ? `minimal core friction (${val})` : n > 0.8 ? `strong core friction (${val})` : `core friction ${val}`,
+    damping: () => n < 0.995 ? `high damping (${val})` : `damping ${val}`,  // classic physics only
+    haloMass: () => n > 8 ? `heavy halo (${val})` : n < 2 ? `light halo (${val})` : `halo mass ${val}`,
+    haloScale: () => `halo scale ${val}`,
+    diskMass: () => n < 0.1 ? `no disk potential` : `disk mass ${val}`,
+    diskScaleA: () => `disk scale A ${val}`,
+    diskScaleB: () => `disk scale B ${val}`,
     distribution: () => `${val} distribution`,
     resolution: () => `${val}x${val} grid`,
     viscosity: () => n > 0.5 ? `thick fluid (viscosity ${val})` : n < 0.05 ? `thin fluid (viscosity ${val})` : `viscosity ${val}`,
@@ -4861,6 +4946,19 @@ function updateStats() {
   const count = sim ? sim.getCount() : '--';
   document.getElementById('stat-count')!.textContent =
     (state.mode === 'fluid' || state.mode === 'reaction') ? `Grid: ${count}` : `Particles: ${count}`;
+
+  // Step counter: visible only in physics mode. Shows direction arrow.
+  const stepEl = document.getElementById('stat-step');
+  if (stepEl) {
+    if (state.mode === 'physics' && sim && 'getSimStep' in sim) {
+      const step = (sim as any).getSimStep();
+      const dir = (sim as any).getTimeDirection();
+      stepEl.style.display = '';
+      stepEl.textContent = `Step: ${step} ${dir < 0 ? '\u25C0' : '\u25B6'}`;
+    } else {
+      stepEl.style.display = 'none';
+    }
+  }
 }
 
 function resizeCanvas() {
@@ -5210,6 +5308,7 @@ async function main() {
     setupMouseControls();
   }
   setupShaderPanel();
+  setupTimeReverseControls();
   syncUIFromState();
   resizeCanvas();
   ensureSimulation();
