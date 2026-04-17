@@ -1,11 +1,10 @@
 import '../styles/main.css';
-import type { SimMode, Simulation, AppState, ThemeColors, RGBThemeColors, ParamDef, ParamSection, ShapeParamDef, XRCameraOverride, DepthRef, ModeParamsMap, ShapeName } from './types';
+import type { SimMode, Simulation, AppState, Attractor, ThemeColors, RGBThemeColors, ParamDef, ParamSection, ShapeParamDef, XRCameraOverride, DepthRef, ModeParamsMap, ShapeName } from './types';
 
 // WGSL shader imports — Vite loads these as raw strings
 import SHADER_BOIDS_COMPUTE from './shaders/boids.compute.wgsl?raw';
 import SHADER_BOIDS_RENDER from './shaders/boids.render.wgsl?raw';
 import SHADER_NBODY_COMPUTE from './shaders/nbody.compute.wgsl?raw';
-import SHADER_NBODY_REDUCE from './shaders/nbody.reduce.wgsl?raw';
 import SHADER_NBODY_STATS from './shaders/nbody.stats.wgsl?raw';
 import SHADER_NBODY_RENDER from './shaders/nbody.render.wgsl?raw';
 import SHADER_NBODY_CLASSIC_COMPUTE from './shaders/nbody.classic.compute.wgsl?raw';
@@ -328,6 +327,12 @@ const state: AppState = {
   reaction: { ...DEFAULTS.reaction },
   camera: { distance: 5.0, fov: 60, rotX: 0.3, rotY: 0.0, panX: 0, panY: 0 },
   mouse: { down: false, x: 0, y: 0, dx: 0, dy: 0, worldX: 0, worldY: 0, worldZ: 0 },
+  // [LAW:one-source-of-truth] Attractors are the canonical N-body interaction state.
+  // Held attractors have releaseTime < 0 and holdDuration < 0 (follow cursor, strength charging).
+  // Released attractors decay over 2 × holdDuration, then get pruned from the array.
+  // Max cap of 32 is a safety rail — in practice users hit 5-10 concurrent at most.
+  attractors: [] as Attractor[],
+  pointerToAttractor: new Map<number, number>() as Map<number, number>,
   fx: {
     bloomIntensity: 0.7,
     bloomThreshold: 4.0,
@@ -340,6 +345,100 @@ const state: AppState = {
     timeScale: 1.0,
   },
 };
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ATTRACTOR LIFECYCLE
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// [LAW:one-source-of-truth] Timing + cap constants own the attractor behavior contract.
+const ATTRACTOR_CHARGE_TIME = 1.5;        // seconds to reach full strength (quadratic ramp)
+const ATTRACTOR_DECAY_MULTIPLIER = 2.0;   // decay duration = this × holdDuration
+const ATTRACTOR_MAX = 32;                 // hard cap; oldest evicted if exceeded
+
+function nowSeconds() { return performance.now() * 0.001; }
+
+// [LAW:dataflow-not-control-flow] Strength is a pure function of (attractor, now). No branches on lifecycle state —
+// the same quadratic formula handles charging and decay through the data (releaseTime < 0 selects which branch of the curve).
+function attractorStrength(a: Attractor, now: number, ceiling: number): number {
+  if (a.releaseTime < 0) {
+    // Charging: quadratic ramp. Rate = 2 × ceiling × elapsed / chargeTime² (accelerating).
+    const t = Math.min(1, (now - a.chargeStart) / ATTRACTOR_CHARGE_TIME);
+    return t * t * ceiling;
+  }
+  // Decaying: quadratic ease-out from peak. (1-t)² drops fast then levels.
+  const peakT = Math.min(1, a.holdDuration / ATTRACTOR_CHARGE_TIME);
+  const peak = peakT * peakT * ceiling;
+  const elapsed = now - a.releaseTime;
+  const decayDur = ATTRACTOR_DECAY_MULTIPLIER * a.holdDuration;
+  if (decayDur <= 0 || elapsed >= decayDur) return 0;
+  const remaining = 1 - elapsed / decayDur;
+  return peak * remaining * remaining;
+}
+
+function attractorDead(a: Attractor, now: number): boolean {
+  if (a.releaseTime < 0) return false;
+  const decayDur = ATTRACTOR_DECAY_MULTIPLIER * a.holdDuration;
+  return (now - a.releaseTime) >= decayDur;
+}
+
+// [LAW:single-enforcer] Pruning happens in exactly one place per frame, before uniform upload.
+// Rebuilds pointerToAttractor index mapping since array indices shift after splice.
+function pruneAttractors(now: number) {
+  const kept: Attractor[] = [];
+  const oldToNew = new Map<number, number>();
+  for (let i = 0; i < state.attractors.length; i++) {
+    const a = state.attractors[i];
+    if (!attractorDead(a, now)) {
+      oldToNew.set(i, kept.length);
+      kept.push(a);
+    }
+  }
+  state.attractors = kept;
+  const newMap = new Map<number, number>();
+  state.pointerToAttractor.forEach((oldIdx, pointerId) => {
+    const newIdx = oldToNew.get(oldIdx);
+    if (newIdx !== undefined) newMap.set(pointerId, newIdx);
+  });
+  state.pointerToAttractor = newMap;
+}
+
+function createAttractor(pointerId: number, pos: number[]): void {
+  // Force-evict oldest if we're at the cap. Oldest by insertion order.
+  if (state.attractors.length >= ATTRACTOR_MAX) {
+    state.attractors.shift();
+    // All indices shift down by 1.
+    const rebuilt = new Map<number, number>();
+    state.pointerToAttractor.forEach((idx, pid) => {
+      if (idx > 0) rebuilt.set(pid, idx - 1);
+    });
+    state.pointerToAttractor = rebuilt;
+  }
+  const now = nowSeconds();
+  state.attractors.push({
+    x: pos[0], y: pos[1], z: pos[2],
+    chargeStart: now, releaseTime: -1, holdDuration: -1,
+  });
+  state.pointerToAttractor.set(pointerId, state.attractors.length - 1);
+}
+
+function moveAttractor(pointerId: number, pos: number[]): void {
+  const idx = state.pointerToAttractor.get(pointerId);
+  if (idx === undefined) return;
+  const a = state.attractors[idx];
+  if (!a || a.releaseTime >= 0) return;
+  a.x = pos[0]; a.y = pos[1]; a.z = pos[2];
+}
+
+function releaseAttractor(pointerId: number): void {
+  const idx = state.pointerToAttractor.get(pointerId);
+  if (idx === undefined) return;
+  state.pointerToAttractor.delete(pointerId);
+  const a = state.attractors[idx];
+  if (!a || a.releaseTime >= 0) return;
+  const now = nowSeconds();
+  a.releaseTime = now;
+  a.holdDuration = Math.max(0.05, now - a.chargeStart); // min 50ms to avoid zero-duration divide
+}
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // SECTION 2: WGSL SHADERS
@@ -517,6 +616,20 @@ type PostFxState = {
   downsampleUBO: GPUBuffer[];   // one per mip level (so we can encode all in one frame)
   upsampleUBO: GPUBuffer[];
   compositeUBO: GPUBuffer | null;
+  // Cached views and bind groups — rebuilt only on resize, not per-frame.
+  sceneViews: GPUTextureView[];        // [0] and [1] for ping-pong
+  bloomMipViews: GPUTextureView[];     // one per mip
+  fadeBGs: GPUBindGroup[];             // [prevIdx] → bind group reading scene[prevIdx]
+  downsampleBGs: GPUBindGroup[];       // [i] → downsample from scene(i=0) or mip[i-1]
+  upsampleBGs: GPUBindGroup[];         // [i] → upsample from mip[i]
+  // Pre-allocated staging arrays to avoid per-frame Float32Array allocations.
+  // [LAW:one-source-of-truth] Explicit ArrayBuffer generic keeps WebGPU writeBuffer calls type-clean — TS 5.7+
+  // widened Float32Array to ArrayBufferLike by default, which GPUAllowSharedBufferSource won't accept.
+  fadeParams: Float32Array<ArrayBuffer>;
+  downsampleParams: Float32Array<ArrayBuffer>[];
+  upsampleParams: Float32Array<ArrayBuffer>[];
+  compositeParams: Float32Array<ArrayBuffer>;
+  compositeBGs: GPUBindGroup[];
 };
 const postFx: PostFxState = {
   scene: [],
@@ -540,6 +653,16 @@ const postFx: PostFxState = {
   downsampleUBO: [],
   upsampleUBO: [],
   compositeUBO: null,
+  sceneViews: [],
+  bloomMipViews: [],
+  fadeBGs: [],
+  downsampleBGs: [],
+  upsampleBGs: [],
+  fadeParams: new Float32Array(4),
+  downsampleParams: [],
+  upsampleParams: [],
+  compositeBGs: [],
+  compositeParams: new Float32Array(148), // 20 header + 32 × 4 attractor slots; matches 592-byte UBO
 };
 const HDR_FORMAT: GPUTextureFormat = 'rgba16float';
 const BLOOM_LEVELS = 3; // 5 mips made the largest blur radius half-screen, fusing dense clusters into a giant white blob.
@@ -616,7 +739,19 @@ function initPostFx(): void {
     postFx.downsampleUBO.push(device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST }));
     postFx.upsampleUBO.push(device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST }));
   }
-  postFx.compositeUBO = device.createBuffer({ size: 80, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+  // [LAW:one-source-of-truth] Composite UBO size must match post.composite.wgsl CompositeParams:
+  // 80 bytes of header + 32 × 16-byte ReticleAttractor = 592 bytes.
+  postFx.compositeUBO = device.createBuffer({ size: 592, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+
+  // Pre-allocate staging arrays — reused every frame instead of allocating new Float32Arrays.
+  postFx.fadeParams = new Float32Array(4);
+  postFx.compositeParams = new Float32Array(148); // 20 header + 32 × 4 attractor slots
+  postFx.downsampleParams = [];
+  postFx.upsampleParams = [];
+  for (let i = 0; i < BLOOM_LEVELS; i++) {
+    postFx.downsampleParams.push(new Float32Array(4));
+    postFx.upsampleParams.push(new Float32Array(4));
+  }
 }
 
 function ensureCompositePipeline(format: GPUTextureFormat): GPURenderPipeline {
@@ -668,6 +803,59 @@ function ensureHdrTargets(width: number, height: number): void {
     h = Math.max(1, Math.floor(h / 2));
   }
   postFx.needsClear = true;
+
+  // Cache texture views — stable until next resize.
+  postFx.sceneViews = postFx.scene.map(t => t.createView());
+  postFx.bloomMipViews = postFx.bloomMips.map(t => t.createView());
+
+  // Cache bind groups for fade (one per scene index as input).
+  postFx.fadeBGs = postFx.sceneViews.map(view =>
+    device.createBindGroup({ layout: postFx.fadeBGL!, entries: [
+      { binding: 0, resource: view },
+      { binding: 1, resource: postFx.linSampler! },
+      { binding: 2, resource: { buffer: postFx.fadeUBO! } },
+    ]})
+  );
+
+  // Cache bind groups for downsample chain.
+  // Index 0 reads scene (two variants for ping-pong); subsequent mips read the previous mip.
+  postFx.downsampleBGs = [];
+  // Two bind groups for mip 0 (one per scene texture)
+  for (let s = 0; s < 2; s++) {
+    postFx.downsampleBGs.push(device.createBindGroup({ layout: postFx.downsampleBGL!, entries: [
+      { binding: 0, resource: postFx.sceneViews[s] },
+      { binding: 1, resource: postFx.linSampler! },
+      { binding: 2, resource: { buffer: postFx.downsampleUBO[0] } },
+    ]}));
+  }
+  // One bind group per subsequent mip level
+  for (let i = 1; i < BLOOM_LEVELS; i++) {
+    postFx.downsampleBGs.push(device.createBindGroup({ layout: postFx.downsampleBGL!, entries: [
+      { binding: 0, resource: postFx.bloomMipViews[i - 1] },
+      { binding: 1, resource: postFx.linSampler! },
+      { binding: 2, resource: { buffer: postFx.downsampleUBO[i] } },
+    ]}));
+  }
+
+  // Cache bind groups for upsample chain.
+  postFx.upsampleBGs = postFx.bloomMipViews.map((view, i) =>
+    device.createBindGroup({ layout: postFx.upsampleBGL!, entries: [
+      { binding: 0, resource: view },
+      { binding: 1, resource: postFx.linSampler! },
+      { binding: 2, resource: { buffer: postFx.upsampleUBO[i] } },
+    ]})
+  );
+
+  // Cache composite bind groups — one per scene index (ping-pong).
+  // The render target (swapchain view) is not part of the bind group.
+  postFx.compositeBGs = postFx.sceneViews.map(sceneView =>
+    device.createBindGroup({ layout: postFx.compositeBGL!, entries: [
+      { binding: 0, resource: sceneView },
+      { binding: 1, resource: postFx.bloomMipViews[0] },
+      { binding: 2, resource: postFx.linSampler! },
+      { binding: 3, resource: { buffer: postFx.compositeUBO! } },
+    ]})
+  );
 }
 
 // Sims call this to get the current HDR scene texture view (the render target).
@@ -778,11 +966,15 @@ async function initWebGPU(): Promise<boolean> {
   }
 
   try {
-    device = await adapter.requestDevice();
+    const wantFeatures: GPUFeatureName[] = [];
+    if (adapter.features.has('timestamp-query')) wantFeatures.push('timestamp-query');
+    device = await adapter.requestDevice({ requiredFeatures: wantFeatures });
   } catch (e) {
     showFallback(`requestDevice() failed: ${(e as Error).message}`);
     return false;
   }
+
+  initGpuTimestamps();
 
   device.lost.then((info) => {
     console.error('WebGPU device lost:', info.message);
@@ -1568,15 +1760,11 @@ function createPhysicsSimulation() {
   bufferA.unmap();
   const bufferB = device.createBuffer({ size: bodyBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC });
 
-  const paramsBuffer = device.createBuffer({ size: 96, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+  // [LAW:one-source-of-truth] Params struct size must match nbody.compute.wgsl:
+  // 96 bytes of header + 32 × 16-byte Attractor = 608 bytes total.
+  const paramsBuffer = device.createBuffer({ size: 608, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
   const cameraBuffer = device.createBuffer({ size: CAMERA_STRIDE * 2, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-  // [LAW:one-source-of-truth] Disk-normal estimation owns its own buffers; the smoothed result lives in the closure below.
-  const reduceParamsBuffer = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-  const reduceOutBuffer = device.createBuffer({ size: 16, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
-  const reduceStaging = device.createBuffer({ size: 16, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
-
   const computeModule = device.createShaderModule({ code: SHADER_NBODY_COMPUTE_EDIT || SHADER_NBODY_COMPUTE });
-  const reduceShaderModule = device.createShaderModule({ code: SHADER_NBODY_REDUCE });
   const renderModule = device.createShaderModule({ code: SHADER_NBODY_RENDER_EDIT || SHADER_NBODY_RENDER });
 
   const computeBGL = device.createBindGroupLayout({
@@ -1592,32 +1780,8 @@ function createPhysicsSimulation() {
     compute: { module: computeModule, entryPoint: 'main' }
   });
 
-  const reduceBGL = device.createBindGroupLayout({
-    entries: [
-      { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
-      { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
-      { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
-    ]
-  });
-  const reducePipeline = device.createComputePipeline({
-    layout: device.createPipelineLayout({ bindGroupLayouts: [reduceBGL] }),
-    compute: { module: reduceShaderModule, entryPoint: 'main' }
-  });
-  const reduceBG = [
-    device.createBindGroup({ layout: reduceBGL, entries: [
-      { binding: 0, resource: { buffer: bufferB } },
-      { binding: 1, resource: { buffer: reduceOutBuffer } },
-      { binding: 2, resource: { buffer: reduceParamsBuffer } },
-    ]}),
-    device.createBindGroup({ layout: reduceBGL, entries: [
-      { binding: 0, resource: { buffer: bufferA } },
-      { binding: 1, resource: { buffer: reduceOutBuffer } },
-      { binding: 2, resource: { buffer: reduceParamsBuffer } },
-    ]}),
-  ];
-  device.queue.writeBuffer(reduceParamsBuffer, 0, new Uint32Array([count]));
-
   // --- Stats reduction: KE, PE, rmsRadius, rmsHeight, angular momentum, total mass ---
+  // [LAW:one-source-of-truth] Disk normal is derived from angular momentum (slots 4-6) in this same pass.
   const statsShaderModule = device.createShaderModule({ code: SHADER_NBODY_STATS });
   const statsBGL = device.createBindGroupLayout({
     entries: [
@@ -1704,12 +1868,12 @@ function createPhysicsSimulation() {
   const depthRef: DepthRef = {};
   // [LAW:one-source-of-truth] Disk normal is owned here; smoothed copy is the only thing the shader ever sees.
   const diskNormal: [number, number, number] = [0, 1, 0];
-  let pendingMap = false;
   const DISK_NORMAL_SMOOTH = 0.02;
   const DISK_L_MIN = 1e-4;
 
   // --- Virial equilibrium controller ---
-  // Reads KE/PE from the stats reduction once per second.
+  // Reads KE/PE + angular momentum from the stats reduction once per second.
+  // Also derives disk normal from angular momentum (slots 4-6).
   // Bidirectional: adjusts BOTH damping (to cool) AND tidal strength (to heat).
   // When virial > target: increase damping to remove energy.
   // When virial < target: increase tidal to inject energy.
@@ -1728,7 +1892,8 @@ function createPhysicsSimulation() {
   let lastStats = { ke: 0, pe: 0, virial: 0, rmsR: 0, rmsH: 0, damping: 1.0, tidal: 0.005 };
 
   // Pre-allocated params staging buffer — avoids GC churn from per-frame ArrayBuffer allocation.
-  const paramsData = new ArrayBuffer(96);
+  // 608 bytes = 96-byte header + 32 × 16-byte Attractor array. Matches nbody.compute.wgsl Params struct.
+  const paramsData = new ArrayBuffer(608);
   const f32 = new Float32Array(paramsData);
   const u32 = new Uint32Array(paramsData);
   const paramsBytes = new Uint8Array(paramsData);
@@ -1736,7 +1901,6 @@ function createPhysicsSimulation() {
   return {
     compute(encoder: GPUCommandEncoder) {
       const p = state.physics;
-      const m = state.mouse;
       // [LAW:one-source-of-truth] G normalized by sqrt(sourceCount) so gravity scales sub-linearly with particle count.
       // Without normalization, 50K particles would have 50x the gravity of 1K. sqrt keeps it manageable.
       // [LAW:one-source-of-truth] dynamicDamping is adjusted by the virial controller — use it instead of p.damping.
@@ -1745,65 +1909,57 @@ function createPhysicsSimulation() {
       u32[5] = MASSIVE_BODY_COUNT;
       f32[6] = p.coreOrbit;
       f32[7] = performance.now() * 0.001;
-      f32[8] = m.down ? m.worldX : 0.0;
-      f32[9] = m.down ? m.worldY : 0.0;
-      f32[10] = m.down ? m.worldZ : 0.0;
-      f32[11] = m.down ? 1.0 : 0.0;
+      // [LAW:single-enforcer] Attractor lifecycle update happens exactly once per frame, here,
+      // before upload. Prune first, then compute strengths and pack.
+      const nowSec = f32[7];
+      pruneAttractors(nowSec);
+      const ceiling = p.interactionStrength ?? 1;
+      const attractors = state.attractors;
+      const attractorN = Math.min(attractors.length, ATTRACTOR_MAX);
+      u32[8] = attractorN;
+      u32[9] = 0; u32[10] = 0; u32[11] = 0; // pad slots (was targetX/Y/Z/active)
       // diskNormal at offsets 12..14, pad at 15
       f32[12] = diskNormal[0]; f32[13] = diskNormal[1]; f32[14] = diskNormal[2];
-      // disk gain sliders 16..22, must match Params struct order in nbody.compute.wgsl
+      // disk gain sliders, must match Params struct order in nbody.compute.wgsl
       f32[16] = p.diskVertDamp ?? 0;
       f32[17] = p.diskRadDamp ?? 0;
       f32[18] = p.diskTangGain ?? 0;
       f32[19] = p.diskVertSpring ?? 0;
       f32[20] = p.diskAlignGain ?? 0;
-      f32[21] = p.interactionStrength ?? 1;
+      f32[21] = 0; // pad (was interactionStrength — now baked into per-attractor strength)
       f32[22] = p.diskTangSpeed ?? 0.5;
       f32[23] = dynamicTidal;
+      // Attractor array at byte offset 96 = f32 index 24. Stride 4 floats per entry (pos.xyz, strength).
+      for (let i = 0; i < attractorN; i++) {
+        const a = attractors[i];
+        const base = 24 + i * 4;
+        f32[base] = a.x;
+        f32[base + 1] = a.y;
+        f32[base + 2] = a.z;
+        f32[base + 3] = attractorStrength(a, nowSec, ceiling);
+      }
+      // Zero any stale slots beyond active count (safety: strength=0 is inert, so not strictly needed, but clean).
+      for (let i = attractorN; i < ATTRACTOR_MAX; i++) {
+        const base = 24 + i * 4;
+        f32[base] = 0; f32[base + 1] = 0; f32[base + 2] = 0; f32[base + 3] = 0;
+      }
       device.queue.writeBuffer(paramsBuffer, 0, paramsBytes);
 
-      const pass = encoder.beginComputePass();
+      const cTsw = tsWrites(0);
+      const pass = encoder.beginComputePass(cTsw ? { timestampWrites: cTsw } : undefined);
       pass.setPipeline(computePipeline);
       pass.setBindGroup(0, computeBG[pingPong]);
-      pass.dispatchWorkgroups(Math.ceil(count / 64));
+      pass.dispatchWorkgroups(Math.ceil(count / 256));
       pass.end();
 
-      // Reduction reads the freshly-written buffer (= input to next main pass).
+      // --- Stats + disk normal reduction: once per second ---
+      // [LAW:one-source-of-truth] Angular momentum (stats slots 4-6) is the single source for disk normal.
+      // Running this once/second instead of every frame eliminates a per-frame GPU pipeline bubble
+      // (single-workgroup serial read of the entire particle buffer was stalling the pipeline).
       const nextPing = 1 - pingPong;
-      const reducePass = encoder.beginComputePass();
-      reducePass.setPipeline(reducePipeline);
-      reducePass.setBindGroup(0, reduceBG[nextPing]);
-      reducePass.dispatchWorkgroups(1);
-      reducePass.end();
-
-      if (!pendingMap) {
-        encoder.copyBufferToBuffer(reduceOutBuffer, 0, reduceStaging, 0, 16);
-        pendingMap = true;
-        device.queue.onSubmittedWorkDone().then(() => {
-          reduceStaging.mapAsync(GPUMapMode.READ).then(() => {
-            const data = new Float32Array(reduceStaging.getMappedRange().slice(0));
-            reduceStaging.unmap();
-            const lx = data[0], ly = data[1], lz = data[2];
-            const lLen = Math.sqrt(lx * lx + ly * ly + lz * lz);
-            // [LAW:dataflow-not-control-flow] When |L| is below threshold, keep the previous normal — never overwrite with garbage.
-            if (lLen > DISK_L_MIN) {
-              const nx = lx / lLen, ny = ly / lLen, nz = lz / lLen;
-              const sx = diskNormal[0] + (nx - diskNormal[0]) * DISK_NORMAL_SMOOTH;
-              const sy = diskNormal[1] + (ny - diskNormal[1]) * DISK_NORMAL_SMOOTH;
-              const sz = diskNormal[2] + (nz - diskNormal[2]) * DISK_NORMAL_SMOOTH;
-              const sLen = Math.sqrt(sx * sx + sy * sy + sz * sz) || 1;
-              diskNormal[0] = sx / sLen; diskNormal[1] = sy / sLen; diskNormal[2] = sz / sLen;
-            }
-            pendingMap = false;
-          }).catch(() => { pendingMap = false; });
-        });
-      }
-
-      // --- Stats reduction: once per second, compute KE/PE and adjust damping ---
       const now = performance.now();
       if (!statsPendingMap && now - lastStatsTime > STATS_INTERVAL_MS) {
         lastStatsTime = now;
-        // Use the same G normalization as the force loop so PE matches the actual potential.
         const Geff = (p.G ?? 1.5) * 0.001 / Math.sqrt(Math.max(1, MASSIVE_BODY_COUNT) / 1000);
         const statsParamsData = new Float32Array(4);
         const statsParamsU32 = new Uint32Array(statsParamsData.buffer);
@@ -1831,25 +1987,34 @@ function createPhysicsSimulation() {
             const pe = d[1];
             const sumR2 = d[2];
             const sumH2 = d[3];
+            const lx = d[4], ly = d[5], lz = d[6];
             const virial = Math.abs(pe) > 0.001 ? (2 * ke) / Math.abs(pe) : 1.0;
             const rmsR = Math.sqrt(sumR2 / Math.max(count, 1));
             const rmsH = Math.sqrt(sumH2 / Math.max(count, 1));
 
             lastStats = { ke, pe, virial, rmsR, rmsH, damping: dynamicDamping, tidal: dynamicTidal };
 
+            // Disk normal from angular momentum — same data the old reduce shader computed separately.
+            const lLen = Math.sqrt(lx * lx + ly * ly + lz * lz);
+            // [LAW:dataflow-not-control-flow] When |L| is below threshold, keep the previous normal.
+            if (lLen > DISK_L_MIN) {
+              const nx = lx / lLen, ny = ly / lLen, nz = lz / lLen;
+              const sx = diskNormal[0] + (nx - diskNormal[0]) * DISK_NORMAL_SMOOTH;
+              const sy = diskNormal[1] + (ny - diskNormal[1]) * DISK_NORMAL_SMOOTH;
+              const sz = diskNormal[2] + (nz - diskNormal[2]) * DISK_NORMAL_SMOOTH;
+              const sLen = Math.sqrt(sx * sx + sy * sy + sz * sz) || 1;
+              diskNormal[0] = sx / sLen; diskNormal[1] = sy / sLen; diskNormal[2] = sz / sLen;
+            }
+
             // Bidirectional virial controller:
             // virial > target → system overheating → increase damping (remove energy)
             // virial < target → system collapsing → increase tidal (inject energy)
             const virialError = virial - TARGET_VIRIAL;
             if (virialError > 0) {
-              // Too hot: increase damping
               dynamicDamping -= virialError * DAMPING_ADJUST_RATE;
-              // Also reduce tidal to stop injecting
               dynamicTidal -= virialError * TIDAL_ADJUST_RATE;
             } else {
-              // Too cold: increase tidal to inject energy
               dynamicTidal -= virialError * TIDAL_ADJUST_RATE;
-              // Also reduce damping to stop removing
               dynamicDamping -= virialError * DAMPING_ADJUST_RATE;
             }
             dynamicDamping = Math.max(DAMPING_MIN, Math.min(DAMPING_MAX, dynamicDamping));
@@ -1865,9 +2030,11 @@ function createPhysicsSimulation() {
       const aspect = viewport ? (viewport[2] / viewport[3]) : (canvas.width / canvas.height);
       device.queue.writeBuffer(cameraBuffer, viewIndex * CAMERA_STRIDE, getCameraUniformData(aspect));
 
+      const rTsw = tsWrites(1);
       const pass = encoder.beginRenderPass({
         colorAttachments: [getColorAttachment(depthRef, textureView, viewport)],
         depthStencilAttachment: getDepthAttachment(depthRef, viewport),
+        ...(rTsw ? { timestampWrites: rTsw } : {}),
       });
 
       const renderViewport = getRenderViewport(viewport);
@@ -1996,7 +2163,6 @@ function createPhysicsSimulation() {
     destroy() {
       bufferA.destroy(); bufferB.destroy();
       paramsBuffer.destroy(); cameraBuffer.destroy();
-      reduceParamsBuffer.destroy(); reduceOutBuffer.destroy(); reduceStaging.destroy();
       statsOutBuffer.destroy(); statsStaging.destroy(); statsParamsBuffer.destroy();
       diagStaging.destroy();
       destroyDepthRef(depthRef);
@@ -3274,6 +3440,19 @@ function screenToWorld(mx: number, my: number) {
   return [dir[0] * spread, dir[1] * spread, dir[2] * spread];
 }
 
+// Unproject screen coords onto a plane through the origin perpendicular to the view direction.
+// Unlike screenToWorld, this does a proper ray-plane intersection with no artificial spread cap.
+function screenToSimPlane(mx: number, my: number) {
+  const { eye, dir } = screenRay(mx, my);
+  // Plane normal = direction from origin toward camera (view-perpendicular, through origin).
+  const n = normalize3(eye);
+  const denom = dot3(dir, n);
+  // Ray nearly parallel to plane — fall back to closest approach to origin.
+  if (Math.abs(denom) < 0.0001) return closestPointOnRayToOrigin(eye, dir);
+  const t = -dot3(eye, n) / denom;
+  return [eye[0] + dir[0] * t, eye[1] + dir[1] * t, eye[2] + dir[2] * t];
+}
+
 // Unproject screen coords onto the fluid plane (y=0) using the shared fluid footprint.
 // Returns [u, v] in 0-1 range, or null if ray misses.
 function screenToFluidUV(mx: number, my: number) {
@@ -3359,12 +3538,17 @@ function setupMouseControls() {
           state.mouse.y = uv[1];
         }
       } else {
+        // [LAW:one-source-of-truth] Ray-plane intersection at y=0 (the simulation disk plane) gives
+        // unlimited spatial reach and stable depth mapping — no artificial spread limit.
+        const hit = screenToSimPlane(mx, my);
         state.mouse.down = true;
-        const wp = screenToWorld(mx, my);
-        state.mouse.worldX = wp[0];
-        state.mouse.worldY = wp[1];
-        state.mouse.worldZ = wp[2];
+        state.mouse.worldX = hit[0];
+        state.mouse.worldY = hit[1];
+        state.mouse.worldZ = hit[2];
         state.mouse.x = mx; state.mouse.y = my;
+        // [LAW:single-enforcer] N-body interaction is owned by the attractor system exclusively.
+        // Other sims still consume state.mouse.worldX/Y/Z; the attractor state is additive, not replacing.
+        if (state.mode === 'physics') createAttractor(e.pointerId, hit);
       }
     } else {
       state.mouse.x = mx; state.mouse.y = my;
@@ -3401,15 +3585,17 @@ function setupMouseControls() {
         }
       } else {
         // Sim interaction (plain drag — no modifier)
+        const hit = screenToSimPlane(mx, my);
         state.mouse.down = true;
-        const wp = screenToWorld(mx, my);
-        state.mouse.worldX = wp[0];
-        state.mouse.worldY = wp[1];
-        state.mouse.worldZ = wp[2];
+        state.mouse.worldX = hit[0];
+        state.mouse.worldY = hit[1];
+        state.mouse.worldZ = hit[2];
         state.mouse.dx = (mx - state.mouse.x) * 10;
         state.mouse.dy = (my - state.mouse.y) * 10;
         state.mouse.x = mx;
         state.mouse.y = my;
+        // Wand behavior: held attractor tracks cursor.
+        if (state.mode === 'physics') moveAttractor(e.pointerId, hit);
       }
     } else {
       // Orbit camera (cmd/ctrl+drag)
@@ -3420,14 +3606,18 @@ function setupMouseControls() {
     }
   });
 
-  c.addEventListener('pointerup', () => {
+  const onPointerRelease = (e: PointerEvent) => {
     if (state.xrEnabled) return;
     dragging = false;
     interacting = false;
     state.mouse.down = false;
     state.mouse.dx = 0;
     state.mouse.dy = 0;
-  });
+    releaseAttractor(e.pointerId); // no-op if pointer wasn't tracked
+  };
+  c.addEventListener('pointerup', onPointerRelease);
+  c.addEventListener('pointercancel', onPointerRelease);
+  c.addEventListener('pointerleave', onPointerRelease);
 
   c.addEventListener('contextmenu', (e) => e.preventDefault());
 
@@ -3455,7 +3645,7 @@ function setupMobileTouchControls() {
   let prevMidY = 0;
 
   // Reuse the same sim-interaction logic as desktop for 1-finger
-  function applySimInteraction(mx: number, my: number, isMove: boolean) {
+  function applySimInteraction(pointerId: number, mx: number, my: number, isMove: boolean) {
     if (state.mode === 'fluid') {
       const uv = screenToFluidUV(mx, my);
       if (!uv) {
@@ -3472,15 +3662,20 @@ function setupMobileTouchControls() {
         state.mouse.y = uv[1];
       }
     } else {
+      const hit = screenToSimPlane(mx, my);
       state.mouse.down = true;
-      const wp = screenToWorld(mx, my);
-      state.mouse.worldX = wp[0];
-      state.mouse.worldY = wp[1];
-      state.mouse.worldZ = wp[2];
+      state.mouse.worldX = hit[0];
+      state.mouse.worldY = hit[1];
+      state.mouse.worldZ = hit[2];
       state.mouse.dx = isMove ? (mx - state.mouse.x) * 10 : 0;
       state.mouse.dy = isMove ? (my - state.mouse.y) * 10 : 0;
       state.mouse.x = mx;
       state.mouse.y = my;
+      // Wand: create on touch-start, track on move.
+      if (state.mode === 'physics') {
+        if (isMove) moveAttractor(pointerId, hit);
+        else createAttractor(pointerId, hit);
+      }
     }
   }
 
@@ -3496,11 +3691,13 @@ function setupMobileTouchControls() {
       const my = 1.0 - (e.clientY - rect.top) / rect.height;
       state.mouse.dx = 0;
       state.mouse.dy = 0;
-      applySimInteraction(mx, my, false);
+      applySimInteraction(e.pointerId, mx, my, false);
     }
     // 2 fingers: initialize pinch/orbit baseline, stop sim interaction
     if (pointers.size === 2) {
       setSimulationInteractionInactive();
+      // Release all held attractors — transitioning to orbit mode.
+      pointers.forEach((_, pid) => releaseAttractor(pid));
       const pts = [...pointers.values()];
       prevMidX = (pts[0].x + pts[1].x) / 2;
       prevMidY = (pts[0].y + pts[1].y) / 2;
@@ -3519,7 +3716,7 @@ function setupMobileTouchControls() {
       const rect = c.getBoundingClientRect();
       const mx = (e.clientX - rect.left) / rect.width;
       const my = 1.0 - (e.clientY - rect.top) / rect.height;
-      applySimInteraction(mx, my, true);
+      applySimInteraction(e.pointerId, mx, my, true);
     } else if (pointers.size === 2) {
       // 2 fingers: orbit + pinch zoom
       const pts = [...pointers.values()];
@@ -3547,6 +3744,7 @@ function setupMobileTouchControls() {
 
   const onPointerEnd = (e: PointerEvent) => {
     pointers.delete(e.pointerId);
+    releaseAttractor(e.pointerId); // no-op if not tracked as attractor
     if (pointers.size === 0) {
       state.mouse.down = false;
       state.mouse.dx = 0;
@@ -3555,13 +3753,13 @@ function setupMobileTouchControls() {
     }
     // If going from 2→1 finger, re-initialize the remaining finger as sim interaction start
     if (pointers.size === 1) {
-      const [remaining] = pointers.values();
+      const [remainingId, remaining] = [...pointers.entries()][0];
       const rect = c.getBoundingClientRect();
       const mx = (remaining.x - rect.left) / rect.width;
       const my = 1.0 - (remaining.y - rect.top) / rect.height;
       state.mouse.dx = 0;
       state.mouse.dy = 0;
-      applySimInteraction(mx, my, false);
+      applySimInteraction(remainingId, mx, my, false);
     }
   };
   c.addEventListener('pointerup', onPointerEnd);
@@ -4175,10 +4373,15 @@ function updateXrUiInput(frame: XRFrame): void {
   xrUiState.hover = 'none';
 }
 
+// Synthetic pointer id for the single XR interaction channel — keeps the attractor
+// system's per-pointer-id contract uniform across desktop/mobile/XR.
+const XR_ATTRACTOR_POINTER_ID = -1;
+
 function setXRInteractionSource(inputSource: XRInputSource | null) {
   xrInteractionSource = inputSource;
   xrInteractionHasSample = false;
   setSimulationInteractionInactive();
+  releaseAttractor(XR_ATTRACTOR_POINTER_ID); // harmless if none held
 }
 
 function getXRTargetRayDirection(transform: XRRigidTransform) {
@@ -4244,6 +4447,12 @@ function updateXRSimulationInteraction(frame: XRFrame) {
     state.mouse.dy = 0;
     state.mouse.x = worldPoint[0];
     state.mouse.y = worldPoint[1];
+  }
+
+  // Wand via XR pinch: create on first sample, track on each subsequent sample.
+  if (state.mode === 'physics') {
+    if (xrInteractionHasSample) moveAttractor(XR_ATTRACTOR_POINTER_ID, worldPoint);
+    else createAttractor(XR_ATTRACTOR_POINTER_ID, worldPoint);
   }
 
   xrInteractionHasSample = true;
@@ -4493,9 +4702,9 @@ function xrFrame(time: DOMHighResTimeStamp, xrFrameData: XRFrame) {
       renderXrUi(uiPass, width / height, viewIndex);
       uiPass.end();
 
-      runBloomChain(encoder, postFx.scene[sceneIdx]);
+      runBloomChain(encoder);
       const ctFormat = subImage.colorTexture.format;
-      runComposite(encoder, postFx.scene[sceneIdx], textureView, ctFormat, [x, y, width, height]);
+      runComposite(encoder, textureView, ctFormat, [x, y, width, height]);
     }
 
     // Clear overrides after all eyes are encoded — desktop frame loop must not inherit XR state.
@@ -4515,6 +4724,70 @@ function xrFrame(time: DOMHighResTimeStamp, xrFrameData: XRFrame) {
 let frameCount = 0;
 let fpsTime = 0;
 let currentFps = 0;
+
+// --- GPU profiling ---
+// Two paths: GPU timestamp queries (Safari/Metal) give per-pass C/R/P breakdown.
+// JS-side onSubmittedWorkDone fallback (Chrome/all) gives total frame GPU time.
+let gpuFrameMs = 0;
+let gpuTimingDetail = { compute: 0, render: 0, post: 0 };
+let profilingPending = false;
+let lastProfileTime = 0;
+const PROFILE_INTERVAL_MS = 2000;
+
+// GPU timestamp query state (null if unsupported)
+const GPU_TS_COUNT = 6; // 3 pass pairs (begin/end): compute, render, composite
+let gpuTs: { querySet: GPUQuerySet; resolveBuf: GPUBuffer; stagingBuf: GPUBuffer; pending: boolean } | null = null;
+
+function initGpuTimestamps() {
+  if (!device.features.has('timestamp-query')) return;
+  gpuTs = {
+    querySet: device.createQuerySet({ type: 'timestamp', count: GPU_TS_COUNT }),
+    resolveBuf: device.createBuffer({ size: GPU_TS_COUNT * 8, usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC }),
+    stagingBuf: device.createBuffer({ size: GPU_TS_COUNT * 8, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ }),
+    pending: false,
+  };
+}
+
+function tsWrites(slotPair: number): { querySet: GPUQuerySet; beginningOfPassWriteIndex: number; endOfPassWriteIndex: number } | undefined {
+  if (!gpuTs) return undefined;
+  return { querySet: gpuTs.querySet, beginningOfPassWriteIndex: slotPair * 2, endOfPassWriteIndex: slotPair * 2 + 1 };
+}
+
+function resolveTimestamps(encoder: GPUCommandEncoder, now: number) {
+  if (!gpuTs || gpuTs.pending || now - lastProfileTime < PROFILE_INTERVAL_MS) return;
+  lastProfileTime = now;
+  encoder.resolveQuerySet(gpuTs.querySet, 0, GPU_TS_COUNT, gpuTs.resolveBuf, 0);
+  encoder.copyBufferToBuffer(gpuTs.resolveBuf, 0, gpuTs.stagingBuf, 0, GPU_TS_COUNT * 8);
+  gpuTs.pending = true;
+  const ts = gpuTs;
+  device.queue.onSubmittedWorkDone().then(() => {
+    ts.stagingBuf.mapAsync(GPUMapMode.READ).then(() => {
+      const ns = new BigInt64Array(ts.stagingBuf.getMappedRange().slice(0));
+      ts.stagingBuf.unmap();
+      ts.pending = false;
+      const toMs = (a: bigint, b: bigint) => Number(b - a) / 1_000_000;
+      gpuTimingDetail = {
+        compute: toMs(ns[0], ns[1]),
+        render: toMs(ns[2], ns[3]),
+        post: toMs(ns[4], ns[5]),
+      };
+      gpuFrameMs = toMs(ns[0], ns[5]);
+    }).catch(() => { ts.pending = false; });
+  });
+}
+
+// JS-side fallback: total frame GPU time (when timestamps unavailable).
+function measureGpuFrame(now: number) {
+  if (gpuTs) return; // timestamps handle it
+  if (profilingPending || now - lastProfileTime < PROFILE_INTERVAL_MS) return;
+  lastProfileTime = now;
+  profilingPending = true;
+  const t0 = performance.now();
+  device.queue.onSubmittedWorkDone().then(() => {
+    gpuFrameMs = performance.now() - t0;
+    profilingPending = false;
+  }).catch(() => { profilingPending = false; });
+}
 
 // [LAW:single-enforcer] All sim creation funnels through here, so error surfacing
 // (both sync throws and async GPU validation errors) happens in exactly one place.
@@ -4598,7 +4871,12 @@ function resetCurrentSim() {
 }
 
 function updateStats() {
-  document.getElementById('stat-fps')!.textContent = `FPS: ${currentFps}`;
+  const msPerFrame = currentFps > 0 ? (1000 / currentFps).toFixed(1) : '--';
+  const d = gpuTimingDetail;
+  const gpuDetail = d.compute > 0
+    ? ` (C:${d.compute.toFixed(1)} R:${d.render.toFixed(1)} P:${d.post.toFixed(1)})`
+    : gpuFrameMs > 0 ? ` gpu:${gpuFrameMs.toFixed(1)}ms` : '';
+  document.getElementById('stat-fps')!.textContent = `${currentFps} fps ${msPerFrame}ms${gpuDetail}`;
   const sim = simulations[state.mode];
   const count = sim ? sim.getCount() : '--';
   document.getElementById('stat-count')!.textContent =
@@ -4622,17 +4900,18 @@ function resizeCanvas() {
 // After: composite is written into `finalView` (canvas swapchain or XR compositor texture).
 // `prevSceneIdx` (passed in) is the texture the fade pass should READ FROM (the previous frame's scene).
 function runFadePass(encoder: GPUCommandEncoder, prevSceneIdx: number, currSceneIdx: number) {
-  if (postFx.needsClear) return; // skip — sim's loadOp:clear handles it
+  if (postFx.needsClear) return;
   const persistence = state.fx.trailPersistence;
-  if (persistence < 0.001) return; // trails disabled — sim's loadOp:clear handles it
-  device.queue.writeBuffer(postFx.fadeUBO!, 0, new Float32Array([persistence, 0, 0, 0]));
+  if (persistence < 0.001) return;
+  postFx.fadeParams[0] = persistence;
+  device.queue.writeBuffer(postFx.fadeUBO!, 0, postFx.fadeParams);
   const bg = device.createBindGroup({ layout: postFx.fadeBGL!, entries: [
-    { binding: 0, resource: postFx.scene[prevSceneIdx].createView() },
+    { binding: 0, resource: postFx.sceneViews[prevSceneIdx] },
     { binding: 1, resource: postFx.linSampler! },
     { binding: 2, resource: { buffer: postFx.fadeUBO! } },
   ]});
   const pass = encoder.beginRenderPass({ colorAttachments: [{
-    view: postFx.scene[currSceneIdx].createView(),
+    view: postFx.sceneViews[currSceneIdx],
     clearValue: DEFAULT_CLEAR_COLOR,
     loadOp: 'clear',
     storeOp: 'store',
@@ -4643,26 +4922,24 @@ function runFadePass(encoder: GPUCommandEncoder, prevSceneIdx: number, currScene
   pass.end();
 }
 
-function runBloomChain(encoder: GPUCommandEncoder, sceneTex: GPUTexture) {
+function runBloomChain(encoder: GPUCommandEncoder) {
   const fx = state.fx;
-  // Downsample chain: scene → mip0 → mip1 → ... → mip4
+  // Downsample chain: scene → mip0 → mip1 → ... → mipN
+  const sceneIdx = postFx.sceneIdx;
   for (let i = 0; i < BLOOM_LEVELS; i++) {
-    const src = i === 0 ? sceneTex : postFx.bloomMips[i - 1];
-    const dst = postFx.bloomMips[i];
-    const srcW = src.width;
-    const srcH = src.height;
-    device.queue.writeBuffer(postFx.downsampleUBO[i], 0, new Float32Array([
-      1.0 / srcW, 1.0 / srcH,
-      fx.bloomThreshold,
-      i === 0 ? 1.0 : 0.0,
-    ]));
+    const srcView = i === 0 ? postFx.sceneViews[sceneIdx] : postFx.bloomMipViews[i - 1];
+    const src = i === 0 ? postFx.scene[sceneIdx] : postFx.bloomMips[i - 1];
+    const p = postFx.downsampleParams[i];
+    p[0] = 1.0 / src.width; p[1] = 1.0 / src.height;
+    p[2] = fx.bloomThreshold; p[3] = i === 0 ? 1.0 : 0.0;
+    device.queue.writeBuffer(postFx.downsampleUBO[i], 0, p);
     const bg = device.createBindGroup({ layout: postFx.downsampleBGL!, entries: [
-      { binding: 0, resource: src.createView() },
+      { binding: 0, resource: srcView },
       { binding: 1, resource: postFx.linSampler! },
       { binding: 2, resource: { buffer: postFx.downsampleUBO[i] } },
     ]});
     const pass = encoder.beginRenderPass({ colorAttachments: [{
-      view: dst.createView(),
+      view: postFx.bloomMipViews[i],
       clearValue: { r: 0, g: 0, b: 0, a: 1 },
       loadOp: 'clear',
       storeOp: 'store',
@@ -4672,23 +4949,20 @@ function runBloomChain(encoder: GPUCommandEncoder, sceneTex: GPUTexture) {
     pass.draw(3);
     pass.end();
   }
-  // Upsample chain: mip4 → mip3 (additive), mip3 → mip2 (additive), ..., mip1 → mip0 (additive).
-  // The smaller mip's content is added on top of the larger mip's existing data.
+  // Upsample chain: mipN → mipN-1 (additive), ..., mip1 → mip0 (additive).
   for (let i = BLOOM_LEVELS - 1; i > 0; i--) {
     const src = postFx.bloomMips[i];
-    const dst = postFx.bloomMips[i - 1];
-    device.queue.writeBuffer(postFx.upsampleUBO[i], 0, new Float32Array([
-      1.0 / src.width, 1.0 / src.height,
-      fx.bloomRadius,
-      0,
-    ]));
+    const p = postFx.upsampleParams[i];
+    p[0] = 1.0 / src.width; p[1] = 1.0 / src.height;
+    p[2] = fx.bloomRadius;
+    device.queue.writeBuffer(postFx.upsampleUBO[i], 0, p);
     const bg = device.createBindGroup({ layout: postFx.upsampleBGL!, entries: [
-      { binding: 0, resource: src.createView() },
+      { binding: 0, resource: postFx.bloomMipViews[i] },
       { binding: 1, resource: postFx.linSampler! },
       { binding: 2, resource: { buffer: postFx.upsampleUBO[i] } },
     ]});
     const pass = encoder.beginRenderPass({ colorAttachments: [{
-      view: dst.createView(),
+      view: postFx.bloomMipViews[i - 1],
       clearValue: { r: 0, g: 0, b: 0, a: 1 },
       loadOp: 'load',
       storeOp: 'store',
@@ -4700,60 +4974,84 @@ function runBloomChain(encoder: GPUCommandEncoder, sceneTex: GPUTexture) {
   }
 }
 
-function runComposite(encoder: GPUCommandEncoder, sceneTex: GPUTexture, finalView: GPUTextureView, finalFormat: GPUTextureFormat, viewport: number[] | null = null) {
+function runComposite(encoder: GPUCommandEncoder, finalView: GPUTextureView, finalFormat: GPUTextureFormat, viewport: number[] | null = null) {
   const fx = state.fx;
   const tc = getThemeColors();
-  const m = state.mouse;
-  const buf = new Float32Array(20);
+  const buf = postFx.compositeParams;
+  const u32buf = new Uint32Array(buf.buffer);
   buf[0] = fx.bloomIntensity;
   buf[1] = fx.exposure;
   buf[2] = fx.vignette;
   buf[3] = fx.chromaticAberration;
   buf[4] = fx.grading;
 
-  // [LAW:dataflow-not-control-flow] Interaction screen projection always runs; interactActive of zero makes the shader term inert.
-  // Project world-space interaction point to screen UV for composite shockwave.
+  // [LAW:single-enforcer] One matrix setup, reused for every attractor projection below.
   const aspect = viewport ? (viewport[2] / viewport[3]) : (canvas.width / canvas.height);
   const fovRad = state.camera.fov * Math.PI / 180;
   const orbitCam = getOrbitCamera();
   const viewMat = xrCameraOverride ? xrCameraOverride.viewMatrix : orbitCam.view;
   const projMat = xrCameraOverride ? xrCameraOverride.projMatrix : mat4.perspective(fovRad, aspect, 0.01, DESKTOP_CAMERA_FAR);
-  // Transform world pos through view then projection
-  const wx = m.worldX, wy = m.worldY, wz = m.worldZ;
-  const vx = viewMat[0]*wx + viewMat[4]*wy + viewMat[8]*wz + viewMat[12];
-  const vy = viewMat[1]*wx + viewMat[5]*wy + viewMat[9]*wz + viewMat[13];
-  const vz = viewMat[2]*wx + viewMat[6]*wy + viewMat[10]*wz + viewMat[14];
-  const vw = viewMat[3]*wx + viewMat[7]*wy + viewMat[11]*wz + viewMat[15];
-  const cx = projMat[0]*vx + projMat[4]*vy + projMat[8]*vz + projMat[12]*vw;
-  const cy = projMat[1]*vx + projMat[5]*vy + projMat[9]*vz + projMat[13]*vw;
-  const cw = projMat[3]*vx + projMat[7]*vy + projMat[11]*vz + projMat[15]*vw;
-  const ndcX = cw !== 0 ? cx / cw : 0;
-  const ndcY = cw !== 0 ? cy / cw : 0;
-  // NDC [-1,1] → UV [0,1], with Y flipped to match texture coords
-  buf[5] = ndcX * 0.5 + 0.5;
-  buf[6] = 1.0 - (ndcY * 0.5 + 0.5);
-  buf[7] = m.down ? 1.0 : 0.0;
+
+  // [LAW:one-source-of-truth] Attractor strengths re-derived from the same state.attractors array the compute
+  // shader reads (via the N-body param packing). Projection from world-space to screen UV happens once per
+  // attractor, per frame — ~32 matrix ops max, dwarfed by the render pass itself.
+  const nowSec = performance.now() * 0.001;
+  const ceiling = (state.physics as { interactionStrength?: number }).interactionStrength ?? 1;
+  const attractors = state.attractors;
+  const attractorN = Math.min(attractors.length, ATTRACTOR_MAX);
+  u32buf[5] = attractorN; // attractorCount as u32
+  buf[6] = 0; buf[7] = 0; // pad slots
 
   buf[8] = tc.primary[0]; buf[9] = tc.primary[1]; buf[10] = tc.primary[2];
   // pad 11
   buf[12] = tc.accent[0]; buf[13] = tc.accent[1]; buf[14] = tc.accent[2];
   // pad 15
-  buf[16] = performance.now() * 0.001;
+  buf[16] = nowSec;
+  // pad 17..19
+
+  // Attractor array at byte offset 80 = f32 index 20. Each entry: (screenX, screenY, strength, pad) = 4 floats.
+  for (let i = 0; i < attractorN; i++) {
+    const a = attractors[i];
+    const wx = a.x, wy = a.y, wz = a.z;
+    const vx = viewMat[0]*wx + viewMat[4]*wy + viewMat[8]*wz + viewMat[12];
+    const vy = viewMat[1]*wx + viewMat[5]*wy + viewMat[9]*wz + viewMat[13];
+    const vz = viewMat[2]*wx + viewMat[6]*wy + viewMat[10]*wz + viewMat[14];
+    const vw = viewMat[3]*wx + viewMat[7]*wy + viewMat[11]*wz + viewMat[15];
+    const cx = projMat[0]*vx + projMat[4]*vy + projMat[8]*vz + projMat[12]*vw;
+    const cy = projMat[1]*vx + projMat[5]*vy + projMat[9]*vz + projMat[13]*vw;
+    const cw = projMat[3]*vx + projMat[7]*vy + projMat[11]*vz + projMat[15]*vw;
+    const ndcX = cw !== 0 ? cx / cw : 0;
+    const ndcY = cw !== 0 ? cy / cw : 0;
+    const base = 20 + i * 4;
+    buf[base] = ndcX * 0.5 + 0.5;
+    buf[base + 1] = 1.0 - (ndcY * 0.5 + 0.5);
+    buf[base + 2] = attractorStrength(a, nowSec, ceiling);
+    buf[base + 3] = 0;
+  }
+  // Zero any trailing slots beyond active count (strength=0 is inert anyway, but keeps the buffer clean).
+  for (let i = attractorN; i < ATTRACTOR_MAX; i++) {
+    const base = 20 + i * 4;
+    buf[base] = 0; buf[base + 1] = 0; buf[base + 2] = 0; buf[base + 3] = 0;
+  }
   device.queue.writeBuffer(postFx.compositeUBO!, 0, buf);
 
   const pipeline = ensureCompositePipeline(finalFormat);
   const bg = device.createBindGroup({ layout: postFx.compositeBGL!, entries: [
-    { binding: 0, resource: sceneTex.createView() },
-    { binding: 1, resource: postFx.bloomMips[0].createView() },
+    { binding: 0, resource: postFx.sceneViews[postFx.sceneIdx] },
+    { binding: 1, resource: postFx.bloomMipViews[0] },
     { binding: 2, resource: postFx.linSampler! },
     { binding: 3, resource: { buffer: postFx.compositeUBO! } },
   ]});
-  const pass = encoder.beginRenderPass({ colorAttachments: [{
-    view: finalView,
-    clearValue: { r: 0, g: 0, b: 0, a: 1 },
-    loadOp: 'clear',
-    storeOp: 'store',
-  }]});
+  const pTsw = tsWrites(2);
+  const pass = encoder.beginRenderPass({
+    colorAttachments: [{
+      view: finalView,
+      clearValue: { r: 0, g: 0, b: 0, a: 1 },
+      loadOp: 'clear',
+      storeOp: 'store',
+    }],
+    ...(pTsw ? { timestampWrites: pTsw } : {}),
+  });
   pass.setPipeline(pipeline);
   pass.setBindGroup(0, bg);
   if (viewport) pass.setViewport(viewport[0], viewport[1], viewport[2], viewport[3], 0, 1);
@@ -4784,9 +5082,10 @@ function frame(now: DOMHighResTimeStamp) {
   // (set up in initWebGPU) which surfaces them in the error overlay without per-frame
   // scope overhead. Targeted scopes in ensureSimulation() handle creation-time errors.
   const mode = state.mode;
-  const encoder = device.createCommandEncoder();
 
   try {
+    const encoder = device.createCommandEncoder();
+
     if (!state.paused) {
       sim.compute(encoder);
     }
@@ -4795,19 +5094,17 @@ function frame(now: DOMHighResTimeStamp) {
     const currIdx = 1 - prevIdx;
     postFx.sceneIdx = currIdx;
 
-    // Trail decay (no-op if trails disabled or first frame after clear)
     runFadePass(encoder, prevIdx, currIdx);
 
-    // Sim renders into HDR scene[currIdx] (loadOp determined by getColorAttachment).
-    const sceneViewDummy = postFx.scene[currIdx].createView();
-    sim.render(encoder, sceneViewDummy, null);
+    sim.render(encoder, postFx.sceneViews[currIdx], null);
 
-    // Bloom + composite
-    runBloomChain(encoder, postFx.scene[currIdx]);
+    runBloomChain(encoder);
     const swapchainView = context.getCurrentTexture().createView();
-    runComposite(encoder, postFx.scene[currIdx], swapchainView, canvasFormat);
+    runComposite(encoder, swapchainView, canvasFormat);
 
+    resolveTimestamps(encoder, now);
     device.queue.submit([encoder.finish()]);
+    measureGpuFrame(now);
 
     postFx.needsClear = false;
   } catch (e) {
@@ -4950,10 +5247,11 @@ async function main() {
     for (const b of buttons) { if (b.textContent?.trim() === name) { (b as HTMLButtonElement).click(); return 'ok'; } }
     return 'preset not found';
   };
-  (window as any).__simState = () => ({ mode: state.mode, ...state[state.mode] as any, fps: currentFps });
+  (window as any).__simState = () => ({ mode: state.mode, ...state[state.mode] as any, fps: currentFps, gpuMs: gpuFrameMs, gpuDetail: gpuTimingDetail });
   (window as any).__simStats = () => {
     const sim = simulations[state.mode];
-    return (sim as any)?.getStats ? (sim as any).getStats() : { error: 'no stats on this sim' };
+    const stats = (sim as any)?.getStats ? (sim as any).getStats() : { error: 'no stats on this sim' };
+    return { ...stats, gpuMs: gpuFrameMs, gpuDetail: gpuTimingDetail };
   };
 }
 

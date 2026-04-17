@@ -121,6 +121,13 @@ export interface FxParams {
   timeScale: number;
 }
 
+export interface Attractor {
+  x: number; y: number; z: number;
+  chargeStart: number;
+  releaseTime: number;
+  holdDuration: number;
+}
+
 export interface AppState {
   mode: SimMode;
   colorTheme: string;
@@ -134,6 +141,8 @@ export interface AppState {
   reaction: ReactionParams;
   camera: CameraState;
   mouse: MouseState;
+  attractors: Attractor[];
+  pointerToAttractor: Map<number, number>;
   fx: FxParams;
 }
 
