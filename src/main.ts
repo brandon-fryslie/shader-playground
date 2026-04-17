@@ -36,10 +36,10 @@ const DEFAULTS: ModeParamsMap = {
     maxSpeed: 2.0, maxForce: 0.05, visualRange: 100
   },
   physics: {
-    count: 80000, G: 1.0, softening: 1.5, damping: 1.0, coreOrbit: 0.28, distribution: 'disk',
+    count: 80000, G: 1.0, softening: 1.5, distribution: 'disk',
     interactionStrength: 1.0, tidalStrength: 0.008,
-    diskVertDamp: 3.0, diskRadDamp: 0.8, diskTangGain: 0.8, diskTangSpeed: 0.6,
-    diskVertSpring: 1.5, diskAlignGain: 0.4,
+    attractorDecayRatio: 0.5, attractorDecayCap: 2.0,
+    haloMass: 5.0, haloScale: 2.0, diskMass: 3.0, diskScaleA: 1.5, diskScaleB: 0.3,
   },
   physics_classic: {
     // Verbatim defaults from the original shader-playground for fair A/B comparison.
@@ -76,19 +76,25 @@ const PRESETS: Record<SimMode, Record<string, Record<string, number | string>>> 
     'Slow Dance':  { count: 500, separationRadius: 40, alignmentRadius: 80, cohesionRadius: 100, maxSpeed: 0.5, maxForce: 0.01, visualRange: 150 },
   },
   physics: {
-    'Default':    { ...DEFAULTS.physics },
-    'Spiral Galaxy': { count: 100000, G: 1.5, softening: 0.15, damping: 1.0, coreOrbit: 0.0, distribution: 'spiral',
-                    interactionStrength: 1.0, tidalStrength: 0.005, diskVertDamp: 1.0, diskRadDamp: 0.0, diskTangGain: 0.0, diskTangSpeed: 0.5, diskVertSpring: 0.3, diskAlignGain: 0.0 },
-    'Cosmic Web':  { count: 80000, G: 0.8, softening: 2.0, damping: 1.0, coreOrbit: 0.0, distribution: 'web',
-                    interactionStrength: 1.0, tidalStrength: 0.025, diskVertDamp: 0.0, diskRadDamp: 0.0, diskTangGain: 0.0, diskTangSpeed: 0.5, diskVertSpring: 0.0, diskAlignGain: 0.0 },
-    'Star Cluster': { count: 60000, G: 0.3, softening: 1.2, damping: 1.0, coreOrbit: 0.15, distribution: 'cluster',
-                    interactionStrength: 1.0, tidalStrength: 0.001, diskVertDamp: 0.0, diskRadDamp: 0.0, diskTangGain: 0.0, diskTangSpeed: 0.5, diskVertSpring: 0.0, diskAlignGain: 0.0 },
-    'Maelstrom':  { count: 120000, G: 0.25, softening: 2.5, damping: 1.0, coreOrbit: 0.4, distribution: 'maelstrom',
-                    interactionStrength: 1.5, tidalStrength: 0.005, diskVertDamp: 7.0, diskRadDamp: 1.5, diskTangGain: 2.0, diskTangSpeed: 3.5, diskVertSpring: 3.0, diskAlignGain: 0.8 },
-    'Dust Cloud': { count: 150000, G: 0.08, softening: 3.5, damping: 1.0, coreOrbit: 0.0, distribution: 'dust',
-                    interactionStrength: 0.5, tidalStrength: 0.003, diskVertDamp: 0.0, diskRadDamp: 0.0, diskTangGain: 0.0, diskTangSpeed: 0.5, diskVertSpring: 0.0, diskAlignGain: 0.0 },
-    'Binary':     { count: 80000, G: 0.6, softening: 1.0, damping: 1.0, coreOrbit: 0.2, distribution: 'binary',
-                    interactionStrength: 1.0, tidalStrength: 0.04, diskVertDamp: 2.0, diskRadDamp: 0.3, diskTangGain: 0.5, diskTangSpeed: 1.2, diskVertSpring: 0.8, diskAlignGain: 0.15 },
+    'Default':       { ...DEFAULTS.physics },
+    'Spiral Galaxy': { count: 100000, G: 1.5, softening: 0.15, distribution: 'spiral',
+                       interactionStrength: 1.0, tidalStrength: 0.005,
+                       haloMass: 8.0, haloScale: 2.5, diskMass: 4.0, diskScaleA: 1.2, diskScaleB: 0.15 },
+    'Cosmic Web':    { count: 80000, G: 0.8, softening: 2.0, distribution: 'web',
+                       interactionStrength: 1.0, tidalStrength: 0.025,
+                       haloMass: 2.0, haloScale: 4.0, diskMass: 0.0, diskScaleA: 1.5, diskScaleB: 0.3 },
+    'Star Cluster':  { count: 60000, G: 0.3, softening: 1.2, distribution: 'cluster',
+                       interactionStrength: 1.0, tidalStrength: 0.001,
+                       haloMass: 3.0, haloScale: 1.5, diskMass: 0.0, diskScaleA: 1.0, diskScaleB: 0.5 },
+    'Maelstrom':     { count: 120000, G: 0.25, softening: 2.5, distribution: 'maelstrom',
+                       interactionStrength: 1.5, tidalStrength: 0.005,
+                       haloMass: 6.0, haloScale: 1.8, diskMass: 5.0, diskScaleA: 0.8, diskScaleB: 0.2 },
+    'Dust Cloud':    { count: 150000, G: 0.08, softening: 3.5, distribution: 'dust',
+                       interactionStrength: 0.5, tidalStrength: 0.003,
+                       haloMass: 1.0, haloScale: 5.0, diskMass: 0.0, diskScaleA: 2.0, diskScaleB: 0.5 },
+    'Binary':        { count: 80000, G: 0.6, softening: 1.0, distribution: 'binary',
+                       interactionStrength: 1.0, tidalStrength: 0.04,
+                       haloMass: 4.0, haloScale: 2.0, diskMass: 2.0, diskScaleA: 1.0, diskScaleB: 0.25 },
   },
   physics_classic: {
     'Default':  { ...DEFAULTS.physics_classic },
@@ -137,21 +143,20 @@ const PARAM_DEFS: Record<SimMode, ParamSection[]> = {
       { key: 'count', label: 'Bodies', min: 10, max: 150000, step: 10, requiresReset: true },
       { key: 'G', label: 'Gravity (G)', min: 0.05, max: 5.0, step: 0.01 },
       { key: 'softening', label: 'Softening', min: 0.2, max: 4.0, step: 0.05 },
-      { key: 'damping', label: 'Damping', min: 0.98, max: 1.0, step: 0.0005 },
-      { key: 'coreOrbit', label: 'Core Friction', min: 0.0, max: 0.8, step: 0.01 },
       { key: 'interactionStrength', label: 'Interaction Pull', min: 0.1, max: 3.0, step: 0.05 },
+      { key: 'attractorDecayRatio', label: 'Decay Ratio', min: 0.1, max: 4.0, step: 0.05 },
+      { key: 'attractorDecayCap', label: 'Decay Cap (s)', min: 0.5, max: 10.0, step: 0.1 },
       { key: 'tidalStrength', label: 'Tidal Field', min: 0.0, max: 0.05, step: 0.0005 },
     ]},
     { section: 'Initial State', params: [
       { key: 'distribution', label: 'Distribution', type: 'dropdown', options: ['random', 'disk', 'shell'] },
     ]},
-    { section: 'Disk Recovery', params: [
-      { key: 'diskVertDamp', label: 'Vertical Damp', min: 0.0, max: 8.0, step: 0.05 },
-      { key: 'diskRadDamp', label: 'Radial Damp', min: 0.0, max: 3.0, step: 0.01 },
-      { key: 'diskTangGain', label: 'Tangential Nudge', min: 0.0, max: 3.0, step: 0.01 },
-      { key: 'diskTangSpeed', label: 'Orbit Speed', min: 0.1, max: 4.0, step: 0.01 },
-      { key: 'diskVertSpring', label: 'Plane Spring', min: 0.0, max: 5.0, step: 0.05 },
-      { key: 'diskAlignGain', label: 'Flow Align', min: 0.0, max: 1.5, step: 0.01 },
+    { section: 'Dark Matter', params: [
+      { key: 'haloMass', label: 'Halo Mass', min: 0.0, max: 15.0, step: 0.1 },
+      { key: 'haloScale', label: 'Halo Scale', min: 0.5, max: 8.0, step: 0.1 },
+      { key: 'diskMass', label: 'Disk Mass', min: 0.0, max: 10.0, step: 0.1 },
+      { key: 'diskScaleA', label: 'Disk Scale A', min: 0.1, max: 5.0, step: 0.05 },
+      { key: 'diskScaleB', label: 'Disk Scale B', min: 0.05, max: 2.0, step: 0.01 },
     ]},
   ],
   physics_classic: [
@@ -1462,11 +1467,26 @@ function createPhysicsSimulation() {
   const MEDIUM_BODY_RADIUS_MAX = 4.0;
   const BIG_BODY_HEIGHT = 0.12;
   const MEDIUM_BODY_HEIGHT = 0.2;
-  // Init speed matches diskTangSpeed — the disk recovery tangential nudge targets this speed,
-  // so seeding at the same value means the system starts in equilibrium.
-  const initTangSpeed = state.physics.diskTangSpeed ?? 0.6;
-  const BIG_BODY_SWIRL = initTangSpeed;
-  const MEDIUM_BODY_SWIRL = initTangSpeed;
+  // [LAW:one-source-of-truth] Circular velocity includes self-gravity + dark matter (halo + disk).
+  // This is the single formula that determines whether particles start in equilibrium.
+  const haloM = state.physics.haloMass ?? 5.0;
+  const haloA = state.physics.haloScale ?? 2.0;
+  const diskM = state.physics.diskMass ?? 3.0;
+  const diskA = state.physics.diskScaleA ?? 1.5;
+  const diskB = state.physics.diskScaleB ?? 0.3;
+  function darkMatterVcirc2(r: number): number {
+    // Plummer halo: v² = M * r² / (r² + a²)^(3/2)
+    const r2 = r * r;
+    const haloD2 = r2 + haloA * haloA;
+    const v2halo = haloM * r2 / (haloD2 * Math.sqrt(haloD2));
+    // Miyamoto-Nagai disk (in-plane, z≈0): v² = M * R² / (R² + (a+b)²)^(3/2)
+    const ab = diskA + diskB;
+    const diskD2 = r2 + ab * ab;
+    const v2disk = diskM * r2 / (diskD2 * Math.sqrt(diskD2));
+    return v2halo + v2disk;
+  }
+  const BIG_BODY_SWIRL = 0.6;    // fallback for non-spiral distributions
+  const MEDIUM_BODY_SWIRL = 0.6;
 
   const initData = new Float32Array(count * 12);
   const dist = state.physics.distribution;
@@ -1500,7 +1520,8 @@ function createPhysicsSimulation() {
         const avgM = ((BIG_BODY_MASS_MIN+BIG_BODY_MASS_MAX+MEDIUM_BODY_MASS_MIN+MEDIUM_BODY_MASS_MAX)/4);
         const refTotalM = 1000 * avgM;
         const Geff_m = (state.physics.G ?? 1.5) * 0.001 / Math.sqrt(Math.max(1, MASSIVE_BODY_COUNT) / 1000);
-        const vC_m = Math.sqrt(Math.max(0.001, Geff_m * (intR_m/intMax_m) * refTotalM / Math.max(r_m, 0.05)));
+        // Circular velocity from enclosed particle mass + dark matter potential.
+        const vC_m = Math.sqrt(Math.max(0.001, Geff_m * (intR_m/intMax_m) * refTotalM / Math.max(r_m, 0.05) + darkMatterVcirc2(r_m)));
         vx = (-Math.sin(angle_m)*orbitalTangent[0] + Math.cos(angle_m)*orbitalBitangent[0]) * vC_m;
         vy = (-Math.sin(angle_m)*orbitalTangent[1] + Math.cos(angle_m)*orbitalBitangent[1]) * vC_m;
         vz = (-Math.sin(angle_m)*orbitalTangent[2] + Math.cos(angle_m)*orbitalBitangent[2]) * vC_m;
@@ -1571,7 +1592,8 @@ function createPhysicsSimulation() {
         const refTotalMass = REF_SOURCES * avgMass;
         const enclosedMass = massFrac * refTotalMass;
         const Geff = (state.physics.G ?? 1.5) * 0.001 / Math.sqrt(Math.max(1, MASSIVE_BODY_COUNT) / 1000);
-        const vCirc = Math.sqrt(Math.max(0.001, Geff * enclosedMass / Math.max(r, 0.05)));
+        // Circular velocity from enclosed particle mass + dark matter potential.
+        const vCirc = Math.sqrt(Math.max(0.001, Geff * enclosedMass / Math.max(r, 0.05) + darkMatterVcirc2(r)));
 
         // Visible disk has real thickness — thicker at center, thinner at edge (like a real galaxy)
         const h = (Math.random() - 0.5) * (0.25 + r * 0.05);
@@ -1597,7 +1619,7 @@ function createPhysicsSimulation() {
         x = orbitalTangent[0]*Math.cos(angle)*r + orbitalBitangent[0]*Math.sin(angle)*r + orbitalNormal[0]*h;
         y = orbitalTangent[1]*Math.cos(angle)*r + orbitalBitangent[1]*Math.sin(angle)*r + orbitalNormal[1]*h;
         z = orbitalTangent[2]*Math.cos(angle)*r + orbitalBitangent[2]*Math.sin(angle)*r + orbitalNormal[2]*h;
-        const s = 0.6 / Math.sqrt(r + 0.15);
+        const s = Math.sqrt(Math.max(0.001, darkMatterVcirc2(r)));
         vx = (Math.sin(angle)*orbitalTangent[0] - Math.cos(angle)*orbitalBitangent[0])*s;
         vy = (Math.sin(angle)*orbitalTangent[1] - Math.cos(angle)*orbitalBitangent[1])*s;
         vz = (Math.sin(angle)*orbitalTangent[2] - Math.cos(angle)*orbitalBitangent[2])*s;
@@ -1616,7 +1638,7 @@ function createPhysicsSimulation() {
         x = orbitalTangent[0]*Math.cos(angle)*r + orbitalBitangent[0]*Math.sin(angle)*r + orbitalNormal[0]*h;
         y = orbitalTangent[1]*Math.cos(angle)*r + orbitalBitangent[1]*Math.sin(angle)*r + orbitalNormal[1]*h;
         z = orbitalTangent[2]*Math.cos(angle)*r + orbitalBitangent[2]*Math.sin(angle)*r + orbitalNormal[2]*h;
-        const s = initTangSpeed / Math.sqrt(r + 0.1);
+        const s = Math.sqrt(Math.max(0.001, darkMatterVcirc2(r)));
         vx = (-Math.sin(angle)*orbitalTangent[0] + Math.cos(angle)*orbitalBitangent[0])*s + orbitalNormal[0]*h*VERTICAL_DRIFT;
         vy = (-Math.sin(angle)*orbitalTangent[1] + Math.cos(angle)*orbitalBitangent[1])*s + orbitalNormal[1]*h*VERTICAL_DRIFT;
         vz = (-Math.sin(angle)*orbitalTangent[2] + Math.cos(angle)*orbitalBitangent[2])*s + orbitalNormal[2]*h*VERTICAL_DRIFT;
@@ -1750,9 +1772,10 @@ function createPhysicsSimulation() {
     initData[off] = x; initData[off + 1] = y; initData[off + 2] = z;
     initData[off + 3] = mass;
     initData[off + 4] = vx; initData[off + 5] = vy; initData[off + 6] = vz;
-    initData[off + 8] = x;
-    initData[off + 9] = y;
-    initData[off + 10] = z;
+    // Body._unused (was `home`): zero for DKD leapfrog — no stored acceleration needed.
+    initData[off + 8] = 0;
+    initData[off + 9] = 0;
+    initData[off + 10] = 0;
   }
 
   const bufferA = device.createBuffer({ size: bodyBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC, mappedAtCreation: true });
@@ -1866,30 +1889,20 @@ function createPhysicsSimulation() {
 
   let pingPong = 0;
   const depthRef: DepthRef = {};
-  // [LAW:one-source-of-truth] Disk normal is owned here; smoothed copy is the only thing the shader ever sees.
+  // [LAW:one-source-of-truth] Simulation clock: monotonic step counter replaces wall-clock.
+  // Deterministic tidal angle and attractor timing derive from simStep × dt, not performance.now().
+  let simStep = 0;
+  // [LAW:one-source-of-truth] Disk normal is fixed — the dark matter MN potential defines the disk plane.
+  // No longer derived from angular momentum (virial controller removed).
   const diskNormal: [number, number, number] = [0, 1, 0];
-  const DISK_NORMAL_SMOOTH = 0.02;
-  const DISK_L_MIN = 1e-4;
 
-  // --- Virial equilibrium controller ---
-  // Reads KE/PE + angular momentum from the stats reduction once per second.
-  // Also derives disk normal from angular momentum (slots 4-6).
-  // Bidirectional: adjusts BOTH damping (to cool) AND tidal strength (to heat).
-  // When virial > target: increase damping to remove energy.
-  // When virial < target: increase tidal to inject energy.
+  // --- Diagnostic stats (no feedback into simulation) ---
+  // Stats reduction still runs once/second for KE, PE, angular momentum readback.
+  // Dark matter provides stability — no virial controller needed.
   let statsPendingMap = false;
   let lastStatsTime = 0;
   const STATS_INTERVAL_MS = 1000;
-  let dynamicDamping = 1.0;
-  let dynamicTidal = state.physics.tidalStrength ?? 0.005;
-  const TARGET_VIRIAL = 1.0;
-  const DAMPING_ADJUST_RATE = 0.003;
-  const TIDAL_ADJUST_RATE = 0.001;
-  const DAMPING_MIN = 0.9;
-  const DAMPING_MAX = 1.0;
-  const TIDAL_MIN = 0.001;
-  const TIDAL_MAX = 0.05;
-  let lastStats = { ke: 0, pe: 0, virial: 0, rmsR: 0, rmsH: 0, damping: 1.0, tidal: 0.005 };
+  let lastStats = { ke: 0, pe: 0, virial: 0, rmsR: 0, rmsH: 0 };
 
   // Pre-allocated params staging buffer — avoids GC churn from per-frame ArrayBuffer allocation.
   // 608 bytes = 96-byte header + 32 × 16-byte Attractor array. Matches nbody.compute.wgsl Params struct.
@@ -1901,34 +1914,33 @@ function createPhysicsSimulation() {
   return {
     compute(encoder: GPUCommandEncoder) {
       const p = state.physics;
+      const dt = 0.016 * state.fx.timeScale;
       // [LAW:one-source-of-truth] G normalized by sqrt(sourceCount) so gravity scales sub-linearly with particle count.
-      // Without normalization, 50K particles would have 50x the gravity of 1K. sqrt keeps it manageable.
-      // [LAW:one-source-of-truth] dynamicDamping is adjusted by the virial controller — use it instead of p.damping.
-      f32[0] = 0.016 * state.fx.timeScale; f32[1] = p.G * 0.001 / Math.sqrt(Math.max(1, MASSIVE_BODY_COUNT) / 1000); f32[2] = p.softening; f32[3] = dynamicDamping;
+      f32[0] = dt;
+      f32[1] = p.G * 0.001 / Math.sqrt(Math.max(1, MASSIVE_BODY_COUNT) / 1000);
+      f32[2] = p.softening;
+      f32[3] = p.haloMass ?? 5.0;        // Plummer halo mass
       u32[4] = count;
       u32[5] = MASSIVE_BODY_COUNT;
-      f32[6] = p.coreOrbit;
-      f32[7] = performance.now() * 0.001;
-      // [LAW:single-enforcer] Attractor lifecycle update happens exactly once per frame, here,
-      // before upload. Prune first, then compute strengths and pack.
-      const nowSec = f32[7];
-      pruneAttractors(nowSec);
+      f32[6] = p.haloScale ?? 2.0;       // Plummer halo softening radius
+      // [LAW:one-source-of-truth] Simulation clock: simStep × dt gives deterministic tidal angle.
+      f32[7] = simStep * dt;
+      simStep++;
+      // Attractor packing uses simulation time for strength computation.
+      const nowSec = simStep * dt;
       const ceiling = p.interactionStrength ?? 1;
       const attractors = state.attractors;
       const attractorN = Math.min(attractors.length, ATTRACTOR_MAX);
       u32[8] = attractorN;
-      u32[9] = 0; u32[10] = 0; u32[11] = 0; // pad slots (was targetX/Y/Z/active)
-      // diskNormal at offsets 12..14, pad at 15
+      u32[9] = 0; u32[10] = 0; u32[11] = 0;
+      // diskNormal: fixed orientation for the Miyamoto-Nagai potential.
       f32[12] = diskNormal[0]; f32[13] = diskNormal[1]; f32[14] = diskNormal[2];
-      // disk gain sliders, must match Params struct order in nbody.compute.wgsl
-      f32[16] = p.diskVertDamp ?? 0;
-      f32[17] = p.diskRadDamp ?? 0;
-      f32[18] = p.diskTangGain ?? 0;
-      f32[19] = p.diskVertSpring ?? 0;
-      f32[20] = p.diskAlignGain ?? 0;
-      f32[21] = 0; // pad (was interactionStrength — now baked into per-attractor strength)
-      f32[22] = p.diskTangSpeed ?? 0.5;
-      f32[23] = dynamicTidal;
+      // Dark matter disk params, must match Params struct order in nbody.compute.wgsl
+      f32[16] = p.diskMass ?? 3.0;       // MN disk mass
+      f32[17] = p.diskScaleA ?? 1.5;     // MN radial scale length
+      f32[18] = p.diskScaleB ?? 0.3;     // MN vertical scale height
+      f32[19] = 0; f32[20] = 0; f32[21] = 0; f32[22] = 0; // pad slots
+      f32[23] = p.tidalStrength ?? 0.005;
       // Attractor array at byte offset 96 = f32 index 24. Stride 4 floats per entry (pos.xyz, strength).
       for (let i = 0; i < attractorN; i++) {
         const a = attractors[i];
@@ -1938,7 +1950,6 @@ function createPhysicsSimulation() {
         f32[base + 2] = a.z;
         f32[base + 3] = attractorStrength(a, nowSec, ceiling);
       }
-      // Zero any stale slots beyond active count (safety: strength=0 is inert, so not strictly needed, but clean).
       for (let i = attractorN; i < ATTRACTOR_MAX; i++) {
         const base = 24 + i * 4;
         f32[base] = 0; f32[base + 1] = 0; f32[base + 2] = 0; f32[base + 3] = 0;
@@ -1983,42 +1994,11 @@ function createPhysicsSimulation() {
             statsStaging.unmap();
             statsPendingMap = false;
 
-            const ke = d[0];
-            const pe = d[1];
-            const sumR2 = d[2];
-            const sumH2 = d[3];
-            const lx = d[4], ly = d[5], lz = d[6];
+            const ke = d[0], pe = d[1];
             const virial = Math.abs(pe) > 0.001 ? (2 * ke) / Math.abs(pe) : 1.0;
-            const rmsR = Math.sqrt(sumR2 / Math.max(count, 1));
-            const rmsH = Math.sqrt(sumH2 / Math.max(count, 1));
-
-            lastStats = { ke, pe, virial, rmsR, rmsH, damping: dynamicDamping, tidal: dynamicTidal };
-
-            // Disk normal from angular momentum — same data the old reduce shader computed separately.
-            const lLen = Math.sqrt(lx * lx + ly * ly + lz * lz);
-            // [LAW:dataflow-not-control-flow] When |L| is below threshold, keep the previous normal.
-            if (lLen > DISK_L_MIN) {
-              const nx = lx / lLen, ny = ly / lLen, nz = lz / lLen;
-              const sx = diskNormal[0] + (nx - diskNormal[0]) * DISK_NORMAL_SMOOTH;
-              const sy = diskNormal[1] + (ny - diskNormal[1]) * DISK_NORMAL_SMOOTH;
-              const sz = diskNormal[2] + (nz - diskNormal[2]) * DISK_NORMAL_SMOOTH;
-              const sLen = Math.sqrt(sx * sx + sy * sy + sz * sz) || 1;
-              diskNormal[0] = sx / sLen; diskNormal[1] = sy / sLen; diskNormal[2] = sz / sLen;
-            }
-
-            // Bidirectional virial controller:
-            // virial > target → system overheating → increase damping (remove energy)
-            // virial < target → system collapsing → increase tidal (inject energy)
-            const virialError = virial - TARGET_VIRIAL;
-            if (virialError > 0) {
-              dynamicDamping -= virialError * DAMPING_ADJUST_RATE;
-              dynamicTidal -= virialError * TIDAL_ADJUST_RATE;
-            } else {
-              dynamicTidal -= virialError * TIDAL_ADJUST_RATE;
-              dynamicDamping -= virialError * DAMPING_ADJUST_RATE;
-            }
-            dynamicDamping = Math.max(DAMPING_MIN, Math.min(DAMPING_MAX, dynamicDamping));
-            dynamicTidal = Math.max(TIDAL_MIN, Math.min(TIDAL_MAX, dynamicTidal));
+            const rmsR = Math.sqrt(d[2] / Math.max(count, 1));
+            const rmsH = Math.sqrt(d[3] / Math.max(count, 1));
+            lastStats = { ke, pe, virial, rmsR, rmsH };
           }).catch(() => { statsPendingMap = false; });
         });
       }
@@ -5065,6 +5045,9 @@ function frame(now: DOMHighResTimeStamp) {
   requestAnimationFrame(frame);
   refreshThemeColors(now);
   resizeCanvas();
+  // [LAW:single-enforcer] Attractor lifecycle prune runs every frame regardless of mode,
+  // so mode switches can't leak dead attractors into the array.
+  pruneAttractors(now * 0.001);
 
   // FPS calculation
   frameCount++;

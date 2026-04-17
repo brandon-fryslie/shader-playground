@@ -27,17 +27,17 @@ export interface PhysicsParams {
   count: number;
   G: number;
   softening: number;
-  damping: number;
-  coreOrbit: number;
   distribution: Distribution;
-  diskVertDamp: number;
-  diskRadDamp: number;
-  diskTangGain: number;
-  diskTangSpeed: number;
-  diskVertSpring: number;
-  diskAlignGain: number;
   interactionStrength: number;
   tidalStrength: number;
+  attractorDecayRatio: number;
+  attractorDecayCap: number;
+  // Dark matter potential — conservative forces replacing dissipative disk recovery.
+  haloMass: number;       // Plummer halo gravitational mass
+  haloScale: number;      // Plummer halo softening radius
+  diskMass: number;       // Miyamoto-Nagai disk mass
+  diskScaleA: number;     // MN radial scale length
+  diskScaleB: number;     // MN vertical scale height
 }
 
 export interface ClassicPhysicsParams {
