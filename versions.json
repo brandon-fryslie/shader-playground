@@ -2,6 +2,28 @@
   "schema": 2,
   "versions": [
     {
+      "version": "pr-6",
+      "ref": "refs/pull/6/merge",
+      "sha": "9996a2b23ed451f21f869c3015ef7c1a566b5571",
+      "timestamp": "2026-04-17T10:06:41.303Z",
+      "commits": [
+        {
+          "sha": "9996a2b23ed451f21f869c3015ef7c1a566b5571",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-17T04:06:25-06:00",
+          "message": "Merge 5d53bdd416e4c57674df030a2c80aab13c7b3f46 into f80699f40d15d48ad120d523cffeb8da448963dc\n"
+        },
+        {
+          "sha": "5d53bdd416e4c57674df030a2c80aab13c7b3f46",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-17T04:06:14-06:00",
+          "message": "feat: extend zoom-out range from 50 to 200\n\nRaises the camera distance clamp from 50 to 200 (desktop wheel + mobile\npinch) and bumps the far plane from 160 to 500 so geometry stays visible\nat the new maximum distance.\n"
+        }
+      ]
+    },
+    {
       "version": "r60-f80699f",
       "ref": "refs/heads/master",
       "sha": "f80699f40d15d48ad120d523cffeb8da448963dc",
