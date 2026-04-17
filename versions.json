@@ -2,6 +2,28 @@
   "schema": 2,
   "versions": [
     {
+      "version": "pr-4",
+      "ref": "refs/pull/4/merge",
+      "sha": "d65d8cc4307210d2a385dd92abdfadc018e8cec3",
+      "timestamp": "2026-04-17T04:07:15.376Z",
+      "commits": [
+        {
+          "sha": "d65d8cc4307210d2a385dd92abdfadc018e8cec3",
+          "author_name": "Copilot",
+          "author_email": "198982749+Copilot@users.noreply.github.com",
+          "timestamp": "2026-04-17T02:36:37Z",
+          "message": "Merge af4602e66012b0d612860628135f250c4128966b into 59fcd8d323c1ac677109d2d5b4c33a7f921619f7\n"
+        },
+        {
+          "sha": "af4602e66012b0d612860628135f250c4128966b",
+          "author_name": "copilot-swe-agent[bot]",
+          "author_email": "198982749+Copilot@users.noreply.github.com",
+          "timestamp": "2026-04-17T02:29:23Z",
+          "message": "Prevent text selection on canvas for mobile long-press\n\nAgent-Logs-Url: https://github.com/brandon-fryslie/shader-playground/sessions/08e67695-df18-4384-94ed-3bbc6c7f0565\n\nCo-authored-by: brandon-fryslie <530235+brandon-fryslie@users.noreply.github.com>\n"
+        }
+      ]
+    },
+    {
       "version": "r58-59fcd8d",
       "ref": "refs/heads/master",
       "sha": "59fcd8d323c1ac677109d2d5b4c33a7f921619f7",
