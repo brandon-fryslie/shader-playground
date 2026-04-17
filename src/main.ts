@@ -464,7 +464,7 @@ const FLUID_WORLD_SIZE = 4; // full width/depth of the fluid volume in world uni
 const CAMERA_SIZE = 208;   // sizeof(Camera) in WGSL — includes interaction state
 const CAMERA_STRIDE = 256; // >= CAMERA_SIZE, multiple of minUniformBufferOffsetAlignment
 // [LAW:one-source-of-truth] Desktop projection range is owned here so every pass sees the same far-plane budget.
-const DESKTOP_CAMERA_FAR = 160.0;
+const DESKTOP_CAMERA_FAR = 500.0;
 
 
 // All shape equations baked into one shader — shapeId uniform selects which runs.
@@ -3624,7 +3624,7 @@ function setupMouseControls() {
   c.addEventListener('wheel', (e) => {
     if (state.xrEnabled) return;
     state.camera.distance *= (1 + e.deltaY * 0.001);
-    state.camera.distance = Math.max(0.5, Math.min(50, state.camera.distance));
+    state.camera.distance = Math.max(0.5, Math.min(200, state.camera.distance));
     e.preventDefault();
   }, { passive: false });
 }
@@ -3732,7 +3732,7 @@ function setupMobileTouchControls() {
       // Pinch zoom
       if (prevPinchDist > 0) {
         state.camera.distance *= prevPinchDist / dist;
-        state.camera.distance = Math.max(0.5, Math.min(50, state.camera.distance));
+        state.camera.distance = Math.max(0.5, Math.min(200, state.camera.distance));
       }
 
       prevMidX = midX;
