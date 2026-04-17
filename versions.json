@@ -2,6 +2,35 @@
   "schema": 2,
   "versions": [
     {
+      "version": "pr-5",
+      "ref": "refs/pull/5/merge",
+      "sha": "971a3f8fd7afc4baaefe5d77fb4fb5ba36a395f5",
+      "timestamp": "2026-04-17T09:58:13.467Z",
+      "commits": [
+        {
+          "sha": "971a3f8fd7afc4baaefe5d77fb4fb5ba36a395f5",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-17T03:57:54-06:00",
+          "message": "Merge 67b5658ec7b45cb1dd32e0480fae8358190894c0 into 58f24755de058838e75647f19385db1382a05fe4\n"
+        },
+        {
+          "sha": "67b5658ec7b45cb1dd32e0480fae8358190894c0",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-16T12:39:27-06:00",
+          "message": "feat: decay ratio + cap sliders for attractor lifecycle\n\nAttractor decay duration is now user-tunable via two new N-body sliders:\n\n- **Decay Ratio** (default 0.5, range 0.1..4.0) — decay duration is\n  this × holdDuration. Previous hard-coded value was 2.0 (long tail);\n  0.5 gives a snappier feel where a 1s hold decays over 0.5s.\n\n- **Decay Cap (s)** (default 2.0, range 0.5..10.0) — upper bound on\n  decay duration. Prevents pathologically long decays on long holds\n  (a 30s hold × 0.5 ratio would be 15s without a cap).\n\nDecay duration is now computed in one place (attractorDecayDuration)\nwith `max(MIN_DECAY, min(cap, ratio × holdDuration))` — single enforcer,\nclamped at both ends. Added a MIN_DECAY floor of 50ms so instant-tap\nreleases still play a visible decay animation.\n\nPerformance: zero cost. Two slider values are read once per frame in the\nper-attractor strength computation (sub-nanosecond per attractor).\nNo shader changes, no uniform changes.\n"
+        },
+        {
+          "sha": "0b9f2f141c97699e7d10828f0c0f5d5c40e4f07f",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-16T04:00:12-06:00",
+          "message": "fix: cache bind groups, tighten attractor lifecycle, fix uint64 timestamps\n\nSeveral small hardening fixes:\n\n**Bind group caching.** ensureHdrTargets already pre-builds fadeBGs,\ndownsampleBGs, upsampleBGs, and compositeBGs on resize, but the fade,\nbloom, and composite passes were still calling device.createBindGroup\nevery frame, defeating the cache. Switch each pass to read from the\ncached array. Downsample uses the [sceneIdx, i+1] mapping (ping-pong\nsources live at indices 0-1, mip chain at 2+).\n\n**Attractor pruning.** pruneAttractors() lived inside the physics sim's\ncompute path, so switching away from physics mid-decay would leak dead\nattractors into state.attractors until the user returned to physics.\nMove the prune call into the main frame loop (and the XR frame loop),\nso the array stays clean regardless of active mode.\n\n**XR wand resume.** XR pinch wand was keying on xrInteractionHasSample\n(local bool) to decide create-vs-move. That flag gets reset on transient\ntracking/pose losses, so a brief occlusion mid-pinch would orphan the\ncharging attractor and spawn a fresh one. Switch to\nstate.pointerToAttractor.has(XR_ATTRACTOR_POINTER_ID) — the authoritative\ntruth for \"is there a held attractor for this pointer\" — so drops resume\nthe same attractor.\n\n**Uint64 timestamps.** WebGPU timestamp queries are unsigned 64-bit\ncounters; BigInt64Array would yield negative durations if the high bit\nis ever set. Swap to BigUint64Array.\n\n**Reticle strength range comment.** The per-attractor strength field is\nactually in [0, interactionStrength ceiling] (up to ~3.0 at max slider),\nnot [0, 1]. mix() with s > 1 extrapolates beyond the anchor values,\nwhich is intentional (a high-ceiling attractor should look stronger) —\njust making that explicit in the shader comment.\n"
+        }
+      ]
+    },
+    {
       "version": "r59-58f2475",
       "ref": "refs/heads/master",
       "sha": "58f24755de058838e75647f19385db1382a05fe4",
