@@ -125,14 +125,16 @@ fn fs_main(@location(0) uv: vec2f) -> @location(0) vec4f {
   ldr = ldr * vig;
 
   // [LAW:dataflow-not-control-flow] Per-attractor reticle — ring + dot, aspect-corrected for round appearance.
-  // Size and brightness both scale with strength, so a weak (early-charge or late-decay) attractor
-  // is a tiny dim pinpoint; a fully-charged attractor is a bold pulsing ring.
+  // `s` is the per-attractor strength in the range [0, interactionStrength ceiling] (up to ~3.0 at max slider),
+  // NOT [0, 1]. mix() with s > 1 extrapolates beyond the anchor values, which is intentional: a high-ceiling
+  // attractor is genuinely more powerful, so its reticle reads bigger and brighter.
   let pulse = 0.75 + 0.25 * sin(params.interactTime * 5.0);
   var reticleSum = vec3f(0.0);
   for (var i = 0u; i < params.attractorCount; i++) {
     let a = params.attractors[i];
     let s = a.strength;
-    // Scale ring radius 0.012..0.035 with strength. Width scales too so thin → thick.
+    // Anchors: s=0 → tiny dim pinpoint (0.012 radius, 0.0018 width, 0.002 dot).
+    // s=1 → fully-charged ring at default ceiling (0.035, 0.004, 0.0055). s > 1 extrapolates linearly.
     let ringRadius = mix(0.012, 0.035, s);
     let ringHalfWidth = mix(0.0018, 0.004, s);
     let ringEdge = 0.0015;
@@ -142,7 +144,7 @@ fn fs_main(@location(0) uv: vec2f) -> @location(0) vec4f {
     let distFromRing = abs(ringDist - ringRadius);
     let ringMask = 1.0 - smoothstep(ringHalfWidth - ringEdge, ringHalfWidth + ringEdge, distFromRing);
     let dotMask = 1.0 - smoothstep(dotRadius * 0.5, dotRadius, ringDist);
-    // Brightness scales with strength too — from 0.3 at s=0 to 1.8 at s=1.
+    // Brightness anchors: 0.3 at s=0, 1.8 at s=1. Extrapolates for s > 1.
     let brightness = mix(0.3, 1.8, s) * pulse * s;
     reticleSum = reticleSum + params.accent * brightness * (ringMask + dotMask * 2.0);
   }
