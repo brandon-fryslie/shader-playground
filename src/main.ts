@@ -4950,7 +4950,7 @@ function xrFrame(time: DOMHighResTimeStamp, xrFrameData: XRFrame) {
         logInfo('xr:frame', 'subImage', {
           viewport: subImage.viewport,
           colorFormat: subImage.colorTexture.format,
-          hasDepth: !!(subImage as unknown as { depthStencilTexture?: GPUTexture }).depthStencilTexture,
+          hasDepth: !!subImage.depthStencilTexture,
         });
       }
 
@@ -4972,7 +4972,7 @@ function xrFrame(time: DOMHighResTimeStamp, xrFrameData: XRFrame) {
       // (renders fine, no reprojection benefit — same as if depth wasn't requested).
       currentGpuPhase = `xr:frame:${xrFrameCount}:createView(depth,eye=${viewIndex})`;
       const isTextureArray = ((xrLayer as unknown as { textureArrayLength?: number }).textureArrayLength ?? 1) > 1;
-      const depthTex = (subImage as unknown as { depthStencilTexture?: GPUTexture }).depthStencilTexture;
+      const depthTex = subImage.depthStencilTexture;
       xrDepthOverride = (depthTex && isTextureArray) ? depthTex.createView(viewDesc) : null;
 
       // Set the per-eye camera override so getCameraUniformData() uses XR matrices.
@@ -5021,16 +5021,19 @@ function xrFrame(time: DOMHighResTimeStamp, xrFrameData: XRFrame) {
       runComposite(encoder, textureView, ctFormat, [x, y, width, height]);
     }
 
-    // Clear overrides after all eyes are encoded — desktop frame loop must not inherit XR state.
-    xrCameraOverride = null;
-    xrDepthOverride = null;
-
     currentGpuPhase = `xr:frame:${xrFrameCount}:submit`;
     device.queue.submit([encoder.finish()]);
     if (isEarlyFrame) logInfo('xr:frame', `frame #${xrFrameCount} submitted OK`);
   } catch (e) {
     logError('xr:frame', e, `frame #${xrFrameCount} threw synchronously`);
   } finally {
+    // Clear overrides unconditionally: if anything threw inside the try, a non-null
+    // xrDepthOverride would retain a compositor-owned GPUTextureView past the frame
+    // boundary (unsafe — compositor reclaims these between frames). xrCameraOverride
+    // leaking is less dangerous but would make the desktop frame loop use stale XR
+    // matrices if the user exits VR right after an error.
+    xrCameraOverride = null;
+    xrDepthOverride = null;
     device.popErrorScope().then(err => {
       if (err) logError('xr:frame:validation', err, `frame #${xrFrameCount}`);
     }).catch(popErr => logError('xr:frame:popScope', popErr));
