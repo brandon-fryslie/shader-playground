@@ -2056,8 +2056,9 @@ function createPhysicsSimulation() {
 
       // [LAW:one-source-of-truth] simStep adjustment happens BEFORE param packing so that
       // time, attractor journal index, and tidal angle all refer to the same simulation step.
-      // Forward: step N uses simStep=N, then increments to N+1 after journal write.
-      // Reverse: step N+1 decrements to N first, then uses simStep=N — same params as the original forward step.
+      // Forward: enter with simStep=N, pack params(N), advance to N+1 by end of compute.
+      // Reverse: enter with simStep=N+1, decrement to N here, pack params(N) — same params
+      // as the original forward step that produced the current state. reverse(forward(s)) = s.
       if (timeDirection < 0) simStep--;
 
       const p = state.physics;
