@@ -2054,6 +2054,13 @@ function createPhysicsSimulation() {
         return;
       }
 
+      // [LAW:one-source-of-truth] simStep adjustment happens BEFORE param packing so that
+      // time, attractor journal index, and tidal angle all refer to the same simulation step.
+      // Forward: enter with simStep=N, pack params(N), advance to N+1 by end of compute.
+      // Reverse: enter with simStep=N+1, decrement to N here, pack params(N) — same params
+      // as the original forward step that produced the current state. reverse(forward(s)) = s.
+      if (timeDirection < 0) simStep--;
+
       const p = state.physics;
       const baseDt = 0.016 * state.fx.timeScale;
       const dt = baseDt * timeDirection;
@@ -2103,8 +2110,7 @@ function createPhysicsSimulation() {
         journalHighWater = Math.max(journalHighWater, simStep);
         simStep++;
       } else {
-        // Reverse: read attractor data from journal for the CURRENT simStep (before decrement).
-        simStep--;
+        // Reverse: read attractor data from journal at simStep (already decremented above).
         const jBase = (simStep % JOURNAL_CAPACITY) * JOURNAL_ENTRY_FLOATS;
         u32[8] = journal[jBase]; // attractorCount
         u32[9] = 0; u32[10] = 0; u32[11] = 0;
