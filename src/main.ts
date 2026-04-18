@@ -48,6 +48,11 @@ interface ErrorLogEntry {
   msg: string;
   stack?: string;
 }
+// Ring-buffer cap: a misbehaving shader or device-lost loop can fire logError hundreds
+// of times per second. Without a cap, __errorLog would grow unbounded and hold onto
+// old stack traces indefinitely. 200 entries is enough for post-mortem context while
+// keeping memory bounded to ~200KB worst-case.
+const ERROR_LOG_MAX = 200;
 const __errorLog: ErrorLogEntry[] = [];
 
 // Most recent GPU-touching operation. Update before risky calls so that
@@ -77,6 +82,7 @@ function logError(kind: string, err: unknown, extra?: string): void {
     stack: e.stack,
   };
   __errorLog.push(entry);
+  if (__errorLog.length > ERROR_LOG_MAX) __errorLog.splice(0, __errorLog.length - ERROR_LOG_MAX);
   console.error(`[${kind}] (phase=${currentGpuPhase})`, msg, e.stack || '');
   showErrorOverlay(`[${kind}] (phase=${currentGpuPhase}) ${msg}`);
 }
@@ -2048,12 +2054,6 @@ function createPhysicsSimulation() {
         return;
       }
 
-      // [LAW:one-source-of-truth] simStep adjustment happens BEFORE param packing so that
-      // time, attractor journal index, and tidal angle all refer to the same simulation step.
-      // Forward: step N uses simStep=N, then increments to N+1 after journal write.
-      // Reverse: step N+1 decrements to N first, then uses simStep=N — same params as the original forward step.
-      if (timeDirection < 0) simStep--;
-
       const p = state.physics;
       const baseDt = 0.016 * state.fx.timeScale;
       const dt = baseDt * timeDirection;
@@ -2103,7 +2103,8 @@ function createPhysicsSimulation() {
         journalHighWater = Math.max(journalHighWater, simStep);
         simStep++;
       } else {
-        // Reverse: read attractor data from journal at simStep (already decremented above).
+        // Reverse: read attractor data from journal for the CURRENT simStep (before decrement).
+        simStep--;
         const jBase = (simStep % JOURNAL_CAPACITY) * JOURNAL_ENTRY_FLOATS;
         u32[8] = journal[jBase]; // attractorCount
         u32[9] = 0; u32[10] = 0; u32[11] = 0;
@@ -4721,13 +4722,27 @@ async function toggleXR() {
     logInfo('xr', 'binding ready', { preferredFormat, nativeProjectionScaleFactor: scaleFactor });
     syncRenderConfig(preferredFormat, 1);
 
-    // Prefer configs with depth so the compositor gets per-pixel depth for reprojection.
-    // Depth-less configs remain as last-resort fallbacks if the platform rejects the format.
+    // Prefer texture-array configs WITH depth: the compositor needs per-pixel depth for
+    // parallax-correct reprojection, and texture-array layers guarantee the per-eye
+    // sub-image dimensions match our HDR scene target. Non-array layers share one wide
+    // texture between eyes (viewport-offset right eye), so pairing them with depth
+    // would produce a render-pass dimension mismatch (depth view wider than color view).
+    //
+    // depthStencilFormat is fixed to 'depth24plus' because all sim render pipelines are
+    // compiled with that format — a 'depth32float' layer would hand us a depth texture
+    // that no pipeline can bind. Adding 'depth32float' support would require either
+    // dual-compiling every pipeline or copying depth between formats each frame; neither
+    // is worth the complexity for a format fallback that likely never triggers in
+    // practice (depth24plus is universally supported).
+    //
+    // Fallback priority:
+    //   1. texture-array + depth24plus + native scale   ← ideal
+    //   2. texture-array + depth24plus, default scale   ← native scale rejected
+    //   3. texture-array, no depth                      ← depth rejected (loses reprojection)
+    //   4. non-array, no depth                          ← texture-array rejected
     const layerConfigs: XRGPUProjectionLayerInit[] = [
       { colorFormat: preferredFormat, depthStencilFormat: 'depth24plus', scaleFactor, textureType: 'texture-array' },
       { colorFormat: preferredFormat, depthStencilFormat: 'depth24plus', textureType: 'texture-array' },
-      { colorFormat: preferredFormat, depthStencilFormat: 'depth24plus', scaleFactor },
-      { colorFormat: preferredFormat, depthStencilFormat: 'depth24plus' },
       { colorFormat: preferredFormat, scaleFactor, textureType: 'texture-array' },
       { colorFormat: preferredFormat, textureType: 'texture-array' },
       { colorFormat: preferredFormat, scaleFactor },
@@ -4834,12 +4849,15 @@ async function toggleXR() {
     logInfo('xr', 'first frame requested; waiting for xrFrame callback');
 
     xrSession.addEventListener('end', () => {
-      logInfo('xr', 'session ended', { finalPhase: currentGpuPhase });
+      logInfo('xr', 'session ended', { finalPhase: currentGpuPhase, framesRendered: xrFrameCount });
       xrSession = null;
       xrRefSpace = null;
       xrBinding = null;
       xrLayer = null;
       state.xrEnabled = false;
+      // Reset the frame counter so the first-frame diagnostics re-emit on re-entry —
+      // critical for diagnosing intermittent XR issues where session 2 differs from 1.
+      xrFrameCount = 0;
       currentGpuPhase = 'desktop';
       syncRenderConfig(canvasFormat, 1);
       setXRInteractionSource(null);
@@ -4884,14 +4902,13 @@ function xrFrame(time: DOMHighResTimeStamp, xrFrameData: XRFrame) {
     const pose = xrFrameData.getViewerPose(xrRefSpace!);
     if (!pose) {
       if (isEarlyFrame) logInfo('xr:frame', 'no viewer pose yet');
-      device.popErrorScope().then(err => { if (err) logError('xr:frame:validation', err); });
+      // Don't pop here — finally handles it. Popping twice corrupts the scope stack.
       return;
     }
 
     const sim = simulations[state.mode];
     if (!sim) {
       logError('xr:frame', new Error(`simulation for mode=${state.mode} is not initialized`));
-      device.popErrorScope().then(err => { if (err) logError('xr:frame:validation', err); });
       return;
     }
 
@@ -4946,12 +4963,17 @@ function xrFrame(time: DOMHighResTimeStamp, xrFrameData: XRFrame) {
       // [LAW:one-source-of-truth] Scene depth is written directly into the XR compositor's
       // depth texture. With depth in hand, Vision Pro does per-pixel parallax-correct
       // reprojection between render and scanout — eliminating the jitter/shear that
-      // planar-only warp produces during head motion. If the layer was created without
-      // a depth format (fallback config), the override stays null and getDepthAttachment
-      // transparently falls back to postFx.depth (no reprojection benefit, but renders).
+      // planar-only warp produces during head motion.
+      //
+      // Safety gate: only use the XR depth view when the layer is a texture-array. For
+      // non-array layers the depth texture is full-width (2·eyeW) while our HDR scene
+      // is per-eye (eyeW, eyeH); mixing them in one render pass fails dimension
+      // validation. When we can't use it, getDepthAttachment falls back to postFx.depth
+      // (renders fine, no reprojection benefit — same as if depth wasn't requested).
       currentGpuPhase = `xr:frame:${xrFrameCount}:createView(depth,eye=${viewIndex})`;
+      const isTextureArray = ((xrLayer as unknown as { textureArrayLength?: number }).textureArrayLength ?? 1) > 1;
       const depthTex = (subImage as unknown as { depthStencilTexture?: GPUTexture }).depthStencilTexture;
-      xrDepthOverride = depthTex ? depthTex.createView(viewDesc) : null;
+      xrDepthOverride = (depthTex && isTextureArray) ? depthTex.createView(viewDesc) : null;
 
       // Set the per-eye camera override so getCameraUniformData() uses XR matrices.
       const pos = view.transform.position;
