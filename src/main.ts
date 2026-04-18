@@ -27,6 +27,108 @@ import SHADER_POST_UPSAMPLE from './shaders/post.upsample.wgsl?raw';
 import SHADER_POST_COMPOSITE from './shaders/post.composite.wgsl?raw';
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// SECTION 0: DIAGNOSTIC LOGGING
+// ═══════════════════════════════════════════════════════════════════════════════
+// [LAW:single-enforcer] All error paths funnel through logError so nothing
+// vanishes silently — the original motivation is that XR sessions on Vision Pro
+// ran into issues that produced no console output at all. Every error now:
+//   1. prints to console.error with a kind tag
+//   2. appends to window.__errorLog (inspectable from remote Safari Web Inspector)
+//   3. renders into the floating DOM overlay (visible on desktop; persistent)
+//   4. attributes itself to the most recent GPU phase via currentGpuPhase
+//
+// Attribution matters because WebGPU validation errors surface asynchronously
+// via onuncapturederror — without a phase tag, you can't tell which operation
+// produced them.
+
+interface ErrorLogEntry {
+  t: number;
+  kind: string;
+  phase: string;
+  msg: string;
+  stack?: string;
+}
+const __errorLog: ErrorLogEntry[] = [];
+
+// Most recent GPU-touching operation. Update before risky calls so that
+// onuncapturederror and unhandledrejection can attribute blame.
+let currentGpuPhase = 'boot';
+
+function showErrorOverlay(line: string): void {
+  let overlay = document.getElementById('gpu-error-overlay');
+  if (!overlay) {
+    overlay = document.createElement('div');
+    overlay.id = 'gpu-error-overlay';
+    overlay.style.cssText = 'position:fixed;top:60px;left:10px;right:10px;max-height:60vh;overflow:auto;background:rgba(20,0,0,0.92);color:#ff8080;font:11px monospace;padding:10px;border:1px solid #ff4040;border-radius:4px;z-index:9999;white-space:pre-wrap;';
+    document.body.appendChild(overlay);
+  }
+  const stamp = new Date().toLocaleTimeString();
+  overlay.textContent = `[${stamp}] ${line}\n\n` + overlay.textContent;
+}
+
+function logError(kind: string, err: unknown, extra?: string): void {
+  const e = err instanceof Error ? err : new Error(typeof err === 'string' ? err : JSON.stringify(err));
+  const msg = extra ? `${extra}: ${e.message}` : e.message;
+  const entry: ErrorLogEntry = {
+    t: performance.now(),
+    kind,
+    phase: currentGpuPhase,
+    msg,
+    stack: e.stack,
+  };
+  __errorLog.push(entry);
+  console.error(`[${kind}] (phase=${currentGpuPhase})`, msg, e.stack || '');
+  showErrorOverlay(`[${kind}] (phase=${currentGpuPhase}) ${msg}`);
+}
+
+function logInfo(kind: string, msg: string, ...extra: unknown[]): void {
+  console.info(`[${kind}] (phase=${currentGpuPhase})`, msg, ...extra);
+}
+
+// Expose the log for ad-hoc inspection from Safari Web Inspector.
+(globalThis as unknown as { __errorLog: () => ErrorLogEntry[] }).__errorLog = () => __errorLog.slice();
+(globalThis as unknown as { __gpuPhase: () => string }).__gpuPhase = () => currentGpuPhase;
+
+// Catch anything that escapes our try/catch blocks or a rogue async path.
+// Registered at module load so they see everything, even errors during init.
+window.addEventListener('error', (ev) => {
+  logError('window.error', ev.error ?? ev.message, `at ${ev.filename}:${ev.lineno}:${ev.colno}`);
+});
+window.addEventListener('unhandledrejection', (ev) => {
+  logError('unhandledrejection', ev.reason);
+});
+
+// Wraps device.createShaderModule with async compilation-info reporting.
+// In WebGPU, shader compile failures do NOT throw from createShaderModule —
+// they surface later as pipeline-creation or render-time validation errors
+// with messages that rarely pinpoint the shader line. Surfacing them here,
+// with the offending source line quoted, is the only reliable diagnosis.
+function createShaderModuleChecked(label: string, code: string): GPUShaderModule {
+  const module = device.createShaderModule({ label, code });
+  module.getCompilationInfo().then(info => {
+    if (info.messages.length === 0) return;
+    const lines = code.split('\n');
+    let hasError = false;
+    for (const m of info.messages) {
+      const srcLine = (lines[m.lineNum - 1] || '').trimEnd();
+      const marker = ' '.repeat(Math.max(0, m.linePos - 1)) + '^';
+      const body = `[shader:${label}] ${m.type.toUpperCase()} line ${m.lineNum}:${m.linePos} ${m.message}\n  ${srcLine}\n  ${marker}`;
+      if (m.type === 'error') {
+        hasError = true;
+        logError(`shader:${label}`, new Error(body));
+      } else if (m.type === 'warning') {
+        console.warn(body);
+      } else {
+        console.info(body);
+      }
+    }
+    if (!hasError) logInfo(`shader:${label}`, `compiled with ${info.messages.length} non-error messages`);
+  }).catch(e => logError(`shader:${label}:compilationInfo`, e));
+  return module;
+}
+
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // SECTION 1: CONSTANTS, DEFAULTS, PRESETS
 // ═══════════════════════════════════════════════════════════════════════════════
 
@@ -714,9 +816,9 @@ function initPostFx(): void {
     { binding: 3, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
   ]});
 
-  const fadeMod = device.createShaderModule({ code: SHADER_POST_FADE });
-  const downMod = device.createShaderModule({ code: SHADER_POST_DOWNSAMPLE });
-  const upMod = device.createShaderModule({ code: SHADER_POST_UPSAMPLE });
+  const fadeMod = createShaderModuleChecked('post.fade', SHADER_POST_FADE);
+  const downMod = createShaderModuleChecked('post.downsample', SHADER_POST_DOWNSAMPLE);
+  const upMod = createShaderModuleChecked('post.upsample', SHADER_POST_UPSAMPLE);
 
   postFx.fadePipeline = device.createRenderPipeline({
     layout: device.createPipelineLayout({ bindGroupLayouts: [postFx.fadeBGL] }),
@@ -775,7 +877,7 @@ function initPostFx(): void {
 function ensureCompositePipeline(format: GPUTextureFormat): GPURenderPipeline {
   let p = postFx.compositePipelines.get(format);
   if (p) return p;
-  const mod = device.createShaderModule({ code: SHADER_POST_COMPOSITE });
+  const mod = createShaderModuleChecked('post.composite', SHADER_POST_COMPOSITE);
   p = device.createRenderPipeline({
     layout: device.createPipelineLayout({ bindGroupLayouts: [postFx.compositeBGL!] }),
     vertex: { module: mod, entryPoint: 'vs_main' },
@@ -997,24 +1099,18 @@ async function initWebGPU(): Promise<boolean> {
   initGpuTimestamps();
 
   device.lost.then((info) => {
-    console.error('WebGPU device lost:', info.message);
+    logError('webgpu:device-lost', new Error(info.message), `reason=${info.reason}`);
     if (info.reason !== 'destroyed') {
       initWebGPU().then(ok => { if (ok) { initGrid(); initXrUi(); ensureSimulation(); requestAnimationFrame(frame); } });
     }
   });
 
-  // Capture validation errors and render them into a visible overlay div for diagnosis.
+  // Capture validation errors from any async GPU operation. Phase attribution
+  // (via currentGpuPhase) tells us which operation was in flight when this
+  // fired — critical for diagnosing XR frame failures where the validation
+  // error arrives long after the offending encode call returned.
   device.onuncapturederror = (ev: GPUUncapturedErrorEvent) => {
-    console.error('[WebGPU]', ev.error.message);
-    let overlay = document.getElementById('gpu-error-overlay');
-    if (!overlay) {
-      overlay = document.createElement('div');
-      overlay.id = 'gpu-error-overlay';
-      overlay.style.cssText = 'position:fixed;top:60px;left:10px;right:10px;max-height:60vh;overflow:auto;background:rgba(20,0,0,0.92);color:#ff8080;font:11px monospace;padding:10px;border:1px solid #ff4040;border-radius:4px;z-index:9999;white-space:pre-wrap;';
-      document.body.appendChild(overlay);
-    }
-    const stamp = new Date().toLocaleTimeString();
-    overlay.textContent = `[${stamp}] ${ev.error.message}\n\n` + overlay.textContent;
+    logError('webgpu:uncaptured', ev.error);
   };
 
   canvas = document.getElementById('gpu-canvas') as HTMLCanvasElement;
@@ -1050,7 +1146,7 @@ function initGrid() {
   gridTimeBuffer?.destroy();
   gridCameraBuffer = device.createBuffer({ size: CAMERA_STRIDE * 2, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
   gridTimeBuffer = device.createBuffer({ size: 4, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-  const gridModule = device.createShaderModule({ code: SHADER_GRID });
+  const gridModule = createShaderModuleChecked('grid', SHADER_GRID);
 
   const gridBGL = device.createBindGroupLayout({
     entries: [
@@ -1161,7 +1257,7 @@ function initXrUi() {
   });
   xrUiLabelCurrentMode = null; // force first render to upload
 
-  const uiModule = device.createShaderModule({ code: SHADER_XR_UI });
+  const uiModule = createShaderModuleChecked('xr.ui', SHADER_XR_UI);
 
   const uiBGL = device.createBindGroupLayout({
     entries: [
@@ -1335,8 +1431,8 @@ function createBoidsSimulation() {
   const paramsBuffer = device.createBuffer({ size: 64, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
   const cameraBuffer = device.createBuffer({ size: CAMERA_STRIDE * 2, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
 
-  const computeModule = device.createShaderModule({ code: SHADER_BOIDS_COMPUTE_EDIT || SHADER_BOIDS_COMPUTE });
-  const renderModule = device.createShaderModule({ code: SHADER_BOIDS_RENDER_EDIT || SHADER_BOIDS_RENDER });
+  const computeModule = createShaderModuleChecked('boids.compute', SHADER_BOIDS_COMPUTE_EDIT || SHADER_BOIDS_COMPUTE);
+  const renderModule = createShaderModuleChecked('boids.render', SHADER_BOIDS_RENDER_EDIT || SHADER_BOIDS_RENDER);
 
   const computeBGL = device.createBindGroupLayout({
     entries: [
@@ -1802,8 +1898,8 @@ function createPhysicsSimulation() {
   // 96 bytes of header + 32 × 16-byte Attractor = 608 bytes total.
   const paramsBuffer = device.createBuffer({ size: 608, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
   const cameraBuffer = device.createBuffer({ size: CAMERA_STRIDE * 2, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-  const computeModule = device.createShaderModule({ code: SHADER_NBODY_COMPUTE_EDIT || SHADER_NBODY_COMPUTE });
-  const renderModule = device.createShaderModule({ code: SHADER_NBODY_RENDER_EDIT || SHADER_NBODY_RENDER });
+  const computeModule = createShaderModuleChecked('nbody.compute', SHADER_NBODY_COMPUTE_EDIT || SHADER_NBODY_COMPUTE);
+  const renderModule = createShaderModuleChecked('nbody.render', SHADER_NBODY_RENDER_EDIT || SHADER_NBODY_RENDER);
 
   const computeBGL = device.createBindGroupLayout({
     entries: [
@@ -1820,7 +1916,7 @@ function createPhysicsSimulation() {
 
   // --- Stats reduction: KE, PE, rmsRadius, rmsHeight, angular momentum, total mass ---
   // [LAW:one-source-of-truth] Disk normal is derived from angular momentum (slots 4-6) in this same pass.
-  const statsShaderModule = device.createShaderModule({ code: SHADER_NBODY_STATS });
+  const statsShaderModule = createShaderModuleChecked('nbody.stats', SHADER_NBODY_STATS);
   const statsBGL = device.createBindGroupLayout({
     entries: [
       { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
@@ -2264,8 +2360,8 @@ function createPhysicsClassicSimulation(): Simulation {
   const attractorBuffer = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
   const cameraBuffer = device.createBuffer({ size: CAMERA_STRIDE * 2, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
 
-  const computeModule = device.createShaderModule({ code: SHADER_NBODY_CLASSIC_COMPUTE_EDIT || SHADER_NBODY_CLASSIC_COMPUTE });
-  const renderModule = device.createShaderModule({ code: SHADER_NBODY_CLASSIC_RENDER_EDIT || SHADER_NBODY_CLASSIC_RENDER });
+  const computeModule = createShaderModuleChecked('nbody.classic.compute', SHADER_NBODY_CLASSIC_COMPUTE_EDIT || SHADER_NBODY_CLASSIC_COMPUTE);
+  const renderModule = createShaderModuleChecked('nbody.classic.render', SHADER_NBODY_CLASSIC_RENDER_EDIT || SHADER_NBODY_CLASSIC_RENDER);
 
   const computeBGL = device.createBindGroupLayout({ entries: [
     { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
@@ -2427,12 +2523,12 @@ function createFluidSimulation() {
   device.queue.writeBuffer(velA, 0, initVel);
 
   // Compile shaders
-  const forcesAdvectModule = device.createShaderModule({ code: SHADER_FLUID_FORCES_ADVECT_EDIT || SHADER_FLUID_FORCES_ADVECT });
-  const diffuseModule = device.createShaderModule({ code: SHADER_FLUID_DIFFUSE_EDIT || SHADER_FLUID_DIFFUSE });
-  const pressureModule = device.createShaderModule({ code: SHADER_FLUID_PRESSURE_EDIT || SHADER_FLUID_PRESSURE });
-  const divergenceModule = device.createShaderModule({ code: SHADER_FLUID_DIVERGENCE_EDIT || SHADER_FLUID_DIVERGENCE });
-  const gradientModule = device.createShaderModule({ code: SHADER_FLUID_GRADIENT_EDIT || SHADER_FLUID_GRADIENT });
-  const renderModule = device.createShaderModule({ code: SHADER_FLUID_RENDER_EDIT || SHADER_FLUID_RENDER });
+  const forcesAdvectModule = createShaderModuleChecked('fluid.forces', SHADER_FLUID_FORCES_ADVECT_EDIT || SHADER_FLUID_FORCES_ADVECT);
+  const diffuseModule = createShaderModuleChecked('fluid.diffuse', SHADER_FLUID_DIFFUSE_EDIT || SHADER_FLUID_DIFFUSE);
+  const pressureModule = createShaderModuleChecked('fluid.pressure', SHADER_FLUID_PRESSURE_EDIT || SHADER_FLUID_PRESSURE);
+  const divergenceModule = createShaderModuleChecked('fluid.divergence', SHADER_FLUID_DIVERGENCE_EDIT || SHADER_FLUID_DIVERGENCE);
+  const gradientModule = createShaderModuleChecked('fluid.gradient', SHADER_FLUID_GRADIENT_EDIT || SHADER_FLUID_GRADIENT);
+  const renderModule = createShaderModuleChecked('fluid.render', SHADER_FLUID_RENDER_EDIT || SHADER_FLUID_RENDER);
 
   // Forces + Advect pipeline: reads vel+dye from A, writes to B
   const faBGL = device.createBindGroupLayout({
@@ -2728,7 +2824,7 @@ function createParametricSimulation() {
   let time = 0;     // always advances; used only for param oscillation phase
   let animTime = 0; // advances only when any rate > 0; drives rotation + waves
 
-  const computeModule = device.createShaderModule({ code: SHADER_PARAMETRIC_COMPUTE_EDIT || SHADER_PARAMETRIC_COMPUTE });
+  const computeModule = createShaderModuleChecked('parametric.compute', SHADER_PARAMETRIC_COMPUTE_EDIT || SHADER_PARAMETRIC_COMPUTE);
   const computeBGL = device.createBindGroupLayout({
     entries: [
       { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
@@ -2744,7 +2840,7 @@ function createParametricSimulation() {
     { binding: 1, resource: { buffer: computeParamsBuffer } },
   ]});
 
-  const renderModule = device.createShaderModule({ code: SHADER_PARAMETRIC_RENDER_EDIT || SHADER_PARAMETRIC_RENDER });
+  const renderModule = createShaderModuleChecked('parametric.render', SHADER_PARAMETRIC_RENDER_EDIT || SHADER_PARAMETRIC_RENDER);
   const renderBGL = device.createBindGroupLayout({
     entries: [
       { binding: 0, visibility: GPUShaderStage.VERTEX, buffer: { type: 'read-only-storage' } },
@@ -2941,7 +3037,7 @@ function createReactionSimulation() {
   );
 
   // Compute pipeline
-  const computeModule = device.createShaderModule({ code: SHADER_REACTION_COMPUTE_EDIT || SHADER_REACTION_COMPUTE });
+  const computeModule = createShaderModuleChecked('reaction.compute', SHADER_REACTION_COMPUTE_EDIT || SHADER_REACTION_COMPUTE);
   const computeBGL = device.createBindGroupLayout({
     entries: [
       { binding: 0, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: 'float', viewDimension: '3d' } },
@@ -2970,7 +3066,7 @@ function createReactionSimulation() {
   ];
 
   // Render pipeline — raymarched volume
-  const renderModule = device.createShaderModule({ code: SHADER_REACTION_RENDER_EDIT || SHADER_REACTION_RENDER });
+  const renderModule = createShaderModuleChecked('reaction.render', SHADER_REACTION_RENDER_EDIT || SHADER_REACTION_RENDER);
   const sampler = device.createSampler({
     magFilter: 'linear', minFilter: 'linear',
     addressModeU: 'clamp-to-edge', addressModeV: 'clamp-to-edge', addressModeW: 'clamp-to-edge',
@@ -4556,26 +4652,42 @@ function setupXRButton() {
 
 async function toggleXR() {
   if (xrSession) {
+    logInfo('xr', 'exiting session (user clicked Exit VR)');
+    currentGpuPhase = 'xr:session.end';
     xrSession.end();
     return;
   }
 
   const btn = document.getElementById('btn-xr')!;
   btn.textContent = 'Starting...';
+  logInfo('xr', 'toggleXR start', {
+    hasWebXR: !!navigator.xr,
+    userAgent: navigator.userAgent,
+  });
 
   try {
     // Safari visionOS: 'webgpu' is required to get XRGPUBinding.
     // 'layers' is optional — Safari accepts it in updateRenderState({ layers: [...] })
     // even when not listed as required. 'local-floor' is optional; fall back to 'local'.
+    currentGpuPhase = 'xr:requestSession';
     xrSession = await navigator.xr!.requestSession('immersive-vr', {
       requiredFeatures: ['webgpu'],
       optionalFeatures: ['layers', 'local-floor'],
     });
+    logInfo('xr', 'session acquired', {
+      environmentBlendMode: (xrSession as unknown as { environmentBlendMode?: string }).environmentBlendMode,
+      interactionMode: (xrSession as unknown as { interactionMode?: string }).interactionMode,
+      visibilityState: (xrSession as unknown as { visibilityState?: string }).visibilityState,
+    });
     let gotFloor = false;
     try {
+      currentGpuPhase = 'xr:requestReferenceSpace(local-floor)';
       xrRefSpace = await xrSession.requestReferenceSpace('local-floor');
       gotFloor = true;
-    } catch (_) {
+      logInfo('xr', 'reference space = local-floor');
+    } catch (refErr) {
+      logInfo('xr', 'local-floor unavailable, falling back to local', (refErr as Error).message);
+      currentGpuPhase = 'xr:requestReferenceSpace(local)';
       xrRefSpace = await xrSession.requestReferenceSpace('local');
     }
 
@@ -4598,14 +4710,16 @@ async function toggleXR() {
     // XRGPUBinding is the WebXR–WebGPU bridge. It takes the XR session and the
     // GPUDevice (which must have been created with xrCompatible: true) and lets us
     // create GPU-backed projection layers and retrieve per-eye GPUTextureViews each frame.
+    currentGpuPhase = 'xr:new XRGPUBinding';
     xrBinding = new XRGPUBinding(xrSession, device);
 
     // getPreferredColorFormat() returns the texture format the XR compositor expects.
     // nativeProjectionScaleFactor is the device's native render resolution multiplier —
     // passing it to scaleFactor renders at full resolution instead of a default lower res.
     const preferredFormat = xrBinding.getPreferredColorFormat();
-    syncRenderConfig(preferredFormat, 1);
     const scaleFactor = xrBinding.nativeProjectionScaleFactor;
+    logInfo('xr', 'binding ready', { preferredFormat, nativeProjectionScaleFactor: scaleFactor });
+    syncRenderConfig(preferredFormat, 1);
 
     // Prefer configs with depth so the compositor gets per-pixel depth for reprojection.
     // Depth-less configs remain as last-resort fallbacks if the platform rejects the format.
@@ -4619,31 +4733,52 @@ async function toggleXR() {
       { colorFormat: preferredFormat, scaleFactor },
       { colorFormat: preferredFormat },
     ];
+    currentGpuPhase = 'xr:createProjectionLayer';
     let chosenConfig: XRGPUProjectionLayerInit | null = null;
+    const attemptLog: Array<{ config: XRGPUProjectionLayerInit; error: string }> = [];
     for (const config of layerConfigs) {
       try {
         xrLayer = xrBinding.createProjectionLayer(config);
         chosenConfig = config;
         break;
       } catch (e) {
-        console.warn('[XR] Projection layer config failed, trying next:', (e as Error).message);
+        const msg = (e as Error).message;
+        attemptLog.push({ config, error: msg });
+        logInfo('xr', 'projection layer config rejected', { config, error: msg });
         xrLayer = null;
       }
     }
-    if (!xrLayer) throw new Error('All projection layer configurations failed');
-    console.info('[XR] Projection layer created:', chosenConfig, {
+    if (!xrLayer) {
+      throw new Error(`All projection layer configurations failed. Attempts: ${JSON.stringify(attemptLog)}`);
+    }
+    logInfo('xr', 'projection layer created', {
+      config: chosenConfig,
       textureWidth: xrLayer.textureWidth,
       textureHeight: xrLayer.textureHeight,
+      textureArrayLength: (xrLayer as unknown as { textureArrayLength?: number }).textureArrayLength,
+      ignoreDepthValues: (xrLayer as unknown as { ignoreDepthValues?: boolean }).ignoreDepthValues,
     });
 
     // fixedFoveation = 0 → no peripheral blur. Vision Pro's default is non-zero and
     // visibly softens anything not in the center of view. Silently ignored if the
     // property isn't implemented on this platform.
-    try { (xrLayer as unknown as { fixedFoveation: number }).fixedFoveation = 0; } catch (_) {}
+    try {
+      (xrLayer as unknown as { fixedFoveation: number }).fixedFoveation = 0;
+      logInfo('xr', 'fixedFoveation set to 0');
+    } catch (foveErr) {
+      logInfo('xr', 'fixedFoveation unsupported on this platform', (foveErr as Error).message);
+    }
 
     // Assign our GPU projection layer as the sole render target for this session.
     // This replaces the default baseLayer (canvas-backed) with our GPU texture layer.
-    xrSession.updateRenderState({ layers: [xrLayer] });
+    currentGpuPhase = 'xr:updateRenderState';
+    try {
+      xrSession.updateRenderState({ layers: [xrLayer] });
+      logInfo('xr', 'render state updated with projection layer');
+    } catch (rsErr) {
+      logError('xr:updateRenderState', rsErr);
+      throw rsErr;
+    }
     xrSession.addEventListener('selectstart', (event) => {
       const src = (event as XRInputSourceEvent).inputSource;
       // Defer decision (UI vs sim interaction) until the next XRFrame when a
@@ -4687,33 +4822,49 @@ async function toggleXR() {
 
     btn.textContent = 'Exit VR';
     state.xrEnabled = true;
+    currentGpuPhase = 'xr:awaiting first frame';
+
+    xrSession.addEventListener('visibilitychange', () => {
+      logInfo('xr', 'visibilitychange', {
+        visibilityState: (xrSession as unknown as { visibilityState?: string } | null)?.visibilityState,
+      });
+    });
 
     xrSession.requestAnimationFrame(xrFrame);
+    logInfo('xr', 'first frame requested; waiting for xrFrame callback');
 
     xrSession.addEventListener('end', () => {
+      logInfo('xr', 'session ended', { finalPhase: currentGpuPhase });
       xrSession = null;
       xrRefSpace = null;
       xrBinding = null;
       xrLayer = null;
       state.xrEnabled = false;
+      currentGpuPhase = 'desktop';
       syncRenderConfig(canvasFormat, 1);
       setXRInteractionSource(null);
       btn.textContent = 'Enter VR';
       requestAnimationFrame(frame);
     });
   } catch (e) {
-    console.error('[XR] Failed to start session:', e);
+    logError('xr:toggle', e, `session failed to start (phase=${currentGpuPhase})`);
     btn.textContent = `XR Error: ${(e as Error).message}`;
-    if (xrSession) { try { xrSession.end(); } catch (_) {} }
+    if (xrSession) { try { xrSession.end(); } catch (endErr) { logError('xr:cleanup-end', endErr); } }
     xrSession = null;
+    currentGpuPhase = 'desktop';
     setTimeout(() => { btn.textContent = 'Enter VR'; }, 4000);
   }
 }
+
+let xrFrameCount = 0;
+const XR_FIRST_FRAMES_TO_LOG = 3;
 
 function xrFrame(time: DOMHighResTimeStamp, xrFrameData: XRFrame) {
   if (!xrSession) return;
   xrSession.requestAnimationFrame(xrFrame);
   refreshThemeColors(time);
+  const isEarlyFrame = xrFrameCount < XR_FIRST_FRAMES_TO_LOG;
+  if (isEarlyFrame) logInfo('xr:frame', `xrFrame #${xrFrameCount} entered`, { mode: state.mode });
 
   // FPS counter for XR — same logic as desktop frame loop
   frameCount++;
@@ -4723,21 +4874,39 @@ function xrFrame(time: DOMHighResTimeStamp, xrFrameData: XRFrame) {
     fpsTime = time;
   }
 
+  // Scope GPU validation errors to this frame so we can attribute them to the
+  // XR render path specifically (otherwise uncapturederror reports them without
+  // any indication that they came from XR encoding).
+  currentGpuPhase = `xr:frame:${xrFrameCount}:pre-encode`;
+  device.pushErrorScope('validation');
+
   try {
     const pose = xrFrameData.getViewerPose(xrRefSpace!);
-    if (!pose) return;
+    if (!pose) {
+      if (isEarlyFrame) logInfo('xr:frame', 'no viewer pose yet');
+      device.popErrorScope().then(err => { if (err) logError('xr:frame:validation', err); });
+      return;
+    }
 
     const sim = simulations[state.mode];
-    if (!sim) return;
+    if (!sim) {
+      logError('xr:frame', new Error(`simulation for mode=${state.mode} is not initialized`));
+      device.popErrorScope().then(err => { if (err) logError('xr:frame:validation', err); });
+      return;
+    }
 
     // UI input runs first — it may claim a pinch that would otherwise drive the sim.
     updateXrUiInput(xrFrameData);
     updateXRSimulationInteraction(xrFrameData);
 
-    const encoder = device.createCommandEncoder();
+    currentGpuPhase = `xr:frame:${xrFrameCount}:createCommandEncoder`;
+    const encoder = device.createCommandEncoder({ label: `xr-frame-${xrFrameCount}` });
 
     // Compute runs once per frame — both eyes share the same simulation state.
-    if (!state.paused) sim.compute(encoder);
+    if (!state.paused) {
+      currentGpuPhase = `xr:frame:${xrFrameCount}:sim.compute(${state.mode})`;
+      sim.compute(encoder);
+    }
 
     // Render once per eye. pose.views is typically [left, right] on stereo devices.
     //
@@ -4745,19 +4914,32 @@ function xrFrame(time: DOMHighResTimeStamp, xrFrameData: XRFrame) {
     // camera buffer (viewIndex * CAMERA_STRIDE), so both writeBuffer calls coexist
     // in the queue without overwriting each other before the command buffer executes.
     // Each eye's render pass binds the camera buffer at its own offset via renderBGs[viewIndex].
+    if (isEarlyFrame) logInfo('xr:frame', `pose has ${pose.views.length} views`);
     for (let viewIndex = 0; viewIndex < pose.views.length; viewIndex++) {
       const view = pose.views[viewIndex];
 
       // getViewSubImage (Safari) / getSubImage (Chrome) returns the per-eye render target.
       // The returned GPUTexture is owned by the XR compositor — don't hold refs across frames.
+      currentGpuPhase = `xr:frame:${xrFrameCount}:getViewSubImage(eye=${viewIndex})`;
       const binding = xrBinding!;
       const subImage = binding.getViewSubImage
         ? binding.getViewSubImage(xrLayer!, view)
         : binding.getSubImage!(xrLayer!, view);
-      if (!subImage) continue;
+      if (!subImage) {
+        logError('xr:frame', new Error(`subImage null for eye ${viewIndex}`));
+        continue;
+      }
+      if (isEarlyFrame && viewIndex === 0) {
+        logInfo('xr:frame', 'subImage', {
+          viewport: subImage.viewport,
+          colorFormat: subImage.colorTexture.format,
+          hasDepth: !!(subImage as unknown as { depthStencilTexture?: GPUTexture }).depthStencilTexture,
+        });
+      }
 
       // getViewDescriptor() returns the correct GPUTextureViewDescriptor for this eye,
       // including the array layer index when the compositor uses a texture array.
+      currentGpuPhase = `xr:frame:${xrFrameCount}:createView(color,eye=${viewIndex})`;
       const viewDesc = subImage.getViewDescriptor ? subImage.getViewDescriptor() : {};
       const textureView = subImage.colorTexture.createView(viewDesc);
 
@@ -4767,6 +4949,7 @@ function xrFrame(time: DOMHighResTimeStamp, xrFrameData: XRFrame) {
       // planar-only warp produces during head motion. If the layer was created without
       // a depth format (fallback config), the override stays null and getDepthAttachment
       // transparently falls back to postFx.depth (no reprojection benefit, but renders).
+      currentGpuPhase = `xr:frame:${xrFrameCount}:createView(depth,eye=${viewIndex})`;
       const depthTex = (subImage as unknown as { depthStencilTexture?: GPUTexture }).depthStencilTexture;
       xrDepthOverride = depthTex ? depthTex.createView(viewDesc) : null;
 
@@ -4783,9 +4966,11 @@ function xrFrame(time: DOMHighResTimeStamp, xrFrameData: XRFrame) {
       // [LAW:dataflow-not-control-flow] XR uses the same HDR + bloom + composite pipeline as desktop.
       // HDR scene is sized to the eye render area; we share one HDR scene across both eyes
       // (clobbered between eyes). Trails do not persist in XR.
+      currentGpuPhase = `xr:frame:${xrFrameCount}:ensureHdrTargets(${width}x${height})`;
       ensureHdrTargets(width, height);
       postFx.needsClear = true; // force loadOp:clear; no XR trails
       const sceneIdx = postFx.sceneIdx;
+      currentGpuPhase = `xr:frame:${xrFrameCount}:sim.render(${state.mode},eye=${viewIndex})`;
       sim.render(encoder, postFx.scene[sceneIdx].createView(), null, viewIndex);
 
       // Overlay the XR UI panel into the HDR scene so it picks up tonemap + bloom.
@@ -4803,10 +4988,13 @@ function xrFrame(time: DOMHighResTimeStamp, xrFrameData: XRFrame) {
           depthStoreOp: 'store',
         },
       });
+      currentGpuPhase = `xr:frame:${xrFrameCount}:xr-ui(eye=${viewIndex})`;
       renderXrUi(uiPass, width / height, viewIndex);
       uiPass.end();
 
+      currentGpuPhase = `xr:frame:${xrFrameCount}:bloom(eye=${viewIndex})`;
       runBloomChain(encoder);
+      currentGpuPhase = `xr:frame:${xrFrameCount}:composite(eye=${viewIndex})`;
       const ctFormat = subImage.colorTexture.format;
       runComposite(encoder, textureView, ctFormat, [x, y, width, height]);
     }
@@ -4815,9 +5003,16 @@ function xrFrame(time: DOMHighResTimeStamp, xrFrameData: XRFrame) {
     xrCameraOverride = null;
     xrDepthOverride = null;
 
+    currentGpuPhase = `xr:frame:${xrFrameCount}:submit`;
     device.queue.submit([encoder.finish()]);
+    if (isEarlyFrame) logInfo('xr:frame', `frame #${xrFrameCount} submitted OK`);
   } catch (e) {
-    console.error('[XR] Frame error:', e);
+    logError('xr:frame', e, `frame #${xrFrameCount} threw synchronously`);
+  } finally {
+    device.popErrorScope().then(err => {
+      if (err) logError('xr:frame:validation', err, `frame #${xrFrameCount}`);
+    }).catch(popErr => logError('xr:frame:popScope', popErr));
+    xrFrameCount++;
   }
 }
 
