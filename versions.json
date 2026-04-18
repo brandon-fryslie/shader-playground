@@ -4,15 +4,22 @@
     {
       "version": "pr-8",
       "ref": "refs/pull/8/merge",
-      "sha": "d26777750d8e2b42e0e950b6ebf5ef180009a146",
-      "timestamp": "2026-04-18T07:49:53.712Z",
+      "sha": "c25a1fc74f2f36ac951a31daecc4dd3861b8d663",
+      "timestamp": "2026-04-18T08:03:24.364Z",
       "commits": [
         {
-          "sha": "d26777750d8e2b42e0e950b6ebf5ef180009a146",
+          "sha": "c25a1fc74f2f36ac951a31daecc4dd3861b8d663",
           "author_name": "Brandon Fryslie",
           "author_email": "530235+brandon-fryslie@users.noreply.github.com",
-          "timestamp": "2026-04-18T01:49:40-06:00",
-          "message": "Merge 078771a38b2dcc54b55f97afdee27570118a1eb6 into 0cfc7e33833484649a3e85946cd30103746a1854\n"
+          "timestamp": "2026-04-18T08:03:12Z",
+          "message": "Merge 0d87c13c15f156acecf26ffaf728a73384ac45e6 into 0cfc7e33833484649a3e85946cd30103746a1854\n"
+        },
+        {
+          "sha": "0d87c13c15f156acecf26ffaf728a73384ac45e6",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-18T02:02:56-06:00",
+          "message": "feat(logging): comprehensive WebXR and WebGPU error diagnostics\n\nRoot issue: XR sessions were failing silently on Vision Pro — the permission\nprompt appeared but the session never entered immersive mode, and nothing\nwas logged anywhere. WebGPU validation errors surface asynchronously via\nonuncapturederror with no indication of which operation caused them, and\nshader compile failures do not throw from createShaderModule at all.\n\nInfrastructure (new Section 0):\n- logError(kind, err, extra?): central error sink — console + DOM overlay +\n  in-memory __errorLog array, all tagged with the current GPU phase\n- currentGpuPhase: rolling label updated before every risky GPU/XR call so\n  async errors can be attributed to the operation that caused them\n- window.error and window.unhandledrejection listeners catch anything that\n  escapes our try/catch blocks\n- window.__errorLog() / window.__gpuPhase() for remote inspection via\n  Safari Web Inspector\n\nShader compilation:\n- createShaderModuleChecked(label, code) wraps device.createShaderModule and\n  schedules getCompilationInfo() — logs every error and warning with the\n  offending source line quoted and a caret marker. All 23 shader-module\n  call sites across boids / nbody / fluid / parametric / reaction / grid /\n  xr.ui / post-fx migrated to the checked variant.\n\nXR lifecycle:\n- toggleXR now logs a phase transition before every step (requestSession,\n  requestReferenceSpace, new XRGPUBinding, createProjectionLayer,\n  updateRenderState, fixedFoveation, first frame requested)\n- Projection layer fallback loop records every rejected config with its\n  error message; if all configs fail the final error includes the full\n  attempt log as JSON\n- visibilitychange listener logs compositor state transitions\n- session.end logs the final phase for post-mortem correlation\n\nPer-frame scoping:\n- xrFrame pushes a validation error scope around encoding; pops it in a\n  finally block with error reporting so GPU validation failures get\n  attributed to the frame number + sub-phase\n- First 3 xrFrame invocations log entry, subImage metadata, and successful\n  submit — enough to diagnose \"session starts but nothing renders\"\n- Phase markers at every encode step (compute, per-eye getViewSubImage,\n  createView color/depth, ensureHdrTargets, sim.render, UI pass, bloom,\n  composite, submit) so uncapturederror reports pinpoint the failure\n\nonuncapturederror + device.lost now route through logError so they inherit\nphase attribution and DOM overlay rendering.\n\nGenerated with [Claude Code](https://claude.ai/code)\nvia [Happy](https://happy.engineering)\n\nCo-Authored-By: Claude <noreply@anthropic.com>\nCo-Authored-By: Happy <yesreply@happy.engineering>\n"
         },
         {
           "sha": "078771a38b2dcc54b55f97afdee27570118a1eb6",
