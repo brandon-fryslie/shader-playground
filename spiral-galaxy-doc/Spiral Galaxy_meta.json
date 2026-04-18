@@ -1,0 +1,2047 @@
+{
+  "table_of_contents": [
+    {
+      "title": "DoMath \u2013 Summer 2017",
+      "heading_level": null,
+      "page_id": 0,
+      "polygon": [
+        [
+          232.787109375,
+          79.6640625
+        ],
+        [
+          379.212890625,
+          79.6640625
+        ],
+        [
+          379.212890625,
+          91.7108154296875
+        ],
+        [
+          232.787109375,
+          91.7108154296875
+        ]
+      ]
+    },
+    {
+      "title": "Simulations of Spiral Galaxies",
+      "heading_level": null,
+      "page_id": 0,
+      "polygon": [
+        [
+          152.40234375,
+          100.2506103515625
+        ],
+        [
+          458.3874816894531,
+          100.2506103515625
+        ],
+        [
+          458.3874816894531,
+          120.9130859375
+        ],
+        [
+          152.40234375,
+          120.9130859375
+        ]
+      ]
+    },
+    {
+      "title": "Contents",
+      "heading_level": null,
+      "page_id": 0,
+      "polygon": [
+        [
+          72.0,
+          221.8189697265625
+        ],
+        [
+          135.00851440429688,
+          221.8189697265625
+        ],
+        [
+          135.00851440429688,
+          236.16522216796875
+        ],
+        [
+          72.0,
+          236.16522216796875
+        ]
+      ]
+    },
+    {
+      "title": "1 Introduction",
+      "heading_level": null,
+      "page_id": 2,
+      "polygon": [
+        [
+          70.5,
+          77.73046875
+        ],
+        [
+          185.25,
+          77.73046875
+        ],
+        [
+          185.25,
+          90.75
+        ],
+        [
+          70.5,
+          90.75
+        ]
+      ]
+    },
+    {
+      "title": "2 Background",
+      "heading_level": null,
+      "page_id": 2,
+      "polygon": [
+        [
+          70.5,
+          181.5
+        ],
+        [
+          180.75,
+          181.5
+        ],
+        [
+          180.75,
+          195.29296875
+        ],
+        [
+          70.5,
+          195.29296875
+        ]
+      ]
+    },
+    {
+      "title": "2.1 A Brief Introduction to Relevant Physics Concepts",
+      "heading_level": null,
+      "page_id": 2,
+      "polygon": [
+        [
+          70.5234375,
+          206.25
+        ],
+        [
+          403.5,
+          206.25
+        ],
+        [
+          403.5,
+          217.3359375
+        ],
+        [
+          70.5234375,
+          217.3359375
+        ]
+      ]
+    },
+    {
+      "title": "2.1.1 On General Relativity",
+      "heading_level": null,
+      "page_id": 2,
+      "polygon": [
+        [
+          70.5,
+          225.45703125
+        ],
+        [
+          218.25,
+          225.45703125
+        ],
+        [
+          218.25,
+          235.51171875
+        ],
+        [
+          70.5,
+          235.51171875
+        ]
+      ]
+    },
+    {
+      "title": "2.1.2 On Dark Matter and Spiral Galaxies",
+      "heading_level": null,
+      "page_id": 2,
+      "polygon": [
+        [
+          70.5,
+          455.25
+        ],
+        [
+          291.75,
+          455.25
+        ],
+        [
+          291.75,
+          465.22265625
+        ],
+        [
+          70.5,
+          465.22265625
+        ]
+      ]
+    },
+    {
+      "title": "2.2 The Wave Dark Matter Model",
+      "heading_level": null,
+      "page_id": 3,
+      "polygon": [
+        [
+          71.71875,
+          226.23046875
+        ],
+        [
+          283.2244873046875,
+          226.23046875
+        ],
+        [
+          283.2244873046875,
+          239.15093994140625
+        ],
+        [
+          71.71875,
+          239.15093994140625
+        ]
+      ]
+    },
+    {
+      "title": "2.3 Simulating Frictions and Collapsing of Spheroidal Proto-Galaxies",
+      "heading_level": null,
+      "page_id": 3,
+      "polygon": [
+        [
+          69.328125,
+          699.1986389160156
+        ],
+        [
+          486.41497802734375,
+          699.1986389160156
+        ],
+        [
+          486.41497802734375,
+          711.1538391113281
+        ],
+        [
+          69.328125,
+          711.1538391113281
+        ]
+      ]
+    },
+    {
+      "title": "3 Initialization of Simulations",
+      "heading_level": null,
+      "page_id": 4,
+      "polygon": [
+        [
+          70.5,
+          77.73046875
+        ],
+        [
+          291.75,
+          77.73046875
+        ],
+        [
+          291.75,
+          90.0
+        ],
+        [
+          70.5,
+          90.0
+        ]
+      ]
+    },
+    {
+      "title": "3.1 An Overview of the Initialization Process",
+      "heading_level": null,
+      "page_id": 4,
+      "polygon": [
+        [
+          72.31640625,
+          103.5
+        ],
+        [
+          347.25,
+          103.5
+        ],
+        [
+          347.25,
+          114.0
+        ],
+        [
+          72.31640625,
+          114.0
+        ]
+      ]
+    },
+    {
+      "title": "3.2 Initialization of Particle Positions",
+      "heading_level": null,
+      "page_id": 4,
+      "polygon": [
+        [
+          70.5,
+          305.12109375
+        ],
+        [
+          300.75,
+          305.12109375
+        ],
+        [
+          300.75,
+          315.0
+        ],
+        [
+          70.5,
+          315.0
+        ]
+      ]
+    },
+    {
+      "title": "3.3 Initialization of Particle Speed",
+      "heading_level": null,
+      "page_id": 4,
+      "polygon": [
+        [
+          70.5,
+          576.0
+        ],
+        [
+          282.0,
+          576.0
+        ],
+        [
+          282.0,
+          586.65234375
+        ],
+        [
+          70.5,
+          586.65234375
+        ]
+      ]
+    },
+    {
+      "title": "3.4 Initialization of Particle Velocity",
+      "heading_level": null,
+      "page_id": 5,
+      "polygon": [
+        [
+          71.71875,
+          237.4453125
+        ],
+        [
+          294.9406433105469,
+          237.4453125
+        ],
+        [
+          294.9406433105469,
+          250.1229248046875
+        ],
+        [
+          71.71875,
+          250.1229248046875
+        ]
+      ]
+    },
+    {
+      "title": "3.5 Shifting Total Angular Momentum to Align with z-axis",
+      "heading_level": null,
+      "page_id": 6,
+      "polygon": [
+        [
+          70.5,
+          517.5
+        ],
+        [
+          429.1171875,
+          517.5
+        ],
+        [
+          429.1171875,
+          528.0
+        ],
+        [
+          70.5,
+          528.0
+        ]
+      ]
+    },
+    {
+      "title": "3.6 Expected Values for Physics Measurements",
+      "heading_level": null,
+      "page_id": 7,
+      "polygon": [
+        [
+          71.12109375,
+          380.91796875
+        ],
+        [
+          358.1715087890625,
+          380.91796875
+        ],
+        [
+          358.1715087890625,
+          394.34783935546875
+        ],
+        [
+          71.12109375,
+          394.34783935546875
+        ]
+      ]
+    },
+    {
+      "title": "3.6.1 Position and Potential Energy",
+      "heading_level": null,
+      "page_id": 7,
+      "polygon": [
+        [
+          71.12109375,
+          462.90234375
+        ],
+        [
+          258.78515625,
+          462.90234375
+        ],
+        [
+          258.78515625,
+          474.0634460449219
+        ],
+        [
+          71.12109375,
+          474.0634460449219
+        ]
+      ]
+    },
+    {
+      "title": "3.6.2 Kinetic and Total Energy",
+      "heading_level": null,
+      "page_id": 8,
+      "polygon": [
+        [
+          70.5,
+          227.25
+        ],
+        [
+          234.75,
+          227.25
+        ],
+        [
+          234.75,
+          236.671875
+        ],
+        [
+          70.5,
+          236.671875
+        ]
+      ]
+    },
+    {
+      "title": "3.6.3 Angular Momentum along z-axis",
+      "heading_level": null,
+      "page_id": 8,
+      "polygon": [
+        [
+          70.5,
+          447.43359375
+        ],
+        [
+          272.25,
+          447.43359375
+        ],
+        [
+          272.25,
+          456.75
+        ],
+        [
+          70.5,
+          456.75
+        ]
+      ]
+    },
+    {
+      "title": "4 Creating a Generic Potential Function",
+      "heading_level": null,
+      "page_id": 9,
+      "polygon": [
+        [
+          71.12109375,
+          78.1171875
+        ],
+        [
+          367.5,
+          78.1171875
+        ],
+        [
+          367.5,
+          90.75
+        ],
+        [
+          71.12109375,
+          90.75
+        ]
+      ]
+    },
+    {
+      "title": "4.1 An Overview on Generic Potential Functions",
+      "heading_level": null,
+      "page_id": 9,
+      "polygon": [
+        [
+          70.5,
+          104.25
+        ],
+        [
+          367.5,
+          104.25
+        ],
+        [
+          367.5,
+          114.75
+        ],
+        [
+          70.5,
+          114.75
+        ]
+      ]
+    },
+    {
+      "title": "4.2 Basic Potentials",
+      "heading_level": null,
+      "page_id": 9,
+      "polygon": [
+        [
+          70.5,
+          246.33984375
+        ],
+        [
+          197.25,
+          246.33984375
+        ],
+        [
+          197.25,
+          256.5
+        ],
+        [
+          70.5,
+          256.5
+        ]
+      ]
+    },
+    {
+      "title": "4.3 Direct Integration of Green Function",
+      "heading_level": null,
+      "page_id": 9,
+      "polygon": [
+        [
+          70.5,
+          303.57421875
+        ],
+        [
+          320.34375,
+          303.57421875
+        ],
+        [
+          320.34375,
+          315.17578125
+        ],
+        [
+          70.5,
+          315.17578125
+        ]
+      ]
+    },
+    {
+      "title": "4.4 The Multipole Expansion",
+      "heading_level": null,
+      "page_id": 10,
+      "polygon": [
+        [
+          70.5,
+          143.859375
+        ],
+        [
+          252.75,
+          143.859375
+        ],
+        [
+          252.75,
+          154.6875
+        ],
+        [
+          70.5,
+          154.6875
+        ]
+      ]
+    },
+    {
+      "title": "4.5 The Spherical Harmonic Expansion",
+      "heading_level": null,
+      "page_id": 11,
+      "polygon": [
+        [
+          72.0,
+          79.755615234375
+        ],
+        [
+          311.24749755859375,
+          79.755615234375
+        ],
+        [
+          311.24749755859375,
+          91.7108154296875
+        ],
+        [
+          72.0,
+          91.7108154296875
+        ]
+      ]
+    },
+    {
+      "title": "5 Orbits of Celestial Bodies in a Given Potential",
+      "heading_level": null,
+      "page_id": 12,
+      "polygon": [
+        [
+          71.71875,
+          77.73046875
+        ],
+        [
+          425.6337585449219,
+          77.73046875
+        ],
+        [
+          425.6337585449219,
+          92.23321533203125
+        ],
+        [
+          71.71875,
+          92.23321533203125
+        ]
+      ]
+    },
+    {
+      "title": "5.1 An Overview of Orbits in a Given Potential",
+      "heading_level": null,
+      "page_id": 12,
+      "polygon": [
+        [
+          72.0,
+          103.568603515625
+        ],
+        [
+          360.38671875,
+          103.568603515625
+        ],
+        [
+          360.38671875,
+          115.5238037109375
+        ],
+        [
+          72.0,
+          115.5238037109375
+        ]
+      ]
+    },
+    {
+      "title": "5.2 Numerical Methods",
+      "heading_level": null,
+      "page_id": 12,
+      "polygon": [
+        [
+          71.419921875,
+          579.7855529785156
+        ],
+        [
+          219.31204223632812,
+          579.7855529785156
+        ],
+        [
+          219.31204223632812,
+          591.7407531738281
+        ],
+        [
+          71.419921875,
+          591.7407531738281
+        ]
+      ]
+    },
+    {
+      "title": "5.3 Velocity Correction",
+      "heading_level": null,
+      "page_id": 15,
+      "polygon": [
+        [
+          71.71875,
+          143.5096435546875
+        ],
+        [
+          217.38719177246094,
+          143.5096435546875
+        ],
+        [
+          217.38719177246094,
+          155.46484375
+        ],
+        [
+          71.71875,
+          155.46484375
+        ]
+      ]
+    },
+    {
+      "title": "6 Collision",
+      "heading_level": null,
+      "page_id": 16,
+      "polygon": [
+        [
+          72.0,
+          77.73046875
+        ],
+        [
+          157.2020721435547,
+          77.73046875
+        ],
+        [
+          157.2020721435547,
+          92.23321533203125
+        ],
+        [
+          72.0,
+          92.23321533203125
+        ]
+      ]
+    },
+    {
+      "title": "6.1 Coefficient of Restitution and Line of Impact",
+      "heading_level": null,
+      "page_id": 16,
+      "polygon": [
+        [
+          72.0,
+          177.1171875
+        ],
+        [
+          367.99884033203125,
+          177.1171875
+        ],
+        [
+          367.99884033203125,
+          189.2408447265625
+        ],
+        [
+          72.0,
+          189.2408447265625
+        ]
+      ]
+    },
+    {
+      "title": "6.2 Implementation",
+      "heading_level": null,
+      "page_id": 16,
+      "polygon": [
+        [
+          71.419921875,
+          482.9066162109375
+        ],
+        [
+          195.4972686767578,
+          482.9066162109375
+        ],
+        [
+          195.4972686767578,
+          494.86181640625
+        ],
+        [
+          71.419921875,
+          494.86181640625
+        ]
+      ]
+    },
+    {
+      "title": "7 Collapse of Spherical Galaxies to Disc Galaxies",
+      "heading_level": null,
+      "page_id": 17,
+      "polygon": [
+        [
+          72.9140625,
+          77.73046875
+        ],
+        [
+          429.75,
+          77.73046875
+        ],
+        [
+          429.75,
+          90.87890625
+        ],
+        [
+          72.9140625,
+          90.87890625
+        ]
+      ]
+    },
+    {
+      "title": "7.1 A Brief Introduction to the Process of Collapsing",
+      "heading_level": null,
+      "page_id": 17,
+      "polygon": [
+        [
+          71.25,
+          103.5
+        ],
+        [
+          395.25,
+          103.5
+        ],
+        [
+          395.25,
+          115.2421875
+        ],
+        [
+          71.25,
+          115.2421875
+        ]
+      ]
+    },
+    {
+      "title": "7.2 Quantifying \"Disc-ness\" of a Galaxy",
+      "heading_level": null,
+      "page_id": 17,
+      "polygon": [
+        [
+          71.12109375,
+          124.13671875
+        ],
+        [
+          316.5,
+          124.13671875
+        ],
+        [
+          316.5,
+          135.73828125
+        ],
+        [
+          71.12109375,
+          135.73828125
+        ]
+      ]
+    },
+    {
+      "title": "8 Preliminary Simulation Results with Static Potential",
+      "heading_level": null,
+      "page_id": 18,
+      "polygon": [
+        [
+          70.5,
+          198.0
+        ],
+        [
+          470.25,
+          198.0
+        ],
+        [
+          470.25,
+          212.30859375
+        ],
+        [
+          70.5,
+          212.30859375
+        ]
+      ]
+    },
+    {
+      "title": "9 The Potential of Dark Matter",
+      "heading_level": null,
+      "page_id": 21,
+      "polygon": [
+        [
+          70.5,
+          78.75
+        ],
+        [
+          306.75,
+          78.75
+        ],
+        [
+          306.75,
+          90.0
+        ],
+        [
+          70.5,
+          90.0
+        ]
+      ]
+    },
+    {
+      "title": "9.1 Solving the Einstein-Klein-Gordon Equation",
+      "heading_level": null,
+      "page_id": 21,
+      "polygon": [
+        [
+          71.71875,
+          104.02734375
+        ],
+        [
+          363.75,
+          104.02734375
+        ],
+        [
+          363.75,
+          115.62890625
+        ],
+        [
+          71.71875,
+          115.62890625
+        ]
+      ]
+    },
+    {
+      "title": "9.2 Adding more Spherical Harmonic Terms",
+      "heading_level": null,
+      "page_id": 21,
+      "polygon": [
+        [
+          70.5,
+          594.0
+        ],
+        [
+          341.25,
+          594.0
+        ],
+        [
+          341.25,
+          604.828125
+        ],
+        [
+          70.5,
+          604.828125
+        ]
+      ]
+    },
+    {
+      "title": "10 Formation of Spiral Patterns",
+      "heading_level": null,
+      "page_id": 23,
+      "polygon": [
+        [
+          72.0,
+          77.73046875
+        ],
+        [
+          307.3924255371094,
+          77.73046875
+        ],
+        [
+          307.3924255371094,
+          92.23321533203125
+        ],
+        [
+          72.0,
+          92.23321533203125
+        ]
+      ]
+    },
+    {
+      "title": "11 References",
+      "heading_level": null,
+      "page_id": 26,
+      "polygon": [
+        [
+          71.12109375,
+          77.73046875
+        ],
+        [
+          179.73997497558594,
+          77.73046875
+        ],
+        [
+          179.73997497558594,
+          92.23321533203125
+        ],
+        [
+          71.12109375,
+          92.23321533203125
+        ]
+      ]
+    }
+  ],
+  "page_stats": [
+    {
+      "page_id": 0,
+      "text_extraction_method": "pdftext",
+      "block_counts": [
+        [
+          "Span",
+          97
+        ],
+        [
+          "Line",
+          43
+        ],
+        [
+          "TableCell",
+          23
+        ],
+        [
+          "SectionHeader",
+          3
+        ],
+        [
+          "Text",
+          1
+        ],
+        [
+          "TableOfContents",
+          1
+        ],
+        [
+          "PageFooter",
+          1
+        ]
+      ],
+      "block_metadata": {
+        "llm_request_count": 0,
+        "llm_error_count": 1,
+        "llm_tokens_used": 0,
+        "previous_text": "",
+        "previous_type": "",
+        "previous_order": 0
+      }
+    },
+    {
+      "page_id": 1,
+      "text_extraction_method": "pdftext",
+      "block_counts": [
+        [
+          "TableCell",
+          75
+        ],
+        [
+          "Span",
+          50
+        ],
+        [
+          "Line",
+          21
+        ],
+        [
+          "TableOfContents",
+          1
+        ],
+        [
+          "PageFooter",
+          1
+        ]
+      ],
+      "block_metadata": {
+        "llm_request_count": 0,
+        "llm_error_count": 2,
+        "llm_tokens_used": 0,
+        "previous_text": "",
+        "previous_type": "",
+        "previous_order": 0
+      }
+    },
+    {
+      "page_id": 2,
+      "text_extraction_method": "surya",
+      "block_counts": [
+        [
+          "Line",
+          65
+        ],
+        [
+          "Span",
+          25
+        ],
+        [
+          "Text",
+          7
+        ],
+        [
+          "SectionHeader",
+          5
+        ],
+        [
+          "Equation",
+          1
+        ],
+        [
+          "PageFooter",
+          1
+        ]
+      ],
+      "block_metadata": {
+        "llm_request_count": 0,
+        "llm_error_count": 0,
+        "llm_tokens_used": 0,
+        "previous_text": "",
+        "previous_type": "",
+        "previous_order": 0
+      }
+    },
+    {
+      "page_id": 3,
+      "text_extraction_method": "pdftext",
+      "block_counts": [
+        [
+          "Span",
+          308
+        ],
+        [
+          "Line",
+          58
+        ],
+        [
+          "Text",
+          10
+        ],
+        [
+          "Equation",
+          5
+        ],
+        [
+          "SectionHeader",
+          2
+        ],
+        [
+          "PageFooter",
+          1
+        ]
+      ],
+      "block_metadata": {
+        "llm_request_count": 0,
+        "llm_error_count": 0,
+        "llm_tokens_used": 0,
+        "previous_text": "",
+        "previous_type": "",
+        "previous_order": 0
+      }
+    },
+    {
+      "page_id": 4,
+      "text_extraction_method": "surya",
+      "block_counts": [
+        [
+          "Span",
+          61
+        ],
+        [
+          "Line",
+          60
+        ],
+        [
+          "Text",
+          6
+        ],
+        [
+          "SectionHeader",
+          4
+        ],
+        [
+          "Equation",
+          3
+        ],
+        [
+          "PageFooter",
+          1
+        ]
+      ],
+      "block_metadata": {
+        "llm_request_count": 0,
+        "llm_error_count": 0,
+        "llm_tokens_used": 0,
+        "previous_text": "",
+        "previous_type": "",
+        "previous_order": 0
+      }
+    },
+    {
+      "page_id": 5,
+      "text_extraction_method": "pdftext",
+      "block_counts": [
+        [
+          "Span",
+          364
+        ],
+        [
+          "Line",
+          70
+        ],
+        [
+          "Text",
+          9
+        ],
+        [
+          "Equation",
+          2
+        ],
+        [
+          "SectionHeader",
+          1
+        ],
+        [
+          "PageFooter",
+          1
+        ]
+      ],
+      "block_metadata": {
+        "llm_request_count": 0,
+        "llm_error_count": 0,
+        "llm_tokens_used": 0,
+        "previous_text": "",
+        "previous_type": "",
+        "previous_order": 0
+      }
+    },
+    {
+      "page_id": 6,
+      "text_extraction_method": "surya",
+      "block_counts": [
+        [
+          "Span",
+          51
+        ],
+        [
+          "Line",
+          50
+        ],
+        [
+          "Text",
+          8
+        ],
+        [
+          "Equation",
+          4
+        ],
+        [
+          "Figure",
+          1
+        ],
+        [
+          "Caption",
+          1
+        ],
+        [
+          "SectionHeader",
+          1
+        ],
+        [
+          "PageFooter",
+          1
+        ],
+        [
+          "FigureGroup",
+          1
+        ]
+      ],
+      "block_metadata": {
+        "llm_request_count": 0,
+        "llm_error_count": 0,
+        "llm_tokens_used": 0,
+        "previous_text": "",
+        "previous_type": "",
+        "previous_order": 0
+      }
+    },
+    {
+      "page_id": 7,
+      "text_extraction_method": "pdftext",
+      "block_counts": [
+        [
+          "Span",
+          360
+        ],
+        [
+          "Line",
+          90
+        ],
+        [
+          "Text",
+          11
+        ],
+        [
+          "Equation",
+          6
+        ],
+        [
+          "SectionHeader",
+          2
+        ],
+        [
+          "PageFooter",
+          1
+        ]
+      ],
+      "block_metadata": {
+        "llm_request_count": 0,
+        "llm_error_count": 0,
+        "llm_tokens_used": 0,
+        "previous_text": "",
+        "previous_type": "",
+        "previous_order": 0
+      }
+    },
+    {
+      "page_id": 8,
+      "text_extraction_method": "surya",
+      "block_counts": [
+        [
+          "Span",
+          57
+        ],
+        [
+          "Line",
+          38
+        ],
+        [
+          "Text",
+          5
+        ],
+        [
+          "Equation",
+          3
+        ],
+        [
+          "SectionHeader",
+          2
+        ],
+        [
+          "PageFooter",
+          1
+        ]
+      ],
+      "block_metadata": {
+        "llm_request_count": 0,
+        "llm_error_count": 3,
+        "llm_tokens_used": 0,
+        "previous_text": "",
+        "previous_type": "",
+        "previous_order": 0
+      }
+    },
+    {
+      "page_id": 9,
+      "text_extraction_method": "surya",
+      "block_counts": [
+        [
+          "Line",
+          59
+        ],
+        [
+          "Span",
+          38
+        ],
+        [
+          "Text",
+          10
+        ],
+        [
+          "Equation",
+          5
+        ],
+        [
+          "SectionHeader",
+          4
+        ],
+        [
+          "PageFooter",
+          1
+        ]
+      ],
+      "block_metadata": {
+        "llm_request_count": 0,
+        "llm_error_count": 0,
+        "llm_tokens_used": 0,
+        "previous_text": "",
+        "previous_type": "",
+        "previous_order": 0
+      }
+    },
+    {
+      "page_id": 10,
+      "text_extraction_method": "surya",
+      "block_counts": [
+        [
+          "Line",
+          52
+        ],
+        [
+          "Span",
+          50
+        ],
+        [
+          "Text",
+          10
+        ],
+        [
+          "Equation",
+          5
+        ],
+        [
+          "SectionHeader",
+          1
+        ],
+        [
+          "PageFooter",
+          1
+        ]
+      ],
+      "block_metadata": {
+        "llm_request_count": 0,
+        "llm_error_count": 0,
+        "llm_tokens_used": 0,
+        "previous_text": "",
+        "previous_type": "",
+        "previous_order": 0
+      }
+    },
+    {
+      "page_id": 11,
+      "text_extraction_method": "pdftext",
+      "block_counts": [
+        [
+          "Span",
+          98
+        ],
+        [
+          "Line",
+          28
+        ],
+        [
+          "Text",
+          4
+        ],
+        [
+          "Equation",
+          3
+        ],
+        [
+          "SectionHeader",
+          1
+        ],
+        [
+          "PageFooter",
+          1
+        ]
+      ],
+      "block_metadata": {
+        "llm_request_count": 0,
+        "llm_error_count": 0,
+        "llm_tokens_used": 0,
+        "previous_text": "",
+        "previous_type": "",
+        "previous_order": 0
+      }
+    },
+    {
+      "page_id": 12,
+      "text_extraction_method": "pdftext",
+      "block_counts": [
+        [
+          "Span",
+          178
+        ],
+        [
+          "Line",
+          51
+        ],
+        [
+          "Text",
+          11
+        ],
+        [
+          "Equation",
+          6
+        ],
+        [
+          "SectionHeader",
+          3
+        ],
+        [
+          "PageFooter",
+          1
+        ]
+      ],
+      "block_metadata": {
+        "llm_request_count": 0,
+        "llm_error_count": 0,
+        "llm_tokens_used": 0,
+        "previous_text": "",
+        "previous_type": "",
+        "previous_order": 0
+      }
+    },
+    {
+      "page_id": 13,
+      "text_extraction_method": "pdftext",
+      "block_counts": [
+        [
+          "Span",
+          5
+        ],
+        [
+          "Line",
+          3
+        ],
+        [
+          "Figure",
+          2
+        ],
+        [
+          "Caption",
+          2
+        ],
+        [
+          "FigureGroup",
+          2
+        ],
+        [
+          "PageFooter",
+          1
+        ]
+      ],
+      "block_metadata": {
+        "llm_request_count": 0,
+        "llm_error_count": 0,
+        "llm_tokens_used": 0,
+        "previous_text": "",
+        "previous_type": "",
+        "previous_order": 0
+      }
+    },
+    {
+      "page_id": 14,
+      "text_extraction_method": "pdftext",
+      "block_counts": [
+        [
+          "Span",
+          158
+        ],
+        [
+          "Line",
+          34
+        ],
+        [
+          "Equation",
+          5
+        ],
+        [
+          "Text",
+          3
+        ],
+        [
+          "Figure",
+          2
+        ],
+        [
+          "Caption",
+          2
+        ],
+        [
+          "FigureGroup",
+          2
+        ],
+        [
+          "PageFooter",
+          1
+        ]
+      ],
+      "block_metadata": {
+        "llm_request_count": 0,
+        "llm_error_count": 0,
+        "llm_tokens_used": 0,
+        "previous_text": "",
+        "previous_type": "",
+        "previous_order": 0
+      }
+    },
+    {
+      "page_id": 15,
+      "text_extraction_method": "pdftext",
+      "block_counts": [
+        [
+          "Span",
+          50
+        ],
+        [
+          "Line",
+          20
+        ],
+        [
+          "Text",
+          3
+        ],
+        [
+          "SectionHeader",
+          1
+        ],
+        [
+          "Equation",
+          1
+        ],
+        [
+          "PageFooter",
+          1
+        ]
+      ],
+      "block_metadata": {
+        "llm_request_count": 0,
+        "llm_error_count": 0,
+        "llm_tokens_used": 0,
+        "previous_text": "",
+        "previous_type": "",
+        "previous_order": 0
+      }
+    },
+    {
+      "page_id": 16,
+      "text_extraction_method": "pdftext",
+      "block_counts": [
+        [
+          "Span",
+          196
+        ],
+        [
+          "Line",
+          48
+        ],
+        [
+          "Text",
+          6
+        ],
+        [
+          "SectionHeader",
+          3
+        ],
+        [
+          "Equation",
+          3
+        ],
+        [
+          "PageFooter",
+          1
+        ]
+      ],
+      "block_metadata": {
+        "llm_request_count": 0,
+        "llm_error_count": 0,
+        "llm_tokens_used": 0,
+        "previous_text": "",
+        "previous_type": "",
+        "previous_order": 0
+      }
+    },
+    {
+      "page_id": 17,
+      "text_extraction_method": "surya",
+      "block_counts": [
+        [
+          "Span",
+          115
+        ],
+        [
+          "Line",
+          51
+        ],
+        [
+          "Text",
+          9
+        ],
+        [
+          "SectionHeader",
+          3
+        ],
+        [
+          "Equation",
+          2
+        ],
+        [
+          "PageFooter",
+          1
+        ]
+      ],
+      "block_metadata": {
+        "llm_request_count": 0,
+        "llm_error_count": 1,
+        "llm_tokens_used": 0,
+        "previous_text": "",
+        "previous_type": "",
+        "previous_order": 0
+      }
+    },
+    {
+      "page_id": 18,
+      "text_extraction_method": "surya",
+      "block_counts": [
+        [
+          "Span",
+          68
+        ],
+        [
+          "Line",
+          56
+        ],
+        [
+          "Text",
+          6
+        ],
+        [
+          "SectionHeader",
+          1
+        ],
+        [
+          "Caption",
+          1
+        ],
+        [
+          "PageFooter",
+          1
+        ]
+      ],
+      "block_metadata": {
+        "llm_request_count": 0,
+        "llm_error_count": 0,
+        "llm_tokens_used": 0,
+        "previous_text": "",
+        "previous_type": "",
+        "previous_order": 0
+      }
+    },
+    {
+      "page_id": 19,
+      "text_extraction_method": "pdftext",
+      "block_counts": [
+        [
+          "Span",
+          13
+        ],
+        [
+          "Line",
+          7
+        ],
+        [
+          "Text",
+          3
+        ],
+        [
+          "Figure",
+          2
+        ],
+        [
+          "Caption",
+          2
+        ],
+        [
+          "FigureGroup",
+          2
+        ],
+        [
+          "PageFooter",
+          1
+        ]
+      ],
+      "block_metadata": {
+        "llm_request_count": 0,
+        "llm_error_count": 0,
+        "llm_tokens_used": 0,
+        "previous_text": "",
+        "previous_type": "",
+        "previous_order": 0
+      }
+    },
+    {
+      "page_id": 20,
+      "text_extraction_method": "pdftext",
+      "block_counts": [
+        [
+          "Span",
+          16
+        ],
+        [
+          "Line",
+          6
+        ],
+        [
+          "Figure",
+          2
+        ],
+        [
+          "Caption",
+          2
+        ],
+        [
+          "Text",
+          2
+        ],
+        [
+          "FigureGroup",
+          2
+        ],
+        [
+          "PageFooter",
+          1
+        ]
+      ],
+      "block_metadata": {
+        "llm_request_count": 0,
+        "llm_error_count": 0,
+        "llm_tokens_used": 0,
+        "previous_text": "",
+        "previous_type": "",
+        "previous_order": 0
+      }
+    },
+    {
+      "page_id": 21,
+      "text_extraction_method": "surya",
+      "block_counts": [
+        [
+          "Line",
+          62
+        ],
+        [
+          "Span",
+          38
+        ],
+        [
+          "Text",
+          12
+        ],
+        [
+          "Equation",
+          8
+        ],
+        [
+          "SectionHeader",
+          3
+        ],
+        [
+          "PageFooter",
+          1
+        ]
+      ],
+      "block_metadata": {
+        "llm_request_count": 0,
+        "llm_error_count": 0,
+        "llm_tokens_used": 0,
+        "previous_text": "",
+        "previous_type": "",
+        "previous_order": 0
+      }
+    },
+    {
+      "page_id": 22,
+      "text_extraction_method": "surya",
+      "block_counts": [
+        [
+          "Span",
+          43
+        ],
+        [
+          "Line",
+          31
+        ],
+        [
+          "Text",
+          7
+        ],
+        [
+          "Equation",
+          4
+        ],
+        [
+          "PageFooter",
+          1
+        ]
+      ],
+      "block_metadata": {
+        "llm_request_count": 0,
+        "llm_error_count": 0,
+        "llm_tokens_used": 0,
+        "previous_text": "",
+        "previous_type": "",
+        "previous_order": 0
+      }
+    },
+    {
+      "page_id": 23,
+      "text_extraction_method": "pdftext",
+      "block_counts": [
+        [
+          "Span",
+          17
+        ],
+        [
+          "Line",
+          9
+        ],
+        [
+          "Picture",
+          4
+        ],
+        [
+          "Caption",
+          4
+        ],
+        [
+          "PictureGroup",
+          4
+        ],
+        [
+          "SectionHeader",
+          1
+        ],
+        [
+          "Text",
+          1
+        ],
+        [
+          "PageFooter",
+          1
+        ]
+      ],
+      "block_metadata": {
+        "llm_request_count": 0,
+        "llm_error_count": 0,
+        "llm_tokens_used": 0,
+        "previous_text": "",
+        "previous_type": "",
+        "previous_order": 0
+      }
+    },
+    {
+      "page_id": 24,
+      "text_extraction_method": "pdftext",
+      "block_counts": [
+        [
+          "Span",
+          11
+        ],
+        [
+          "Line",
+          6
+        ],
+        [
+          "Text",
+          2
+        ],
+        [
+          "Caption",
+          2
+        ],
+        [
+          "Picture",
+          1
+        ],
+        [
+          "Figure",
+          1
+        ],
+        [
+          "PageFooter",
+          1
+        ],
+        [
+          "PictureGroup",
+          1
+        ],
+        [
+          "FigureGroup",
+          1
+        ]
+      ],
+      "block_metadata": {
+        "llm_request_count": 0,
+        "llm_error_count": 0,
+        "llm_tokens_used": 0,
+        "previous_text": "",
+        "previous_type": "",
+        "previous_order": 0
+      }
+    },
+    {
+      "page_id": 25,
+      "text_extraction_method": "pdftext",
+      "block_counts": [
+        [
+          "Span",
+          7
+        ],
+        [
+          "Line",
+          4
+        ],
+        [
+          "Figure",
+          1
+        ],
+        [
+          "Caption",
+          1
+        ],
+        [
+          "Text",
+          1
+        ],
+        [
+          "PageFooter",
+          1
+        ],
+        [
+          "FigureGroup",
+          1
+        ]
+      ],
+      "block_metadata": {
+        "llm_request_count": 0,
+        "llm_error_count": 0,
+        "llm_tokens_used": 0,
+        "previous_text": "",
+        "previous_type": "",
+        "previous_order": 0
+      }
+    },
+    {
+      "page_id": 26,
+      "text_extraction_method": "pdftext",
+      "block_counts": [
+        [
+          "Span",
+          44
+        ],
+        [
+          "Line",
+          23
+        ],
+        [
+          "ListItem",
+          10
+        ],
+        [
+          "SectionHeader",
+          1
+        ],
+        [
+          "PageFooter",
+          1
+        ],
+        [
+          "ListGroup",
+          1
+        ]
+      ],
+      "block_metadata": {
+        "llm_request_count": 0,
+        "llm_error_count": 0,
+        "llm_tokens_used": 0,
+        "previous_text": "",
+        "previous_type": "",
+        "previous_order": 0
+      }
+    }
+  ],
+  "debug_data_path": "debug_data/Spiral Galaxy"
+}
