@@ -2,6 +2,28 @@
   "schema": 2,
   "versions": [
     {
+      "version": "pr-9",
+      "ref": "refs/pull/9/merge",
+      "sha": "9358aa6249a6147fe7af08b72f387e195cba0c92",
+      "timestamp": "2026-04-18T12:17:23.886Z",
+      "commits": [
+        {
+          "sha": "9358aa6249a6147fe7af08b72f387e195cba0c92",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-18T06:17:10-06:00",
+          "message": "Merge 26b46aa40f4eb57b94a215b0718a4f148ebb14b6 into 0cfc7e33833484649a3e85946cd30103746a1854\n"
+        },
+        {
+          "sha": "26b46aa40f4eb57b94a215b0718a4f148ebb14b6",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-18T06:16:46-06:00",
+          "message": "refactor(physics): move simStep decrement before param packing\n\nPreviously, reverse-mode (timeDirection < 0) decremented simStep inside\nthe else-branch of attractor handling — AFTER tidal angle, sim clock, and\njournal index were already computed from the pre-decrement simStep. That\nmeant the reverse step at simStep=N used the params from step N, then\ndecremented to N-1 after reading the journal at index N.\n\nThe consequence: forward and reverse at matching simStep values used\ndifferent params. On forward, step N uses simStep=N then increments to\nN+1. On reverse, we want step N+1 → N to use the exact same params as\nthe original forward step that produced that state. Deferring the\ndecrement meant we were using the wrong clock and journal index.\n\nFix: decrement simStep at the top of compute() for reverse mode, so that\nevery downstream consumer (tidal angle at f32[7], attractor journal\nlookup, `nowSec`) refers to the simulation step we're integrating back\ntoward — matching the original forward-step params exactly.\n\nThis is required for the time-reversal invariant: reverse(forward(s)) = s.\n\nGenerated with [Claude Code](https://claude.ai/code)\nvia [Happy](https://happy.engineering)\n\nCo-Authored-By: Claude <noreply@anthropic.com>\nCo-Authored-By: Happy <yesreply@happy.engineering>\n"
+        }
+      ]
+    },
+    {
       "version": "pr-8",
       "ref": "refs/pull/8/merge",
       "sha": "0596199ba5714db2dda81c98d3270edc08fc95c1",
