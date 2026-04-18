@@ -601,6 +601,12 @@ function getOrbitCamera() {
 // When set by XR frame loop, overrides orbit camera for all rendering
 let xrCameraOverride: XRCameraOverride | null = null;
 
+// [LAW:one-source-of-truth] When set, getDepthAttachment uses this XR-compositor-owned
+// depth view instead of postFx.depth. Submitting per-pixel depth to the compositor lets
+// Vision Pro do parallax-correct reprojection during head motion — without it, the
+// compositor can only planar-warp and the scene appears to shear/jitter as you turn.
+let xrDepthOverride: GPUTextureView | null = null;
+
 // ---------- HDR / Bloom / Post-FX shared state ----------
 // [LAW:one-source-of-truth] HDR scene textures, bloom mip chain, and post pipelines are owned here. Sims never see them directly.
 type PostFxState = {
@@ -892,8 +898,10 @@ function getColorAttachment(
 }
 
 function getDepthAttachment(_simDepthRef: DepthRef, _viewport: number[] | null): GPURenderPassDepthStencilAttachment {
+  // [LAW:dataflow-not-control-flow] Same attachment shape every call; only the view varies.
+  // XR mode supplies the compositor's depth view so head-motion reprojection works correctly.
   return {
-    view: postFx.depth!.createView(),
+    view: xrDepthOverride ?? postFx.depth!.createView(),
     depthClearValue: 1.0,
     depthLoadOp: 'clear',
     depthStoreOp: 'store',
@@ -1944,6 +1952,12 @@ function createPhysicsSimulation() {
         return;
       }
 
+      // [LAW:one-source-of-truth] simStep adjustment happens BEFORE param packing so that
+      // time, attractor journal index, and tidal angle all refer to the same simulation step.
+      // Forward: step N uses simStep=N, then increments to N+1 after journal write.
+      // Reverse: step N+1 decrements to N first, then uses simStep=N — same params as the original forward step.
+      if (timeDirection < 0) simStep--;
+
       const p = state.physics;
       const baseDt = 0.016 * state.fx.timeScale;
       const dt = baseDt * timeDirection;
@@ -1993,8 +2007,7 @@ function createPhysicsSimulation() {
         journalHighWater = Math.max(journalHighWater, simStep);
         simStep++;
       } else {
-        // Reverse: read attractor data from journal for the CURRENT simStep (before decrement).
-        simStep--;
+        // Reverse: read attractor data from journal at simStep (already decremented above).
         const jBase = (simStep % JOURNAL_CAPACITY) * JOURNAL_ENTRY_FLOATS;
         u32[8] = journal[jBase]; // attractorCount
         u32[9] = 0; u32[10] = 0; u32[11] = 0;
@@ -4594,17 +4607,23 @@ async function toggleXR() {
     syncRenderConfig(preferredFormat, 1);
     const scaleFactor = xrBinding.nativeProjectionScaleFactor;
 
-    // Try creating the projection layer with native scale, fall back to default scale.
-    // Depth is managed per-frame (see xrFrame) so we don't request depthStencilFormat here.
+    // Prefer configs with depth so the compositor gets per-pixel depth for reprojection.
+    // Depth-less configs remain as last-resort fallbacks if the platform rejects the format.
     const layerConfigs: XRGPUProjectionLayerInit[] = [
+      { colorFormat: preferredFormat, depthStencilFormat: 'depth24plus', scaleFactor, textureType: 'texture-array' },
+      { colorFormat: preferredFormat, depthStencilFormat: 'depth24plus', textureType: 'texture-array' },
+      { colorFormat: preferredFormat, depthStencilFormat: 'depth24plus', scaleFactor },
+      { colorFormat: preferredFormat, depthStencilFormat: 'depth24plus' },
       { colorFormat: preferredFormat, scaleFactor, textureType: 'texture-array' },
       { colorFormat: preferredFormat, textureType: 'texture-array' },
       { colorFormat: preferredFormat, scaleFactor },
       { colorFormat: preferredFormat },
     ];
+    let chosenConfig: XRGPUProjectionLayerInit | null = null;
     for (const config of layerConfigs) {
       try {
         xrLayer = xrBinding.createProjectionLayer(config);
+        chosenConfig = config;
         break;
       } catch (e) {
         console.warn('[XR] Projection layer config failed, trying next:', (e as Error).message);
@@ -4612,6 +4631,15 @@ async function toggleXR() {
       }
     }
     if (!xrLayer) throw new Error('All projection layer configurations failed');
+    console.info('[XR] Projection layer created:', chosenConfig, {
+      textureWidth: xrLayer.textureWidth,
+      textureHeight: xrLayer.textureHeight,
+    });
+
+    // fixedFoveation = 0 → no peripheral blur. Vision Pro's default is non-zero and
+    // visibly softens anything not in the center of view. Silently ignored if the
+    // property isn't implemented on this platform.
+    try { (xrLayer as unknown as { fixedFoveation: number }).fixedFoveation = 0; } catch (_) {}
 
     // Assign our GPU projection layer as the sole render target for this session.
     // This replaces the default baseLayer (canvas-backed) with our GPU texture layer.
@@ -4733,6 +4761,15 @@ function xrFrame(time: DOMHighResTimeStamp, xrFrameData: XRFrame) {
       const viewDesc = subImage.getViewDescriptor ? subImage.getViewDescriptor() : {};
       const textureView = subImage.colorTexture.createView(viewDesc);
 
+      // [LAW:one-source-of-truth] Scene depth is written directly into the XR compositor's
+      // depth texture. With depth in hand, Vision Pro does per-pixel parallax-correct
+      // reprojection between render and scanout — eliminating the jitter/shear that
+      // planar-only warp produces during head motion. If the layer was created without
+      // a depth format (fallback config), the override stays null and getDepthAttachment
+      // transparently falls back to postFx.depth (no reprojection benefit, but renders).
+      const depthTex = (subImage as unknown as { depthStencilTexture?: GPUTexture }).depthStencilTexture;
+      xrDepthOverride = depthTex ? depthTex.createView(viewDesc) : null;
+
       // Set the per-eye camera override so getCameraUniformData() uses XR matrices.
       const pos = view.transform.position;
       xrCameraOverride = {
@@ -4752,6 +4789,8 @@ function xrFrame(time: DOMHighResTimeStamp, xrFrameData: XRFrame) {
       sim.render(encoder, postFx.scene[sceneIdx].createView(), null, viewIndex);
 
       // Overlay the XR UI panel into the HDR scene so it picks up tonemap + bloom.
+      // Reuse the same depth view so UI z-tests against scene depth and the stored
+      // depth going to the compositor reflects the final pixel occlusion.
       const uiPass = encoder.beginRenderPass({
         colorAttachments: [{
           view: postFx.scene[sceneIdx].createView(),
@@ -4759,7 +4798,7 @@ function xrFrame(time: DOMHighResTimeStamp, xrFrameData: XRFrame) {
           storeOp: 'store',
         }],
         depthStencilAttachment: {
-          view: postFx.depth!.createView(),
+          view: xrDepthOverride ?? postFx.depth!.createView(),
           depthLoadOp: 'load',
           depthStoreOp: 'store',
         },
@@ -4774,6 +4813,7 @@ function xrFrame(time: DOMHighResTimeStamp, xrFrameData: XRFrame) {
 
     // Clear overrides after all eyes are encoded — desktop frame loop must not inherit XR state.
     xrCameraOverride = null;
+    xrDepthOverride = null;
 
     device.queue.submit([encoder.finish()]);
   } catch (e) {
