@@ -4,15 +4,22 @@
     {
       "version": "pr-9",
       "ref": "refs/pull/9/merge",
-      "sha": "c3e5a63951052b9fb049c62d6afd1b203f5a778f",
-      "timestamp": "2026-04-18T12:54:01.981Z",
+      "sha": "080ade397943552526c034b68641c360808df68c",
+      "timestamp": "2026-04-18T12:59:35.032Z",
       "commits": [
         {
-          "sha": "c3e5a63951052b9fb049c62d6afd1b203f5a778f",
+          "sha": "080ade397943552526c034b68641c360808df68c",
           "author_name": "Brandon Fryslie",
           "author_email": "530235+brandon-fryslie@users.noreply.github.com",
-          "timestamp": "2026-04-18T12:53:46Z",
-          "message": "Merge f52cfcb0d272e6b2bf94957e330d9bf92f59ebec into e6ab187c83ed1f670c0db5b170e99105e2083942\n"
+          "timestamp": "2026-04-18T12:59:17Z",
+          "message": "Merge f1f879fbb38fb19e763cf85b538a2f42ce3f3824 into e6ab187c83ed1f670c0db5b170e99105e2083942\n"
+        },
+        {
+          "sha": "f1f879fbb38fb19e763cf85b538a2f42ce3f3824",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-18T06:59:08-06:00",
+          "message": "docs: clarify simStep semantics in comment and CLAUDE.md\n\n- Inline comment: rephrase \"increments to N+1 after journal write\" to\n  \"advance to N+1 by end of compute\", which more accurately describes\n  the forward pattern without implying an ordering relative to the\n  journal write specifically.\n\n- CLAUDE.md \"Simulation Clock\": drop the outdated \"monotonic integer\n  counter, incremented each compute dispatch\" claim — reverse mode\n  decrements. Document that simStep now advances by timeDirection, and\n  explain why the decrement happens at the top of compute() (single\n  source of truth for \"which step these params describe\").\n\n- CLAUDE.md \"Attractor Journal\": make the forward/reverse bullets\n  explicit about the order of operations — forward writes then\n  increments, reverse decrements then reads.\n\nGenerated with [Claude Code](https://claude.ai/code)\nvia [Happy](https://happy.engineering)\n\nCo-Authored-By: Claude <noreply@anthropic.com>\nCo-Authored-By: Happy <yesreply@happy.engineering>\n"
         },
         {
           "sha": "f52cfcb0d272e6b2bf94957e330d9bf92f59ebec",
