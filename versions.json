@@ -2,39 +2,24 @@
   "schema": 2,
   "versions": [
     {
-      "version": "pr-9",
-      "ref": "refs/pull/9/merge",
-      "sha": "9358aa6249a6147fe7af08b72f387e195cba0c92",
-      "timestamp": "2026-04-18T12:17:23.886Z",
-      "commits": [
-        {
-          "sha": "9358aa6249a6147fe7af08b72f387e195cba0c92",
-          "author_name": "Brandon Fryslie",
-          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
-          "timestamp": "2026-04-18T06:17:10-06:00",
-          "message": "Merge 26b46aa40f4eb57b94a215b0718a4f148ebb14b6 into 0cfc7e33833484649a3e85946cd30103746a1854\n"
-        },
-        {
-          "sha": "26b46aa40f4eb57b94a215b0718a4f148ebb14b6",
-          "author_name": "Brandon Fryslie",
-          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
-          "timestamp": "2026-04-18T06:16:46-06:00",
-          "message": "refactor(physics): move simStep decrement before param packing\n\nPreviously, reverse-mode (timeDirection < 0) decremented simStep inside\nthe else-branch of attractor handling — AFTER tidal angle, sim clock, and\njournal index were already computed from the pre-decrement simStep. That\nmeant the reverse step at simStep=N used the params from step N, then\ndecremented to N-1 after reading the journal at index N.\n\nThe consequence: forward and reverse at matching simStep values used\ndifferent params. On forward, step N uses simStep=N then increments to\nN+1. On reverse, we want step N+1 → N to use the exact same params as\nthe original forward step that produced that state. Deferring the\ndecrement meant we were using the wrong clock and journal index.\n\nFix: decrement simStep at the top of compute() for reverse mode, so that\nevery downstream consumer (tidal angle at f32[7], attractor journal\nlookup, `nowSec`) refers to the simulation step we're integrating back\ntoward — matching the original forward-step params exactly.\n\nThis is required for the time-reversal invariant: reverse(forward(s)) = s.\n\nGenerated with [Claude Code](https://claude.ai/code)\nvia [Happy](https://happy.engineering)\n\nCo-Authored-By: Claude <noreply@anthropic.com>\nCo-Authored-By: Happy <yesreply@happy.engineering>\n"
-        }
-      ]
-    },
-    {
       "version": "pr-8",
       "ref": "refs/pull/8/merge",
-      "sha": "0596199ba5714db2dda81c98d3270edc08fc95c1",
-      "timestamp": "2026-04-18T12:15:50.107Z",
+      "sha": "907e1a6c7587101897c9d1fe27aa1f2beeb449cc",
+      "timestamp": "2026-04-18T12:23:32.132Z",
       "commits": [
         {
-          "sha": "0596199ba5714db2dda81c98d3270edc08fc95c1",
+          "sha": "907e1a6c7587101897c9d1fe27aa1f2beeb449cc",
           "author_name": "Brandon Fryslie",
           "author_email": "530235+brandon-fryslie@users.noreply.github.com",
-          "timestamp": "2026-04-18T12:15:35Z",
-          "message": "Merge 568f71a1eb1a78f7177f4a1064017fc2b1f019d4 into 0cfc7e33833484649a3e85946cd30103746a1854\n"
+          "timestamp": "2026-04-18T06:23:17-06:00",
+          "message": "Merge 226b55db1eb75a1b044b9b05cbc8e525aa137024 into 0cfc7e33833484649a3e85946cd30103746a1854\n"
+        },
+        {
+          "sha": "226b55db1eb75a1b044b9b05cbc8e525aa137024",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-18T06:23:13-06:00",
+          "message": "fix(xr): drop unknown casts, move override cleanup to finally\n\n- Use subImage.depthStencilTexture directly (typed as GPUTexture | null\n  in webxr-gpu.d.ts); the unknown cast weakened TS's null-handling\n  contract without adding safety.\n\n- Move xrCameraOverride and xrDepthOverride null-assignment into the\n  finally block. Previously, a throw inside the try left the overrides\n  set, retaining a compositor-owned depth view past the frame boundary\n  (compositor reclaims those between frames — unsafe) and leaking XR\n  matrices into the desktop frame loop if the user exits VR after an\n  error. The finally now clears both regardless of outcome.\n\nGenerated with [Claude Code](https://claude.ai/code)\nvia [Happy](https://happy.engineering)\n\nCo-Authored-By: Claude <noreply@anthropic.com>\nCo-Authored-By: Happy <yesreply@happy.engineering>\n"
         },
         {
           "sha": "568f71a1eb1a78f7177f4a1064017fc2b1f019d4",
@@ -56,6 +41,28 @@
           "author_email": "530235+brandon-fryslie@users.noreply.github.com",
           "timestamp": "2026-04-18T01:49:10-06:00",
           "message": "fix(xr): submit scene depth to compositor for parallax-correct reprojection\n\nVision Pro's compositor reprojects each rendered frame to the actual head\npose at scanout (~11-16ms after render). Without a depth buffer, it can\nonly planar-warp — which shears the world during head motion and reads as\njitter/instability. Also sets fixedFoveation=0 to kill peripheral blur.\n\n- Add xrDepthOverride module variable; getDepthAttachment uses it when set\n- Projection layer configs now request depthStencilFormat='depth24plus'\n  (depth-less configs kept as last-resort fallbacks)\n- xrFrame binds subImage.depthStencilTexture per eye before sim.render\n  and the UI overlay pass; overrides cleared after both eyes encode\n- Set xrLayer.fixedFoveation = 0 for full peripheral resolution\n- Log chosen layer config + texture dimensions to aid diagnosis\n\nGenerated with [Claude Code](https://claude.ai/code)\nvia [Happy](https://happy.engineering)\n\nCo-Authored-By: Claude <noreply@anthropic.com>\nCo-Authored-By: Happy <yesreply@happy.engineering>\n"
+        }
+      ]
+    },
+    {
+      "version": "pr-9",
+      "ref": "refs/pull/9/merge",
+      "sha": "9358aa6249a6147fe7af08b72f387e195cba0c92",
+      "timestamp": "2026-04-18T12:17:23.886Z",
+      "commits": [
+        {
+          "sha": "9358aa6249a6147fe7af08b72f387e195cba0c92",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-18T06:17:10-06:00",
+          "message": "Merge 26b46aa40f4eb57b94a215b0718a4f148ebb14b6 into 0cfc7e33833484649a3e85946cd30103746a1854\n"
+        },
+        {
+          "sha": "26b46aa40f4eb57b94a215b0718a4f148ebb14b6",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-18T06:16:46-06:00",
+          "message": "refactor(physics): move simStep decrement before param packing\n\nPreviously, reverse-mode (timeDirection < 0) decremented simStep inside\nthe else-branch of attractor handling — AFTER tidal angle, sim clock, and\njournal index were already computed from the pre-decrement simStep. That\nmeant the reverse step at simStep=N used the params from step N, then\ndecremented to N-1 after reading the journal at index N.\n\nThe consequence: forward and reverse at matching simStep values used\ndifferent params. On forward, step N uses simStep=N then increments to\nN+1. On reverse, we want step N+1 → N to use the exact same params as\nthe original forward step that produced that state. Deferring the\ndecrement meant we were using the wrong clock and journal index.\n\nFix: decrement simStep at the top of compute() for reverse mode, so that\nevery downstream consumer (tidal angle at f32[7], attractor journal\nlookup, `nowSec`) refers to the simulation step we're integrating back\ntoward — matching the original forward-step params exactly.\n\nThis is required for the time-reversal invariant: reverse(forward(s)) = s.\n\nGenerated with [Claude Code](https://claude.ai/code)\nvia [Happy](https://happy.engineering)\n\nCo-Authored-By: Claude <noreply@anthropic.com>\nCo-Authored-By: Happy <yesreply@happy.engineering>\n"
         }
       ]
     },
