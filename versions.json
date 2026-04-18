@@ -2,6 +2,28 @@
   "schema": 2,
   "versions": [
     {
+      "version": "pr-8",
+      "ref": "refs/pull/8/merge",
+      "sha": "d26777750d8e2b42e0e950b6ebf5ef180009a146",
+      "timestamp": "2026-04-18T07:49:53.712Z",
+      "commits": [
+        {
+          "sha": "d26777750d8e2b42e0e950b6ebf5ef180009a146",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-18T01:49:40-06:00",
+          "message": "Merge 078771a38b2dcc54b55f97afdee27570118a1eb6 into 0cfc7e33833484649a3e85946cd30103746a1854\n"
+        },
+        {
+          "sha": "078771a38b2dcc54b55f97afdee27570118a1eb6",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-18T01:49:10-06:00",
+          "message": "fix(xr): submit scene depth to compositor for parallax-correct reprojection\n\nVision Pro's compositor reprojects each rendered frame to the actual head\npose at scanout (~11-16ms after render). Without a depth buffer, it can\nonly planar-warp — which shears the world during head motion and reads as\njitter/instability. Also sets fixedFoveation=0 to kill peripheral blur.\n\n- Add xrDepthOverride module variable; getDepthAttachment uses it when set\n- Projection layer configs now request depthStencilFormat='depth24plus'\n  (depth-less configs kept as last-resort fallbacks)\n- xrFrame binds subImage.depthStencilTexture per eye before sim.render\n  and the UI overlay pass; overrides cleared after both eyes encode\n- Set xrLayer.fixedFoveation = 0 for full peripheral resolution\n- Log chosen layer config + texture dimensions to aid diagnosis\n\nGenerated with [Claude Code](https://claude.ai/code)\nvia [Happy](https://happy.engineering)\n\nCo-Authored-By: Claude <noreply@anthropic.com>\nCo-Authored-By: Happy <yesreply@happy.engineering>\n"
+        }
+      ]
+    },
+    {
       "version": "pr-6",
       "ref": "refs/pull/6/merge",
       "sha": "9996a2b23ed451f21f869c3015ef7c1a566b5571",
