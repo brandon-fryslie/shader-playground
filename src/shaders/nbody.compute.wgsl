@@ -140,17 +140,22 @@ fn main(@builtin(global_invocation_id) gid: vec3u, @builtin(local_invocation_id)
   }
 
   // ── DARK MATTER: Plummer halo (conservative) ───────────────────────────────
-  // Spherical potential: φ = -G*M_halo / sqrt(r² + a²)
-  // Force: F = -G*M_halo * r / (r² + a²)^(3/2)
+  // Spherical potential: φ = -M_halo / sqrt(r² + a²)
+  // Force: F = -M_halo * r / (r² + a²)^(3/2)
+  // haloMass is a GM-equivalent parameter (gravitational constant rolled in), NOT a raw mass.
+  // It is intentionally decoupled from params.G because params.G is normalized for the pairwise
+  // N-body sum (p.G * 0.001 / sqrt(sourceCount/1000)) — applying it here would crush the halo
+  // force by ~1000× and break the confinement tuning.
   let haloR2 = dot(posHalf, posHalf);
   let haloD2 = haloR2 + params.haloScale * params.haloScale;
   let haloInv3 = 1.0 / (haloD2 * sqrt(haloD2));
   acc -= posHalf * (params.haloMass * haloInv3);
 
   // ── DARK MATTER: Miyamoto-Nagai disk (conservative) ────────────────────────
-  // Flattened axisymmetric potential: φ = -G*M_disk / sqrt(R² + (a + sqrt(z² + b²))²)
+  // Flattened axisymmetric potential: φ = -M_disk / sqrt(R² + (a + sqrt(z² + b²))²)
   // where R = cylindrical radius, z = height above disk plane.
-  // Force in Cartesian: F = -G*M / D³ * (R_vec + n * z * a / B)
+  // Force in Cartesian: F = -M / D³ * (R_vec + n * z * a / B)
+  // diskMass is GM-equivalent (same reasoning as haloMass above).
   let n = params.diskNormal;
   let zDisk = dot(posHalf, n);
   let B = sqrt(zDisk * zDisk + params.diskScaleB * params.diskScaleB);

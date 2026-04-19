@@ -1593,6 +1593,10 @@ function createPhysicsSimulation() {
   const diskM = state.physics.diskMass ?? 3.0;
   const diskA = state.physics.diskScaleA ?? 1.5;
   const diskB = state.physics.diskScaleB ?? 0.3;
+  // [LAW:one-source-of-truth] Initial velocities must match the exact force the shader applies.
+  // haloMass and diskMass are GM-equivalent parameters here (decoupled from state.physics.G for
+  // the same reason as the shader — see nbody.compute.wgsl:142-148). Multiplying by G here would
+  // break initial equilibrium with the shader forces.
   function darkMatterVcirc2(r: number): number {
     // Plummer halo: v² = M * r² / (r² + a²)^(3/2)
     const r2 = r * r;
@@ -2087,7 +2091,10 @@ function createPhysicsSimulation() {
       // ── ATTRACTOR DATA: forward computes + journals; reverse reads from journal ──
       if (timeDirection > 0) {
         // Forward: compute attractor strengths from live state, write to journal.
-        const nowSec = simStep * baseDt;
+        // [LAW:one-source-of-truth] Wall clock for attractor lifecycle — matches chargeStart/releaseTime
+        // (set via nowSeconds()) and pruneAttractors(). Reverse reads journaled values, so reverse
+        // doesn't care which clock drove the forward computation.
+        const nowSec = nowSeconds();
         const ceiling = p.interactionStrength ?? 1;
         const attractors = state.attractors;
         const attractorN = Math.min(attractors.length, ATTRACTOR_MAX);
