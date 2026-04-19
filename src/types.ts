@@ -30,8 +30,8 @@ export interface PhysicsParams {
   distribution: Distribution;
   interactionStrength: number;
   tidalStrength: number;
-  attractorDecayRatio: number;
-  attractorDecayCap: number;
+  attractorDecayRatio: number;  // decay duration = this × holdDuration, capped by attractorDecayCap
+  attractorDecayCap: number;    // seconds — upper bound on decay duration
   // Dark matter potential — conservative forces replacing dissipative disk recovery.
   haloMass: number;       // Plummer halo gravitational mass
   haloScale: number;      // Plummer halo softening radius

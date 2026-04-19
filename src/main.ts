@@ -464,21 +464,23 @@ const state: AppState = {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 // [LAW:one-source-of-truth] Timing constants own the attractor behavior contract.
-// Decay ratio + cap are user-tunable via sliders on state.physics.
+// Decay timing (ratio × cap) is user-tunable via the Decay Ratio and Decay Cap sliders on state.physics.
 const ATTRACTOR_CHARGE_TIME = 1.5;        // seconds to reach full strength (quadratic ramp)
 const ATTRACTOR_MAX = 32;                 // hard cap; oldest evicted if exceeded
-const ATTRACTOR_MIN_DECAY = 0.05;         // seconds — floor so instant taps still visually decay
+const ATTRACTOR_MIN_DECAY = 0.05;         // seconds — lower bound so releases are always visible
 
 function nowSeconds() { return performance.now() * 0.001; }
 
-// [LAW:single-enforcer] Decay duration owned here. Ratio/cap from user sliders, clamped at both ends.
+// [LAW:single-enforcer] Decay duration is computed in exactly one place, here, from user-tunable ratio/cap.
+// Minimum floor of ATTRACTOR_MIN_DECAY prevents zero-duration decay on instant-release taps.
 function attractorDecayDuration(a: Attractor): number {
   const ratio = state.physics.attractorDecayRatio ?? 0.5;
   const cap = state.physics.attractorDecayCap ?? 2.0;
   return Math.max(ATTRACTOR_MIN_DECAY, Math.min(cap, ratio * a.holdDuration));
 }
 
-// [LAW:dataflow-not-control-flow] Strength is a pure function of (attractor, now).
+// [LAW:dataflow-not-control-flow] Strength is a pure function of (attractor, now). No branches on lifecycle state —
+// the same quadratic formula handles charging and decay through the data (releaseTime < 0 selects which branch of the curve).
 function attractorStrength(a: Attractor, now: number, ceiling: number): number {
   if (a.releaseTime < 0) {
     const t = Math.min(1, (now - a.chargeStart) / ATTRACTOR_CHARGE_TIME);
@@ -4630,10 +4632,15 @@ function updateXRSimulationInteraction(frame: XRFrame) {
     state.mouse.y = worldPoint[1];
   }
 
-  // Wand via XR pinch: create on first sample, track on each subsequent sample.
+  // [LAW:one-source-of-truth] pointerToAttractor is authoritative for "is there a held attractor for this pointer".
+  // Using that instead of xrInteractionHasSample means transient pose/tracking drops resume the same attractor
+  // instead of orphaning the charging one and spawning a new one.
   if (state.mode === 'physics') {
-    if (xrInteractionHasSample) moveAttractor(XR_ATTRACTOR_POINTER_ID, worldPoint);
-    else createAttractor(XR_ATTRACTOR_POINTER_ID, worldPoint);
+    if (state.pointerToAttractor.has(XR_ATTRACTOR_POINTER_ID)) {
+      moveAttractor(XR_ATTRACTOR_POINTER_ID, worldPoint);
+    } else {
+      createAttractor(XR_ATTRACTOR_POINTER_ID, worldPoint);
+    }
   }
 
   xrInteractionHasSample = true;
@@ -4889,6 +4896,8 @@ function xrFrame(time: DOMHighResTimeStamp, xrFrameData: XRFrame) {
   refreshThemeColors(time);
   const isEarlyFrame = xrFrameCount < XR_FIRST_FRAMES_TO_LOG;
   if (isEarlyFrame) logInfo('xr:frame', `xrFrame #${xrFrameCount} entered`, { mode: state.mode });
+  // [LAW:single-enforcer] Same prune call as desktop frame loop — keeps the attractor array clean in XR too.
+  pruneAttractors(time * 0.001);
 
   // FPS counter for XR — same logic as desktop frame loop
   frameCount++;
@@ -5093,7 +5102,9 @@ function resolveTimestamps(encoder: GPUCommandEncoder, now: number) {
   const ts = gpuTs;
   device.queue.onSubmittedWorkDone().then(() => {
     ts.stagingBuf.mapAsync(GPUMapMode.READ).then(() => {
-      const ns = new BigInt64Array(ts.stagingBuf.getMappedRange().slice(0));
+      // [LAW:one-source-of-truth] GPU timestamp queries are unsigned 64-bit counters.
+      // BigUint64Array avoids negative durations if the high bit is ever set.
+      const ns = new BigUint64Array(ts.stagingBuf.getMappedRange().slice(0));
       ts.stagingBuf.unmap();
       ts.pending = false;
       const toMs = (a: bigint, b: bigint) => Number(b - a) / 1_000_000;
@@ -5249,11 +5260,7 @@ function runFadePass(encoder: GPUCommandEncoder, prevSceneIdx: number, currScene
   if (persistence < 0.001) return;
   postFx.fadeParams[0] = persistence;
   device.queue.writeBuffer(postFx.fadeUBO!, 0, postFx.fadeParams);
-  const bg = device.createBindGroup({ layout: postFx.fadeBGL!, entries: [
-    { binding: 0, resource: postFx.sceneViews[prevSceneIdx] },
-    { binding: 1, resource: postFx.linSampler! },
-    { binding: 2, resource: { buffer: postFx.fadeUBO! } },
-  ]});
+  // [LAW:single-enforcer] Bind group is owned by ensureHdrTargets — allocate-on-resize, reuse-per-frame.
   const pass = encoder.beginRenderPass({ colorAttachments: [{
     view: postFx.sceneViews[currSceneIdx],
     clearValue: DEFAULT_CLEAR_COLOR,
@@ -5261,7 +5268,7 @@ function runFadePass(encoder: GPUCommandEncoder, prevSceneIdx: number, currScene
     storeOp: 'store',
   }]});
   pass.setPipeline(postFx.fadePipeline!);
-  pass.setBindGroup(0, bg);
+  pass.setBindGroup(0, postFx.fadeBGs[prevSceneIdx]);
   pass.draw(3);
   pass.end();
 }
@@ -5271,17 +5278,14 @@ function runBloomChain(encoder: GPUCommandEncoder) {
   // Downsample chain: scene → mip0 → mip1 → ... → mipN
   const sceneIdx = postFx.sceneIdx;
   for (let i = 0; i < BLOOM_LEVELS; i++) {
-    const srcView = i === 0 ? postFx.sceneViews[sceneIdx] : postFx.bloomMipViews[i - 1];
     const src = i === 0 ? postFx.scene[sceneIdx] : postFx.bloomMips[i - 1];
     const p = postFx.downsampleParams[i];
     p[0] = 1.0 / src.width; p[1] = 1.0 / src.height;
     p[2] = fx.bloomThreshold; p[3] = i === 0 ? 1.0 : 0.0;
     device.queue.writeBuffer(postFx.downsampleUBO[i], 0, p);
-    const bg = device.createBindGroup({ layout: postFx.downsampleBGL!, entries: [
-      { binding: 0, resource: srcView },
-      { binding: 1, resource: postFx.linSampler! },
-      { binding: 2, resource: { buffer: postFx.downsampleUBO[i] } },
-    ]});
+    // [LAW:single-enforcer] downsampleBGs cache layout: [0]=mip0 reading scene[0], [1]=mip0 reading scene[1],
+    // [2..BLOOM_LEVELS]=mipK reading mipK-1. Keyed from (sceneIdx, i) here.
+    const bg = postFx.downsampleBGs[i === 0 ? sceneIdx : i + 1];
     const pass = encoder.beginRenderPass({ colorAttachments: [{
       view: postFx.bloomMipViews[i],
       clearValue: { r: 0, g: 0, b: 0, a: 1 },
@@ -5300,11 +5304,6 @@ function runBloomChain(encoder: GPUCommandEncoder) {
     p[0] = 1.0 / src.width; p[1] = 1.0 / src.height;
     p[2] = fx.bloomRadius;
     device.queue.writeBuffer(postFx.upsampleUBO[i], 0, p);
-    const bg = device.createBindGroup({ layout: postFx.upsampleBGL!, entries: [
-      { binding: 0, resource: postFx.bloomMipViews[i] },
-      { binding: 1, resource: postFx.linSampler! },
-      { binding: 2, resource: { buffer: postFx.upsampleUBO[i] } },
-    ]});
     const pass = encoder.beginRenderPass({ colorAttachments: [{
       view: postFx.bloomMipViews[i - 1],
       clearValue: { r: 0, g: 0, b: 0, a: 1 },
@@ -5312,7 +5311,7 @@ function runBloomChain(encoder: GPUCommandEncoder) {
       storeOp: 'store',
     }]});
     pass.setPipeline(postFx.upsamplePipelineAdditive!);
-    pass.setBindGroup(0, bg);
+    pass.setBindGroup(0, postFx.upsampleBGs[i]);
     pass.draw(3);
     pass.end();
   }
@@ -5380,12 +5379,8 @@ function runComposite(encoder: GPUCommandEncoder, finalView: GPUTextureView, fin
   device.queue.writeBuffer(postFx.compositeUBO!, 0, buf);
 
   const pipeline = ensureCompositePipeline(finalFormat);
-  const bg = device.createBindGroup({ layout: postFx.compositeBGL!, entries: [
-    { binding: 0, resource: postFx.sceneViews[postFx.sceneIdx] },
-    { binding: 1, resource: postFx.bloomMipViews[0] },
-    { binding: 2, resource: postFx.linSampler! },
-    { binding: 3, resource: { buffer: postFx.compositeUBO! } },
-  ]});
+  // [LAW:single-enforcer] compositeBGs cache is indexed by scene ping-pong slot; allocate-on-resize, reuse-per-frame.
+  const bg = postFx.compositeBGs[postFx.sceneIdx];
   const pTsw = tsWrites(2);
   const pass = encoder.beginRenderPass({
     colorAttachments: [{
@@ -5409,8 +5404,8 @@ function frame(now: DOMHighResTimeStamp) {
   requestAnimationFrame(frame);
   refreshThemeColors(now);
   resizeCanvas();
-  // [LAW:single-enforcer] Attractor lifecycle prune runs every frame regardless of mode,
-  // so mode switches can't leak dead attractors into the array.
+  // [LAW:single-enforcer] Attractor lifecycle is updated here, before any sim/compute/composite runs,
+  // so mode switches can't leak dead attractors into the array or render loop.
   pruneAttractors(now * 0.001);
 
   // FPS calculation
