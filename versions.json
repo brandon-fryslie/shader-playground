@@ -4,15 +4,22 @@
     {
       "version": "pr-10",
       "ref": "refs/pull/10/merge",
-      "sha": "bdad8bd3ee893949db2cf3d4fde07bd6d6abc2eb",
-      "timestamp": "2026-04-19T01:50:01.520Z",
+      "sha": "2aaac004586d99a3503b709ee849967e84d2c2ec",
+      "timestamp": "2026-04-19T11:07:24.708Z",
       "commits": [
         {
-          "sha": "bdad8bd3ee893949db2cf3d4fde07bd6d6abc2eb",
+          "sha": "2aaac004586d99a3503b709ee849967e84d2c2ec",
           "author_name": "Brandon Fryslie",
           "author_email": "530235+brandon-fryslie@users.noreply.github.com",
-          "timestamp": "2026-04-18T19:49:48-06:00",
-          "message": "Merge 6337d4aab0e34ebbd66353c1444b6476874542de into 884c49f1952d559c5b6b1c503831d0f3d4e27735\n"
+          "timestamp": "2026-04-19T05:07:01-06:00",
+          "message": "Merge 5f33577eb0c0eca7329242b3c067cfb5b7f66e04 into 884c49f1952d559c5b6b1c503831d0f3d4e27735\n"
+        },
+        {
+          "sha": "5f33577eb0c0eca7329242b3c067cfb5b7f66e04",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-19T05:06:46-06:00",
+          "message": "fix(physics): align reticle/replay with simStep (PR #10 review)\n\n- STEPS_PER_SECOND now derives from PHYSICS_BASE_DT (0.016) so the\n  \"seconds\" decay cap maps to the same step count the sim actually\n  advances per simulated second (62.5, not 60). One source of truth for\n  step/second conversion.\n- attractorStrength now treats `currentStep < releaseStep` as charging.\n  Without this, rewinding below an attractor's release and replaying\n  forward would overwrite journal entries with 0, breaking the\n  reverse→forward→reverse invariant the PR claims.\n- runComposite uses the last-packed sim step for reticle strength\n  (simStep-1 forward, simStep reverse) so the overlay stays aligned\n  with the force field the shader actually applied.\n"
         },
         {
           "sha": "6337d4aab0e34ebbd66353c1444b6476874542de",
