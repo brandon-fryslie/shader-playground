@@ -2,6 +2,140 @@
   "schema": 2,
   "versions": [
     {
+      "version": "pr-7",
+      "ref": "refs/pull/7/merge",
+      "sha": "6a283aeac22394a2bd199693d942de1e6ec4e7dc",
+      "timestamp": "2026-04-19T00:46:30.933Z",
+      "commits": [
+        {
+          "sha": "6a283aeac22394a2bd199693d942de1e6ec4e7dc",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-18T18:46:17-06:00",
+          "message": "Merge 66865c92862217d77590ba4f2046196ae4d716ae into acf6fbcb2fd5464c6c9dfb3e26903f7e551ab810\n"
+        },
+        {
+          "sha": "66865c92862217d77590ba4f2046196ae4d716ae",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-18T18:46:04-06:00",
+          "message": "Merge remote-tracking branch 'origin/master' into reversible-physics\n\n# Conflicts:\n#\tsrc/main.ts\n#\tsrc/types.ts\n"
+        },
+        {
+          "sha": "87980eb7ab5b84139164f53207f778cc8f8cf8da",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-18T18:40:49-06:00",
+          "message": "Merge remote-tracking branch 'origin/reversible-physics' into reversible-physics\n"
+        },
+        {
+          "sha": "da0906cf874d545348beaf5eee61a355c4c44e8e",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-18T07:07:44-06:00",
+          "message": "Merge pull request #9 from brandon-fryslie/physics-simstep-order\n\nrefactor(physics): move simStep decrement before param packing"
+        },
+        {
+          "sha": "f1f879fbb38fb19e763cf85b538a2f42ce3f3824",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-18T06:59:08-06:00",
+          "message": "docs: clarify simStep semantics in comment and CLAUDE.md\n\n- Inline comment: rephrase \"increments to N+1 after journal write\" to\n  \"advance to N+1 by end of compute\", which more accurately describes\n  the forward pattern without implying an ordering relative to the\n  journal write specifically.\n\n- CLAUDE.md \"Simulation Clock\": drop the outdated \"monotonic integer\n  counter, incremented each compute dispatch\" claim — reverse mode\n  decrements. Document that simStep now advances by timeDirection, and\n  explain why the decrement happens at the top of compute() (single\n  source of truth for \"which step these params describe\").\n\n- CLAUDE.md \"Attractor Journal\": make the forward/reverse bullets\n  explicit about the order of operations — forward writes then\n  increments, reverse decrements then reads.\n\nGenerated with [Claude Code](https://claude.ai/code)\nvia [Happy](https://happy.engineering)\n\nCo-Authored-By: Claude <noreply@anthropic.com>\nCo-Authored-By: Happy <yesreply@happy.engineering>\n"
+        },
+        {
+          "sha": "f52cfcb0d272e6b2bf94957e330d9bf92f59ebec",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-18T06:16:46-06:00",
+          "message": "refactor(physics): move simStep decrement before param packing\n\nPreviously, reverse-mode (timeDirection < 0) decremented simStep inside\nthe else-branch of attractor handling — AFTER tidal angle, sim clock, and\njournal index were already computed from the pre-decrement simStep. That\nmeant the reverse step at simStep=N used the params from step N, then\ndecremented to N-1 after reading the journal at index N.\n\nThe consequence: forward and reverse at matching simStep values used\ndifferent params. On forward, step N uses simStep=N then increments to\nN+1. On reverse, we want step N+1 → N to use the exact same params as\nthe original forward step that produced that state. Deferring the\ndecrement meant we were using the wrong clock and journal index.\n\nFix: decrement simStep at the top of compute() for reverse mode, so that\nevery downstream consumer (tidal angle at f32[7], attractor journal\nlookup, `nowSec`) refers to the simulation step we're integrating back\ntoward — matching the original forward-step params exactly.\n\nThis is required for the time-reversal invariant: reverse(forward(s)) = s.\n\nGenerated with [Claude Code](https://claude.ai/code)\nvia [Happy](https://happy.engineering)\n\nCo-Authored-By: Claude <noreply@anthropic.com>\nCo-Authored-By: Happy <yesreply@happy.engineering>\n"
+        },
+        {
+          "sha": "e6ab187c83ed1f670c0db5b170e99105e2083942",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-18T06:52:30-06:00",
+          "message": "Merge pull request #8 from brandon-fryslie/xr-depth-reprojection\n\nfix(xr): submit scene depth for parallax-correct reprojection"
+        },
+        {
+          "sha": "226b55db1eb75a1b044b9b05cbc8e525aa137024",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-18T06:23:13-06:00",
+          "message": "fix(xr): drop unknown casts, move override cleanup to finally\n\n- Use subImage.depthStencilTexture directly (typed as GPUTexture | null\n  in webxr-gpu.d.ts); the unknown cast weakened TS's null-handling\n  contract without adding safety.\n\n- Move xrCameraOverride and xrDepthOverride null-assignment into the\n  finally block. Previously, a throw inside the try left the overrides\n  set, retaining a compositor-owned depth view past the frame boundary\n  (compositor reclaims those between frames — unsafe) and leaking XR\n  matrices into the desktop frame loop if the user exits VR after an\n  error. The finally now clears both regardless of outcome.\n\nGenerated with [Claude Code](https://claude.ai/code)\nvia [Happy](https://happy.engineering)\n\nCo-Authored-By: Claude <noreply@anthropic.com>\nCo-Authored-By: Happy <yesreply@happy.engineering>\n"
+        },
+        {
+          "sha": "568f71a1eb1a78f7177f4a1064017fc2b1f019d4",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-18T06:15:26-06:00",
+          "message": "fix(xr): address PR review feedback\n\nRemove unrelated simStep refactor; fix validation-scope double-pop; guard\ndepth override for non-array fallback; add follow-up polish.\n\n1. Revert simStep refactor in createPhysicsSimulation\n   Unrelated N-body time-reversal reordering (moved `simStep--` from the\n   else-branch to before param packing) was accidentally included in the\n   original depth commit. It's a semantic change to reverse-time physics\n   that warrants its own review context. Reverted here; will ship in a\n   separate focused PR.\n\n2. Fix double-pop of validation error scope in xrFrame\n   The `!pose` and `!sim` early-return paths were calling popErrorScope\n   before returning, and then the finally block popped a second time.\n   Since WebGPU error scopes are stacked, the second pop either returned\n   a rejected promise (empty stack) or captured errors from a parent\n   scope that didn't belong to us. Now only the finally pops.\n\n3. Drop non-array + depth projection-layer configs\n   When a non-texture-array layer is combined with a depth attachment,\n   the XR-provided depth texture is full-width (2·eyeW) while our HDR\n   scene is per-eye (eyeW, eyeH). Mixing them in one render pass fails\n   validation. Non-array layers are now only used in depth-less fallback\n   configs; xrDepthOverride additionally guards with a runtime\n   textureArrayLength > 1 check so any future layer variant is safe.\n\n4. Note: depth32float fallback intentionally omitted\n   All sim pipelines compile against depth24plus. A depth32float layer\n   would hand us a texture no pipeline can bind. Documented the\n   reasoning inline so future readers don't reintroduce it without\n   also dual-compiling pipelines.\n\n5. Reset xrFrameCount on session.end\n   Lets diagnostic logging re-emit first-frame info on session re-entry,\n   which is critical for diagnosing intermittent XR failures where\n   session 2 behaves differently from session 1.\n\n6. Cap __errorLog at 200 entries (ring buffer)\n   A device-lost loop or repeat-fire shader warning can produce hundreds\n   of entries per second; unbounded growth would retain old stacks\n   indefinitely.\n\nGenerated with [Claude Code](https://claude.ai/code)\nvia [Happy](https://happy.engineering)\n\nCo-Authored-By: Claude <noreply@anthropic.com>\nCo-Authored-By: Happy <yesreply@happy.engineering>\n"
+        },
+        {
+          "sha": "0d87c13c15f156acecf26ffaf728a73384ac45e6",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-18T02:02:56-06:00",
+          "message": "feat(logging): comprehensive WebXR and WebGPU error diagnostics\n\nRoot issue: XR sessions were failing silently on Vision Pro — the permission\nprompt appeared but the session never entered immersive mode, and nothing\nwas logged anywhere. WebGPU validation errors surface asynchronously via\nonuncapturederror with no indication of which operation caused them, and\nshader compile failures do not throw from createShaderModule at all.\n\nInfrastructure (new Section 0):\n- logError(kind, err, extra?): central error sink — console + DOM overlay +\n  in-memory __errorLog array, all tagged with the current GPU phase\n- currentGpuPhase: rolling label updated before every risky GPU/XR call so\n  async errors can be attributed to the operation that caused them\n- window.error and window.unhandledrejection listeners catch anything that\n  escapes our try/catch blocks\n- window.__errorLog() / window.__gpuPhase() for remote inspection via\n  Safari Web Inspector\n\nShader compilation:\n- createShaderModuleChecked(label, code) wraps device.createShaderModule and\n  schedules getCompilationInfo() — logs every error and warning with the\n  offending source line quoted and a caret marker. All 23 shader-module\n  call sites across boids / nbody / fluid / parametric / reaction / grid /\n  xr.ui / post-fx migrated to the checked variant.\n\nXR lifecycle:\n- toggleXR now logs a phase transition before every step (requestSession,\n  requestReferenceSpace, new XRGPUBinding, createProjectionLayer,\n  updateRenderState, fixedFoveation, first frame requested)\n- Projection layer fallback loop records every rejected config with its\n  error message; if all configs fail the final error includes the full\n  attempt log as JSON\n- visibilitychange listener logs compositor state transitions\n- session.end logs the final phase for post-mortem correlation\n\nPer-frame scoping:\n- xrFrame pushes a validation error scope around encoding; pops it in a\n  finally block with error reporting so GPU validation failures get\n  attributed to the frame number + sub-phase\n- First 3 xrFrame invocations log entry, subImage metadata, and successful\n  submit — enough to diagnose \"session starts but nothing renders\"\n- Phase markers at every encode step (compute, per-eye getViewSubImage,\n  createView color/depth, ensureHdrTargets, sim.render, UI pass, bloom,\n  composite, submit) so uncapturederror reports pinpoint the failure\n\nonuncapturederror + device.lost now route through logError so they inherit\nphase attribution and DOM overlay rendering.\n\nGenerated with [Claude Code](https://claude.ai/code)\nvia [Happy](https://happy.engineering)\n\nCo-Authored-By: Claude <noreply@anthropic.com>\nCo-Authored-By: Happy <yesreply@happy.engineering>\n"
+        },
+        {
+          "sha": "078771a38b2dcc54b55f97afdee27570118a1eb6",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-18T01:49:10-06:00",
+          "message": "fix(xr): submit scene depth to compositor for parallax-correct reprojection\n\nVision Pro's compositor reprojects each rendered frame to the actual head\npose at scanout (~11-16ms after render). Without a depth buffer, it can\nonly planar-warp — which shears the world during head motion and reads as\njitter/instability. Also sets fixedFoveation=0 to kill peripheral blur.\n\n- Add xrDepthOverride module variable; getDepthAttachment uses it when set\n- Projection layer configs now request depthStencilFormat='depth24plus'\n  (depth-less configs kept as last-resort fallbacks)\n- xrFrame binds subImage.depthStencilTexture per eye before sim.render\n  and the UI overlay pass; overrides cleared after both eyes encode\n- Set xrLayer.fixedFoveation = 0 for full peripheral resolution\n- Log chosen layer config + texture dimensions to aid diagnosis\n\nGenerated with [Claude Code](https://claude.ai/code)\nvia [Happy](https://happy.engineering)\n\nCo-Authored-By: Claude <noreply@anthropic.com>\nCo-Authored-By: Happy <yesreply@happy.engineering>\n"
+        },
+        {
+          "sha": "acb7fc6cefbc6572298786eb45ece78c83722551",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-18T01:04:39-06:00",
+          "message": "Merge branch 'zoom-range' into reversible-physics\n"
+        },
+        {
+          "sha": "0cfc7e33833484649a3e85946cd30103746a1854",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-18T00:04:48-06:00",
+          "message": "docs: rewrite CLAUDE.md for conservative physics + time reversal architecture\n\nComprehensive update reflecting the Phase 1+2 changes:\n\n- DKD leapfrog integrator with inline half-drift (replaces Euler)\n- All-conservative force inventory (dark matter halo + MN disk, no dissipation)\n- Simulation clock (monotonic step counter, not wall-clock)\n- Attractor wand system (charge/decay lifecycle, per-pointer tracking)\n- Time reversal (journal, R key, boundary conditions, timeline branching)\n- Post-processing bind group caching + per-attractor reticle rendering\n- Updated params struct layout (608-byte uniform with attractor array)\n- Body struct changes (home → _unused)\n- Phase 3 gas grid forward reference\n"
+        },
+        {
+          "sha": "44d29a287e6887a21c35613c92015b8a689e1415",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-17T23:53:32-06:00",
+          "message": "Add justfile\n"
+        },
+        {
+          "sha": "a3b394ffe33c903ec640ef332698d5b93443a50d",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-17T23:53:23-06:00",
+          "message": "Add spiral galaxy doc\n"
+        },
+        {
+          "sha": "afd28ca56de3fbd2d5d08ac504d8d7c3393a69d3",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-17T17:42:00-06:00",
+          "message": "feat: time reversal — attractor journal + R key to rewind (Phase 2)\n\nHold R (desktop) or the rewind FAB (mobile) to run the simulation\nbackwards in time. Release to resume forward. The DKD leapfrog\nintegrator is exactly time-reversible under dt negation — the reversed\nsimulation retraces the forward trajectory with full fidelity.\n\nATTRACTOR JOURNAL (9.3 MB circular buffer):\n- Stores the packed attractor uniform array (count + 32 × pos/strength)\n  at each simulation step — 129 floats × 18000 steps = 5 minutes of history.\n- Forward: compute attractor strengths from live mouse state, write to\n  journal[simStep]. Reverse: read from journal[simStep], skip live\n  computation. This ensures reversed forces match the original exactly.\n- Timeline branching: resuming forward after a rewind overwrites the\n  old journal from the current step onward.\n\nTIME DIRECTION:\n- setTimeDirection(1 | -1) on the physics sim, toggled by R key hold.\n- dt passed to shader = baseDt × timeDirection. Negative dt → DKD runs\n  the exact inverse of the forward step.\n- Boundary: can't reverse past step 0 → auto-pause.\n- Step counter shown in stats bar (Step: 1234 ◀/▶).\n\nATTRACTOR DECAY SLIDERS (previously dead, now wired):\n- attractorDecayDuration() reads state.physics.attractorDecayRatio/Cap\n  instead of the hardcoded ATTRACTOR_DECAY_MULTIPLIER = 2.0.\n- Single enforcer: one function owns max(MIN_DECAY, min(cap, ratio × hold)).\n\nCLEANUP:\n- Removed coreOrbit from describeParam() (dead after Phase 1).\n- Added dark matter param descriptions (haloMass, haloScale, etc.).\n- Removed damping from getStats() type signature (no longer returned).\n- Attractor creation blocked during reverse (journal owns forces).\n"
+        },
+        {
+          "sha": "6b5f2da3ea5c083e87c701b60a6b852ebda1bfe3",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-17T06:11:15-06:00",
+          "message": "feat: time-reversible N-body with DKD leapfrog + dark matter potentials\n\nPhase 1 of the reversible-physics architecture: replace all dissipative\nforces with conservative dark matter potentials and switch to a\ntime-reversible integrator.\n\nINTEGRATOR: DKD leapfrog with inline half-drift\n- Semi-implicit Euler → Drift-Kick-Drift leapfrog\n- Forces computed at half-step positions: each source particle is\n  half-drifted inline during the tile load (srcHalf = src.pos + src.vel * dt/2)\n- Exactly time-reversible: negating dt hits the same midpoint → same forces\n- One force evaluation per step (same GPU cost as before)\n\nFORCES REMOVED (7 dissipative, all velocity-dependent):\n- Global damping, attractor friction, attractor drag\n- Home reentry spring + damping, core friction\n- Disk recovery: vertical/radial damping, tangential nudge, flow align\n\nFORCES ADDED (2 conservative, position-only):\n- Plummer dark matter halo: F = -M r / (r² + a²)^(3/2)\n  Spherical confinement replacing global damping + boundary + home reentry\n- Miyamoto-Nagai disk: F = -M (R_vec + n·z·a/B) / D³\n  Axisymmetric vertical confinement replacing disk recovery forces\n\nSIMULATION CLOCK: performance.now() → monotonic simStep counter.\nTidal angle = simStep × dt × rate. Fully deterministic.\n\nVIRIAL CONTROLLER: removed entirely. Dark matter provides structural\nstability without feedback. Stats reduction kept for diagnostics only.\n\nINITIALIZATION: circular velocity formula now includes enclosed dark\nmatter mass (halo + MN disk) so particles start in equilibrium with the\ncombined potential.\n\nBody struct: `home` field (initial position, used by removed home spring)\nrepurposed as `_unused`. Body stays 48 bytes for layout compatibility.\n\nUI: \"Disk Recovery\" slider section replaced with \"Dark Matter\" section\n(Halo Mass, Halo Scale, Disk Mass, Disk Scale A/B). Damping and Core\nFriction sliders removed.\n"
+        },
+        {
+          "sha": "5d53bdd416e4c57674df030a2c80aab13c7b3f46",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-17T04:06:14-06:00",
+          "message": "feat: extend zoom-out range from 50 to 200\n\nRaises the camera distance clamp from 50 to 200 (desktop wheel + mobile\npinch) and bumps the far plane from 160 to 500 so geometry stays visible\nat the new maximum distance.\n"
+        }
+      ]
+    },
+    {
       "version": "pr-9",
       "ref": "refs/pull/9/merge",
       "sha": "080ade397943552526c034b68641c360808df68c",
