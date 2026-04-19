@@ -92,7 +92,9 @@ The integration scheme per step (single GPU dispatch):
 
 ### Simulation Clock
 
-`simStep` is a monotonic integer counter, incremented each compute dispatch. Tidal angle = `simStep × dt × 0.15`. Attractor timing uses `simStep × dt`. No `performance.now()` in the simulation path — fully deterministic.
+`simStep` is the canonical step index of the simulation state currently in the particle buffer. It advances by `timeDirection` each compute dispatch — forward (`+1` after journal write) or reverse (`−1` at the top of `compute()` before param packing). Tidal angle = `simStep × dt × 0.15`. Attractor timing uses `simStep × dt`. No `performance.now()` in the simulation path — fully deterministic.
+
+**Decrement timing matters:** in reverse mode, `simStep` is decremented at the very start of `compute()` so that every downstream consumer (tidal angle, journal lookup, `nowSec`) uses the same step index — specifically, the step whose params were packed during the original forward step that produced the current state. Without this ordering, reverse params would mix values from step N and step N-1, breaking the `reverse(forward(s)) = s` invariant.
 
 ### Body Struct (48 bytes)
 
@@ -177,8 +179,8 @@ Circular buffer storing the packed attractor uniform data at each simulation ste
 - **Capacity**: 18000 steps (5 minutes at 60fps)
 - **Entry size**: 129 floats (1 count + 32 × 4 floats) = 516 bytes
 - **Total memory**: ~9.3 MB
-- **Forward**: compute strengths normally, write to `journal[simStep]`
-- **Reverse**: read from `journal[simStep]`, skip live computation
+- **Forward**: compute strengths normally, write to `journal[simStep]`, then `simStep++`
+- **Reverse**: `simStep--` first (at top of `compute()`), then read from `journal[simStep]` — the same entry that was written during the forward step that produced the current state
 
 ### Boundary conditions
 
