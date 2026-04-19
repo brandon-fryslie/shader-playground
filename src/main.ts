@@ -441,8 +441,8 @@ const state: AppState = {
   camera: { distance: 5.0, fov: 60, rotX: 0.3, rotY: 0.0, panX: 0, panY: 0 },
   mouse: { down: false, x: 0, y: 0, dx: 0, dy: 0, worldX: 0, worldY: 0, worldZ: 0 },
   // [LAW:one-source-of-truth] Attractors are the canonical N-body interaction state.
-  // Held attractors have releaseTime < 0 and holdDuration < 0 (follow cursor, strength charging).
-  // Released attractors decay over 2 × holdDuration, then get pruned from the array.
+  // Held attractors have releaseStep < 0 and holdSteps < 0 (follow cursor, strength charging in sim steps).
+  // Released attractors decay over attractorDecaySteps(a) sim steps, then get pruned from the array.
   // Max cap of 32 is a safety rail — in practice users hit 5-10 concurrent at most.
   attractors: [] as Attractor[],
   pointerToAttractor: new Map<number, number>() as Map<number, number>,
@@ -463,51 +463,73 @@ const state: AppState = {
 // ATTRACTOR LIFECYCLE
 // ═══════════════════════════════════════════════════════════════════════════════
 
-// [LAW:one-source-of-truth] Timing constants own the attractor behavior contract.
-// Decay timing (ratio × cap) is user-tunable via the Decay Ratio and Decay Cap sliders on state.physics.
-const ATTRACTOR_CHARGE_TIME = 1.5;        // seconds to reach full strength (quadratic ramp)
-const ATTRACTOR_MAX = 32;                 // hard cap; oldest evicted if exceeded
-const ATTRACTOR_MIN_DECAY = 0.05;         // seconds — lower bound so releases are always visible
+// [LAW:one-source-of-truth] Lifecycle is driven by sim step — forces are a pure function of (attractor, simStep).
+// This makes reverse→forward→reverse deterministic: rewinding to step K and replaying forward produces the
+// exact same force field unless the user branches (creates/moves a wand), in which case fresh journal entries
+// from step K onward overwrite the old history. No wall-clock leaks in; no cross-clock drift possible.
+// Step constants assume 60 fps nominal base dt (0.016s). Actual wall-clock duration varies with timeScale.
+const STEPS_PER_SECOND = 60;
+const ATTRACTOR_CHARGE_STEPS = 90;          // ~1.5s at timeScale=1 — quadratic ramp to full strength
+const ATTRACTOR_MAX = 32;                   // hard cap; oldest evicted if exceeded
+const ATTRACTOR_MIN_DECAY_STEPS = 3;        // ~0.05s — lower bound so releases are always visible
 
-function nowSeconds() { return performance.now() * 0.001; }
-
-// [LAW:single-enforcer] Decay duration is computed in exactly one place, here, from user-tunable ratio/cap.
-// Minimum floor of ATTRACTOR_MIN_DECAY prevents zero-duration decay on instant-release taps.
-function attractorDecayDuration(a: Attractor): number {
-  const ratio = state.physics.attractorDecayRatio ?? 0.5;
-  const cap = state.physics.attractorDecayCap ?? 2.0;
-  return Math.max(ATTRACTOR_MIN_DECAY, Math.min(cap, ratio * a.holdDuration));
+// [LAW:single-enforcer] Sim step + time direction accessed through these helpers so attractor lifecycle
+// always agrees with the physics sim's canonical clock. Returns safe defaults when physics is inactive.
+function currentSimStep(): number {
+  const sim = simulations['physics'];
+  if (sim && 'getSimStep' in sim) return (sim as { getSimStep(): number }).getSimStep();
+  return 0;
 }
 
-// [LAW:dataflow-not-control-flow] Strength is a pure function of (attractor, now). No branches on lifecycle state —
-// the same quadratic formula handles charging and decay through the data (releaseTime < 0 selects which branch of the curve).
-function attractorStrength(a: Attractor, now: number, ceiling: number): number {
-  if (a.releaseTime < 0) {
-    const t = Math.min(1, (now - a.chargeStart) / ATTRACTOR_CHARGE_TIME);
+function currentTimeDirection(): number {
+  const sim = simulations['physics'];
+  if (sim && 'getTimeDirection' in sim) return (sim as { getTimeDirection(): number }).getTimeDirection();
+  return 1;
+}
+
+// [LAW:single-enforcer] Decay window in steps is computed in exactly one place, here, from user-tunable ratio/cap.
+// Slider stays in seconds for UI intuition; converted at comparison time using STEPS_PER_SECOND.
+// Minimum floor prevents zero-duration decay on instant-release taps.
+function attractorDecaySteps(a: Attractor): number {
+  const ratio = state.physics.attractorDecayRatio ?? 0.5;
+  const capSteps = (state.physics.attractorDecayCap ?? 2.0) * STEPS_PER_SECOND;
+  return Math.max(ATTRACTOR_MIN_DECAY_STEPS, Math.min(capSteps, ratio * a.holdSteps));
+}
+
+// [LAW:dataflow-not-control-flow] Strength is a pure function of (attractor, currentStep). The same quadratic
+// formula handles charging and decay; releaseStep < 0 selects which branch of the curve. No branches on wall time.
+function attractorStrength(a: Attractor, currentStep: number, ceiling: number): number {
+  if (a.releaseStep < 0) {
+    const stepsHeld = Math.max(0, currentStep - a.chargeStep);
+    const t = Math.min(1, stepsHeld / ATTRACTOR_CHARGE_STEPS);
     return t * t * ceiling;
   }
-  const peakT = Math.min(1, a.holdDuration / ATTRACTOR_CHARGE_TIME);
+  const peakT = Math.min(1, a.holdSteps / ATTRACTOR_CHARGE_STEPS);
   const peak = peakT * peakT * ceiling;
-  const elapsed = now - a.releaseTime;
-  const decayDur = attractorDecayDuration(a);
-  if (elapsed >= decayDur) return 0;
-  const remaining = 1 - elapsed / decayDur;
+  const elapsedSteps = currentStep - a.releaseStep;
+  if (elapsedSteps < 0) return 0;
+  const decaySteps = attractorDecaySteps(a);
+  if (elapsedSteps >= decaySteps) return 0;
+  const remaining = 1 - elapsedSteps / decaySteps;
   return peak * remaining * remaining;
 }
 
-function attractorDead(a: Attractor, now: number): boolean {
-  if (a.releaseTime < 0) return false;
-  return (now - a.releaseTime) >= attractorDecayDuration(a);
+function attractorDead(a: Attractor, currentStep: number): boolean {
+  if (a.releaseStep < 0) return false;
+  return (currentStep - a.releaseStep) >= attractorDecaySteps(a);
 }
 
 // [LAW:single-enforcer] Pruning happens in exactly one place per frame, before uniform upload.
 // Rebuilds pointerToAttractor index mapping since array indices shift after splice.
-function pruneAttractors(now: number) {
+// Skipped during reverse: decrementing simStep could un-kill an attractor (d(currentStep - releaseStep) < 0),
+// and prune-then-un-kill would leave the live array out of sync with the reverse branch's state.
+function pruneAttractors(currentStep: number) {
+  if (currentTimeDirection() < 0) return;
   const kept: Attractor[] = [];
   const oldToNew = new Map<number, number>();
   for (let i = 0; i < state.attractors.length; i++) {
     const a = state.attractors[i];
-    if (!attractorDead(a, now)) {
+    if (!attractorDead(a, currentStep)) {
       oldToNew.set(i, kept.length);
       kept.push(a);
     }
@@ -522,9 +544,9 @@ function pruneAttractors(now: number) {
 }
 
 function createAttractor(pointerId: number, pos: number[]): void {
-  // [LAW:single-enforcer] Block attractor creation during reverse — the journal owns attractor forces.
-  const sim = simulations[state.mode];
-  if (sim && 'getTimeDirection' in sim && (sim as any).getTimeDirection() < 0) return;
+  // [LAW:single-enforcer] Block attractor creation during reverse — the journal owns attractor forces
+  // there; a new wand would branch mid-reverse and its journal write would collide with the replay.
+  if (currentTimeDirection() < 0) return;
   // Force-evict oldest if we're at the cap. Oldest by insertion order.
   if (state.attractors.length >= ATTRACTOR_MAX) {
     state.attractors.shift();
@@ -535,10 +557,10 @@ function createAttractor(pointerId: number, pos: number[]): void {
     });
     state.pointerToAttractor = rebuilt;
   }
-  const now = nowSeconds();
+  const step = currentSimStep();
   state.attractors.push({
     x: pos[0], y: pos[1], z: pos[2],
-    chargeStart: now, releaseTime: -1, holdDuration: -1,
+    chargeStep: step, releaseStep: -1, holdSteps: -1,
   });
   state.pointerToAttractor.set(pointerId, state.attractors.length - 1);
 }
@@ -547,7 +569,7 @@ function moveAttractor(pointerId: number, pos: number[]): void {
   const idx = state.pointerToAttractor.get(pointerId);
   if (idx === undefined) return;
   const a = state.attractors[idx];
-  if (!a || a.releaseTime >= 0) return;
+  if (!a || a.releaseStep >= 0) return;
   a.x = pos[0]; a.y = pos[1]; a.z = pos[2];
 }
 
@@ -556,10 +578,10 @@ function releaseAttractor(pointerId: number): void {
   if (idx === undefined) return;
   state.pointerToAttractor.delete(pointerId);
   const a = state.attractors[idx];
-  if (!a || a.releaseTime >= 0) return;
-  const now = nowSeconds();
-  a.releaseTime = now;
-  a.holdDuration = Math.max(0.05, now - a.chargeStart); // min 50ms to avoid zero-duration divide
+  if (!a || a.releaseStep >= 0) return;
+  const step = currentSimStep();
+  a.releaseStep = step;
+  a.holdSteps = Math.max(1, step - a.chargeStep); // min 1 step to avoid zero-duration divide
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -2091,10 +2113,10 @@ function createPhysicsSimulation() {
       // ── ATTRACTOR DATA: forward computes + journals; reverse reads from journal ──
       if (timeDirection > 0) {
         // Forward: compute attractor strengths from live state, write to journal.
-        // [LAW:one-source-of-truth] Wall clock for attractor lifecycle — matches chargeStart/releaseTime
-        // (set via nowSeconds()) and pruneAttractors(). Reverse reads journaled values, so reverse
-        // doesn't care which clock drove the forward computation.
-        const nowSec = nowSeconds();
+        // [LAW:one-source-of-truth] simStep drives the lifecycle — forces are a pure function of step,
+        // so rewinding to step K and replaying forward produces identical forces unless the user branches
+        // (moves/creates a wand). Branching naturally overwrites journal[K..] with the new force field,
+        // and subsequent reverse reads those fresh entries. No wall-clock drift between write and read.
         const ceiling = p.interactionStrength ?? 1;
         const attractors = state.attractors;
         const attractorN = Math.min(attractors.length, ATTRACTOR_MAX);
@@ -2106,7 +2128,7 @@ function createPhysicsSimulation() {
           f32[base] = a.x;
           f32[base + 1] = a.y;
           f32[base + 2] = a.z;
-          f32[base + 3] = attractorStrength(a, nowSec, ceiling);
+          f32[base + 3] = attractorStrength(a, simStep, ceiling);
         }
         for (let i = attractorN; i < ATTRACTOR_MAX; i++) {
           const base = 24 + i * 4;
@@ -4904,7 +4926,7 @@ function xrFrame(time: DOMHighResTimeStamp, xrFrameData: XRFrame) {
   const isEarlyFrame = xrFrameCount < XR_FIRST_FRAMES_TO_LOG;
   if (isEarlyFrame) logInfo('xr:frame', `xrFrame #${xrFrameCount} entered`, { mode: state.mode });
   // [LAW:single-enforcer] Same prune call as desktop frame loop — keeps the attractor array clean in XR too.
-  pruneAttractors(time * 0.001);
+  pruneAttractors(currentSimStep());
 
   // FPS counter for XR — same logic as desktop frame loop
   frameCount++;
@@ -5345,7 +5367,9 @@ function runComposite(encoder: GPUCommandEncoder, finalView: GPUTextureView, fin
   // [LAW:one-source-of-truth] Attractor strengths re-derived from the same state.attractors array the compute
   // shader reads (via the N-body param packing). Projection from world-space to screen UV happens once per
   // attractor, per frame — ~32 matrix ops max, dwarfed by the render pass itself.
+  // nowSec is only used for reticle pulsing (sin(time*5)); strength is sim-step-indexed to match the shader.
   const nowSec = performance.now() * 0.001;
+  const strengthStep = currentSimStep();
   const ceiling = (state.physics as { interactionStrength?: number }).interactionStrength ?? 1;
   const attractors = state.attractors;
   const attractorN = Math.min(attractors.length, ATTRACTOR_MAX);
@@ -5375,7 +5399,7 @@ function runComposite(encoder: GPUCommandEncoder, finalView: GPUTextureView, fin
     const base = 20 + i * 4;
     buf[base] = ndcX * 0.5 + 0.5;
     buf[base + 1] = 1.0 - (ndcY * 0.5 + 0.5);
-    buf[base + 2] = attractorStrength(a, nowSec, ceiling);
+    buf[base + 2] = attractorStrength(a, strengthStep, ceiling);
     buf[base + 3] = 0;
   }
   // Zero any trailing slots beyond active count (strength=0 is inert anyway, but keeps the buffer clean).
@@ -5413,7 +5437,7 @@ function frame(now: DOMHighResTimeStamp) {
   resizeCanvas();
   // [LAW:single-enforcer] Attractor lifecycle is updated here, before any sim/compute/composite runs,
   // so mode switches can't leak dead attractors into the array or render loop.
-  pruneAttractors(now * 0.001);
+  pruneAttractors(currentSimStep());
 
   // FPS calculation
   frameCount++;
