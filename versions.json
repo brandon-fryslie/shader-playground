@@ -2,6 +2,28 @@
   "schema": 2,
   "versions": [
     {
+      "version": "pr-10",
+      "ref": "refs/pull/10/merge",
+      "sha": "bdad8bd3ee893949db2cf3d4fde07bd6d6abc2eb",
+      "timestamp": "2026-04-19T01:50:01.520Z",
+      "commits": [
+        {
+          "sha": "bdad8bd3ee893949db2cf3d4fde07bd6d6abc2eb",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-18T19:49:48-06:00",
+          "message": "Merge 6337d4aab0e34ebbd66353c1444b6476874542de into 884c49f1952d559c5b6b1c503831d0f3d4e27735\n"
+        },
+        {
+          "sha": "6337d4aab0e34ebbd66353c1444b6476874542de",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-18T19:46:16-06:00",
+          "message": "fix(physics): drive attractor lifecycle from simStep, not wall clock\n"
+        }
+      ]
+    },
+    {
       "version": "r80-884c49f",
       "ref": "refs/heads/master",
       "sha": "884c49f1952d559c5b6b1c503831d0f3d4e27735",
