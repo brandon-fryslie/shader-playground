@@ -10,7 +10,7 @@ export interface Simulation {
   getCount(): string | number;
   destroy(): void;
   diagnose?(): Promise<Record<string, number | number[]>>;
-  getStats?(): { ke: number; pe: number; virial: number; rmsR: number; rmsH: number; damping: number };
+  getStats?(): { ke: number; pe: number; virial: number; rmsR: number; rmsH: number };
 }
 
 export interface BoidsParams {
@@ -27,19 +27,17 @@ export interface PhysicsParams {
   count: number;
   G: number;
   softening: number;
-  damping: number;
-  coreOrbit: number;
   distribution: Distribution;
-  diskVertDamp: number;
-  diskRadDamp: number;
-  diskTangGain: number;
-  diskTangSpeed: number;
-  diskVertSpring: number;
-  diskAlignGain: number;
   interactionStrength: number;
   tidalStrength: number;
   attractorDecayRatio: number;  // decay duration = this × holdDuration, capped by attractorDecayCap
   attractorDecayCap: number;    // seconds — upper bound on decay duration
+  // Dark matter potential — conservative forces replacing dissipative disk recovery.
+  haloMass: number;       // Plummer halo gravitational mass
+  haloScale: number;      // Plummer halo softening radius
+  diskMass: number;       // Miyamoto-Nagai disk mass
+  diskScaleA: number;     // MN radial scale length
+  diskScaleB: number;     // MN vertical scale height
 }
 
 export interface ClassicPhysicsParams {

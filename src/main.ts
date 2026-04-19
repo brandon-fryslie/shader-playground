@@ -27,6 +27,114 @@ import SHADER_POST_UPSAMPLE from './shaders/post.upsample.wgsl?raw';
 import SHADER_POST_COMPOSITE from './shaders/post.composite.wgsl?raw';
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// SECTION 0: DIAGNOSTIC LOGGING
+// ═══════════════════════════════════════════════════════════════════════════════
+// [LAW:single-enforcer] All error paths funnel through logError so nothing
+// vanishes silently — the original motivation is that XR sessions on Vision Pro
+// ran into issues that produced no console output at all. Every error now:
+//   1. prints to console.error with a kind tag
+//   2. appends to window.__errorLog (inspectable from remote Safari Web Inspector)
+//   3. renders into the floating DOM overlay (visible on desktop; persistent)
+//   4. attributes itself to the most recent GPU phase via currentGpuPhase
+//
+// Attribution matters because WebGPU validation errors surface asynchronously
+// via onuncapturederror — without a phase tag, you can't tell which operation
+// produced them.
+
+interface ErrorLogEntry {
+  t: number;
+  kind: string;
+  phase: string;
+  msg: string;
+  stack?: string;
+}
+// Ring-buffer cap: a misbehaving shader or device-lost loop can fire logError hundreds
+// of times per second. Without a cap, __errorLog would grow unbounded and hold onto
+// old stack traces indefinitely. 200 entries is enough for post-mortem context while
+// keeping memory bounded to ~200KB worst-case.
+const ERROR_LOG_MAX = 200;
+const __errorLog: ErrorLogEntry[] = [];
+
+// Most recent GPU-touching operation. Update before risky calls so that
+// onuncapturederror and unhandledrejection can attribute blame.
+let currentGpuPhase = 'boot';
+
+function showErrorOverlay(line: string): void {
+  let overlay = document.getElementById('gpu-error-overlay');
+  if (!overlay) {
+    overlay = document.createElement('div');
+    overlay.id = 'gpu-error-overlay';
+    overlay.style.cssText = 'position:fixed;top:60px;left:10px;right:10px;max-height:60vh;overflow:auto;background:rgba(20,0,0,0.92);color:#ff8080;font:11px monospace;padding:10px;border:1px solid #ff4040;border-radius:4px;z-index:9999;white-space:pre-wrap;';
+    document.body.appendChild(overlay);
+  }
+  const stamp = new Date().toLocaleTimeString();
+  overlay.textContent = `[${stamp}] ${line}\n\n` + overlay.textContent;
+}
+
+function logError(kind: string, err: unknown, extra?: string): void {
+  const e = err instanceof Error ? err : new Error(typeof err === 'string' ? err : JSON.stringify(err));
+  const msg = extra ? `${extra}: ${e.message}` : e.message;
+  const entry: ErrorLogEntry = {
+    t: performance.now(),
+    kind,
+    phase: currentGpuPhase,
+    msg,
+    stack: e.stack,
+  };
+  __errorLog.push(entry);
+  if (__errorLog.length > ERROR_LOG_MAX) __errorLog.splice(0, __errorLog.length - ERROR_LOG_MAX);
+  console.error(`[${kind}] (phase=${currentGpuPhase})`, msg, e.stack || '');
+  showErrorOverlay(`[${kind}] (phase=${currentGpuPhase}) ${msg}`);
+}
+
+function logInfo(kind: string, msg: string, ...extra: unknown[]): void {
+  console.info(`[${kind}] (phase=${currentGpuPhase})`, msg, ...extra);
+}
+
+// Expose the log for ad-hoc inspection from Safari Web Inspector.
+(globalThis as unknown as { __errorLog: () => ErrorLogEntry[] }).__errorLog = () => __errorLog.slice();
+(globalThis as unknown as { __gpuPhase: () => string }).__gpuPhase = () => currentGpuPhase;
+
+// Catch anything that escapes our try/catch blocks or a rogue async path.
+// Registered at module load so they see everything, even errors during init.
+window.addEventListener('error', (ev) => {
+  logError('window.error', ev.error ?? ev.message, `at ${ev.filename}:${ev.lineno}:${ev.colno}`);
+});
+window.addEventListener('unhandledrejection', (ev) => {
+  logError('unhandledrejection', ev.reason);
+});
+
+// Wraps device.createShaderModule with async compilation-info reporting.
+// In WebGPU, shader compile failures do NOT throw from createShaderModule —
+// they surface later as pipeline-creation or render-time validation errors
+// with messages that rarely pinpoint the shader line. Surfacing them here,
+// with the offending source line quoted, is the only reliable diagnosis.
+function createShaderModuleChecked(label: string, code: string): GPUShaderModule {
+  const module = device.createShaderModule({ label, code });
+  module.getCompilationInfo().then(info => {
+    if (info.messages.length === 0) return;
+    const lines = code.split('\n');
+    let hasError = false;
+    for (const m of info.messages) {
+      const srcLine = (lines[m.lineNum - 1] || '').trimEnd();
+      const marker = ' '.repeat(Math.max(0, m.linePos - 1)) + '^';
+      const body = `[shader:${label}] ${m.type.toUpperCase()} line ${m.lineNum}:${m.linePos} ${m.message}\n  ${srcLine}\n  ${marker}`;
+      if (m.type === 'error') {
+        hasError = true;
+        logError(`shader:${label}`, new Error(body));
+      } else if (m.type === 'warning') {
+        console.warn(body);
+      } else {
+        console.info(body);
+      }
+    }
+    if (!hasError) logInfo(`shader:${label}`, `compiled with ${info.messages.length} non-error messages`);
+  }).catch(e => logError(`shader:${label}:compilationInfo`, e));
+  return module;
+}
+
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // SECTION 1: CONSTANTS, DEFAULTS, PRESETS
 // ═══════════════════════════════════════════════════════════════════════════════
 
@@ -36,11 +144,10 @@ const DEFAULTS: ModeParamsMap = {
     maxSpeed: 2.0, maxForce: 0.05, visualRange: 100
   },
   physics: {
-    count: 80000, G: 1.0, softening: 1.5, damping: 1.0, coreOrbit: 0.28, distribution: 'disk',
+    count: 80000, G: 1.0, softening: 1.5, distribution: 'disk',
     interactionStrength: 1.0, tidalStrength: 0.008,
-    diskVertDamp: 3.0, diskRadDamp: 0.8, diskTangGain: 0.8, diskTangSpeed: 0.6,
-    diskVertSpring: 1.5, diskAlignGain: 0.4,
     attractorDecayRatio: 0.5, attractorDecayCap: 2.0,
+    haloMass: 5.0, haloScale: 2.0, diskMass: 3.0, diskScaleA: 1.5, diskScaleB: 0.3,
   },
   physics_classic: {
     // Verbatim defaults from the original shader-playground for fair A/B comparison.
@@ -77,19 +184,25 @@ const PRESETS: Record<SimMode, Record<string, Record<string, number | string>>> 
     'Slow Dance':  { count: 500, separationRadius: 40, alignmentRadius: 80, cohesionRadius: 100, maxSpeed: 0.5, maxForce: 0.01, visualRange: 150 },
   },
   physics: {
-    'Default':    { ...DEFAULTS.physics },
-    'Spiral Galaxy': { count: 100000, G: 1.5, softening: 0.15, damping: 1.0, coreOrbit: 0.0, distribution: 'spiral',
-                    interactionStrength: 1.0, tidalStrength: 0.005, diskVertDamp: 1.0, diskRadDamp: 0.0, diskTangGain: 0.0, diskTangSpeed: 0.5, diskVertSpring: 0.3, diskAlignGain: 0.0 },
-    'Cosmic Web':  { count: 80000, G: 0.8, softening: 2.0, damping: 1.0, coreOrbit: 0.0, distribution: 'web',
-                    interactionStrength: 1.0, tidalStrength: 0.025, diskVertDamp: 0.0, diskRadDamp: 0.0, diskTangGain: 0.0, diskTangSpeed: 0.5, diskVertSpring: 0.0, diskAlignGain: 0.0 },
-    'Star Cluster': { count: 60000, G: 0.3, softening: 1.2, damping: 1.0, coreOrbit: 0.15, distribution: 'cluster',
-                    interactionStrength: 1.0, tidalStrength: 0.001, diskVertDamp: 0.0, diskRadDamp: 0.0, diskTangGain: 0.0, diskTangSpeed: 0.5, diskVertSpring: 0.0, diskAlignGain: 0.0 },
-    'Maelstrom':  { count: 120000, G: 0.25, softening: 2.5, damping: 1.0, coreOrbit: 0.4, distribution: 'maelstrom',
-                    interactionStrength: 1.5, tidalStrength: 0.005, diskVertDamp: 7.0, diskRadDamp: 1.5, diskTangGain: 2.0, diskTangSpeed: 3.5, diskVertSpring: 3.0, diskAlignGain: 0.8 },
-    'Dust Cloud': { count: 150000, G: 0.08, softening: 3.5, damping: 1.0, coreOrbit: 0.0, distribution: 'dust',
-                    interactionStrength: 0.5, tidalStrength: 0.003, diskVertDamp: 0.0, diskRadDamp: 0.0, diskTangGain: 0.0, diskTangSpeed: 0.5, diskVertSpring: 0.0, diskAlignGain: 0.0 },
-    'Binary':     { count: 80000, G: 0.6, softening: 1.0, damping: 1.0, coreOrbit: 0.2, distribution: 'binary',
-                    interactionStrength: 1.0, tidalStrength: 0.04, diskVertDamp: 2.0, diskRadDamp: 0.3, diskTangGain: 0.5, diskTangSpeed: 1.2, diskVertSpring: 0.8, diskAlignGain: 0.15 },
+    'Default':       { ...DEFAULTS.physics },
+    'Spiral Galaxy': { count: 100000, G: 1.5, softening: 0.15, distribution: 'spiral',
+                       interactionStrength: 1.0, tidalStrength: 0.005,
+                       haloMass: 8.0, haloScale: 2.5, diskMass: 4.0, diskScaleA: 1.2, diskScaleB: 0.15 },
+    'Cosmic Web':    { count: 80000, G: 0.8, softening: 2.0, distribution: 'web',
+                       interactionStrength: 1.0, tidalStrength: 0.025,
+                       haloMass: 2.0, haloScale: 4.0, diskMass: 0.0, diskScaleA: 1.5, diskScaleB: 0.3 },
+    'Star Cluster':  { count: 60000, G: 0.3, softening: 1.2, distribution: 'cluster',
+                       interactionStrength: 1.0, tidalStrength: 0.001,
+                       haloMass: 3.0, haloScale: 1.5, diskMass: 0.0, diskScaleA: 1.0, diskScaleB: 0.5 },
+    'Maelstrom':     { count: 120000, G: 0.25, softening: 2.5, distribution: 'maelstrom',
+                       interactionStrength: 1.5, tidalStrength: 0.005,
+                       haloMass: 6.0, haloScale: 1.8, diskMass: 5.0, diskScaleA: 0.8, diskScaleB: 0.2 },
+    'Dust Cloud':    { count: 150000, G: 0.08, softening: 3.5, distribution: 'dust',
+                       interactionStrength: 0.5, tidalStrength: 0.003,
+                       haloMass: 1.0, haloScale: 5.0, diskMass: 0.0, diskScaleA: 2.0, diskScaleB: 0.5 },
+    'Binary':        { count: 80000, G: 0.6, softening: 1.0, distribution: 'binary',
+                       interactionStrength: 1.0, tidalStrength: 0.04,
+                       haloMass: 4.0, haloScale: 2.0, diskMass: 2.0, diskScaleA: 1.0, diskScaleB: 0.25 },
   },
   physics_classic: {
     'Default':  { ...DEFAULTS.physics_classic },
@@ -138,8 +251,6 @@ const PARAM_DEFS: Record<SimMode, ParamSection[]> = {
       { key: 'count', label: 'Bodies', min: 10, max: 150000, step: 10, requiresReset: true },
       { key: 'G', label: 'Gravity (G)', min: 0.05, max: 5.0, step: 0.01 },
       { key: 'softening', label: 'Softening', min: 0.2, max: 4.0, step: 0.05 },
-      { key: 'damping', label: 'Damping', min: 0.98, max: 1.0, step: 0.0005 },
-      { key: 'coreOrbit', label: 'Core Friction', min: 0.0, max: 0.8, step: 0.01 },
       { key: 'interactionStrength', label: 'Interaction Pull', min: 0.1, max: 3.0, step: 0.05 },
       { key: 'attractorDecayRatio', label: 'Decay Ratio', min: 0.1, max: 4.0, step: 0.05 },
       { key: 'attractorDecayCap', label: 'Decay Cap (s)', min: 0.5, max: 10.0, step: 0.1 },
@@ -148,13 +259,12 @@ const PARAM_DEFS: Record<SimMode, ParamSection[]> = {
     { section: 'Initial State', params: [
       { key: 'distribution', label: 'Distribution', type: 'dropdown', options: ['random', 'disk', 'shell'] },
     ]},
-    { section: 'Disk Recovery', params: [
-      { key: 'diskVertDamp', label: 'Vertical Damp', min: 0.0, max: 8.0, step: 0.05 },
-      { key: 'diskRadDamp', label: 'Radial Damp', min: 0.0, max: 3.0, step: 0.01 },
-      { key: 'diskTangGain', label: 'Tangential Nudge', min: 0.0, max: 3.0, step: 0.01 },
-      { key: 'diskTangSpeed', label: 'Orbit Speed', min: 0.1, max: 4.0, step: 0.01 },
-      { key: 'diskVertSpring', label: 'Plane Spring', min: 0.0, max: 5.0, step: 0.05 },
-      { key: 'diskAlignGain', label: 'Flow Align', min: 0.0, max: 1.5, step: 0.01 },
+    { section: 'Dark Matter', params: [
+      { key: 'haloMass', label: 'Halo Mass', min: 0.0, max: 15.0, step: 0.1 },
+      { key: 'haloScale', label: 'Halo Scale', min: 0.5, max: 8.0, step: 0.1 },
+      { key: 'diskMass', label: 'Disk Mass', min: 0.0, max: 10.0, step: 0.1 },
+      { key: 'diskScaleA', label: 'Disk Scale A', min: 0.1, max: 5.0, step: 0.05 },
+      { key: 'diskScaleB', label: 'Disk Scale B', min: 0.05, max: 2.0, step: 0.01 },
     ]},
   ],
   physics_classic: [
@@ -373,11 +483,9 @@ function attractorDecayDuration(a: Attractor): number {
 // the same quadratic formula handles charging and decay through the data (releaseTime < 0 selects which branch of the curve).
 function attractorStrength(a: Attractor, now: number, ceiling: number): number {
   if (a.releaseTime < 0) {
-    // Charging: quadratic ramp. Rate = 2 × ceiling × elapsed / chargeTime² (accelerating).
     const t = Math.min(1, (now - a.chargeStart) / ATTRACTOR_CHARGE_TIME);
     return t * t * ceiling;
   }
-  // Decaying: quadratic ease-out from peak. (1-t)² drops fast then levels.
   const peakT = Math.min(1, a.holdDuration / ATTRACTOR_CHARGE_TIME);
   const peak = peakT * peakT * ceiling;
   const elapsed = now - a.releaseTime;
@@ -414,6 +522,9 @@ function pruneAttractors(now: number) {
 }
 
 function createAttractor(pointerId: number, pos: number[]): void {
+  // [LAW:single-enforcer] Block attractor creation during reverse — the journal owns attractor forces.
+  const sim = simulations[state.mode];
+  if (sim && 'getTimeDirection' in sim && (sim as any).getTimeDirection() < 0) return;
   // Force-evict oldest if we're at the cap. Oldest by insertion order.
   if (state.attractors.length >= ATTRACTOR_MAX) {
     state.attractors.shift();
@@ -600,6 +711,12 @@ function getOrbitCamera() {
 // When set by XR frame loop, overrides orbit camera for all rendering
 let xrCameraOverride: XRCameraOverride | null = null;
 
+// [LAW:one-source-of-truth] When set, getDepthAttachment uses this XR-compositor-owned
+// depth view instead of postFx.depth. Submitting per-pixel depth to the compositor lets
+// Vision Pro do parallax-correct reprojection during head motion — without it, the
+// compositor can only planar-warp and the scene appears to shear/jitter as you turn.
+let xrDepthOverride: GPUTextureView | null = null;
+
 // ---------- HDR / Bloom / Post-FX shared state ----------
 // [LAW:one-source-of-truth] HDR scene textures, bloom mip chain, and post pipelines are owned here. Sims never see them directly.
 type PostFxState = {
@@ -707,9 +824,9 @@ function initPostFx(): void {
     { binding: 3, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
   ]});
 
-  const fadeMod = device.createShaderModule({ code: SHADER_POST_FADE });
-  const downMod = device.createShaderModule({ code: SHADER_POST_DOWNSAMPLE });
-  const upMod = device.createShaderModule({ code: SHADER_POST_UPSAMPLE });
+  const fadeMod = createShaderModuleChecked('post.fade', SHADER_POST_FADE);
+  const downMod = createShaderModuleChecked('post.downsample', SHADER_POST_DOWNSAMPLE);
+  const upMod = createShaderModuleChecked('post.upsample', SHADER_POST_UPSAMPLE);
 
   postFx.fadePipeline = device.createRenderPipeline({
     layout: device.createPipelineLayout({ bindGroupLayouts: [postFx.fadeBGL] }),
@@ -768,7 +885,7 @@ function initPostFx(): void {
 function ensureCompositePipeline(format: GPUTextureFormat): GPURenderPipeline {
   let p = postFx.compositePipelines.get(format);
   if (p) return p;
-  const mod = device.createShaderModule({ code: SHADER_POST_COMPOSITE });
+  const mod = createShaderModuleChecked('post.composite', SHADER_POST_COMPOSITE);
   p = device.createRenderPipeline({
     layout: device.createPipelineLayout({ bindGroupLayouts: [postFx.compositeBGL!] }),
     vertex: { module: mod, entryPoint: 'vs_main' },
@@ -891,8 +1008,10 @@ function getColorAttachment(
 }
 
 function getDepthAttachment(_simDepthRef: DepthRef, _viewport: number[] | null): GPURenderPassDepthStencilAttachment {
+  // [LAW:dataflow-not-control-flow] Same attachment shape every call; only the view varies.
+  // XR mode supplies the compositor's depth view so head-motion reprojection works correctly.
   return {
-    view: postFx.depth!.createView(),
+    view: xrDepthOverride ?? postFx.depth!.createView(),
     depthClearValue: 1.0,
     depthLoadOp: 'clear',
     depthStoreOp: 'store',
@@ -988,24 +1107,18 @@ async function initWebGPU(): Promise<boolean> {
   initGpuTimestamps();
 
   device.lost.then((info) => {
-    console.error('WebGPU device lost:', info.message);
+    logError('webgpu:device-lost', new Error(info.message), `reason=${info.reason}`);
     if (info.reason !== 'destroyed') {
       initWebGPU().then(ok => { if (ok) { initGrid(); initXrUi(); ensureSimulation(); requestAnimationFrame(frame); } });
     }
   });
 
-  // Capture validation errors and render them into a visible overlay div for diagnosis.
+  // Capture validation errors from any async GPU operation. Phase attribution
+  // (via currentGpuPhase) tells us which operation was in flight when this
+  // fired — critical for diagnosing XR frame failures where the validation
+  // error arrives long after the offending encode call returned.
   device.onuncapturederror = (ev: GPUUncapturedErrorEvent) => {
-    console.error('[WebGPU]', ev.error.message);
-    let overlay = document.getElementById('gpu-error-overlay');
-    if (!overlay) {
-      overlay = document.createElement('div');
-      overlay.id = 'gpu-error-overlay';
-      overlay.style.cssText = 'position:fixed;top:60px;left:10px;right:10px;max-height:60vh;overflow:auto;background:rgba(20,0,0,0.92);color:#ff8080;font:11px monospace;padding:10px;border:1px solid #ff4040;border-radius:4px;z-index:9999;white-space:pre-wrap;';
-      document.body.appendChild(overlay);
-    }
-    const stamp = new Date().toLocaleTimeString();
-    overlay.textContent = `[${stamp}] ${ev.error.message}\n\n` + overlay.textContent;
+    logError('webgpu:uncaptured', ev.error);
   };
 
   canvas = document.getElementById('gpu-canvas') as HTMLCanvasElement;
@@ -1041,7 +1154,7 @@ function initGrid() {
   gridTimeBuffer?.destroy();
   gridCameraBuffer = device.createBuffer({ size: CAMERA_STRIDE * 2, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
   gridTimeBuffer = device.createBuffer({ size: 4, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-  const gridModule = device.createShaderModule({ code: SHADER_GRID });
+  const gridModule = createShaderModuleChecked('grid', SHADER_GRID);
 
   const gridBGL = device.createBindGroupLayout({
     entries: [
@@ -1152,7 +1265,7 @@ function initXrUi() {
   });
   xrUiLabelCurrentMode = null; // force first render to upload
 
-  const uiModule = device.createShaderModule({ code: SHADER_XR_UI });
+  const uiModule = createShaderModuleChecked('xr.ui', SHADER_XR_UI);
 
   const uiBGL = device.createBindGroupLayout({
     entries: [
@@ -1326,8 +1439,8 @@ function createBoidsSimulation() {
   const paramsBuffer = device.createBuffer({ size: 64, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
   const cameraBuffer = device.createBuffer({ size: CAMERA_STRIDE * 2, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
 
-  const computeModule = device.createShaderModule({ code: SHADER_BOIDS_COMPUTE_EDIT || SHADER_BOIDS_COMPUTE });
-  const renderModule = device.createShaderModule({ code: SHADER_BOIDS_RENDER_EDIT || SHADER_BOIDS_RENDER });
+  const computeModule = createShaderModuleChecked('boids.compute', SHADER_BOIDS_COMPUTE_EDIT || SHADER_BOIDS_COMPUTE);
+  const renderModule = createShaderModuleChecked('boids.render', SHADER_BOIDS_RENDER_EDIT || SHADER_BOIDS_RENDER);
 
   const computeBGL = device.createBindGroupLayout({
     entries: [
@@ -1473,11 +1586,30 @@ function createPhysicsSimulation() {
   const MEDIUM_BODY_RADIUS_MAX = 4.0;
   const BIG_BODY_HEIGHT = 0.12;
   const MEDIUM_BODY_HEIGHT = 0.2;
-  // Init speed matches diskTangSpeed — the disk recovery tangential nudge targets this speed,
-  // so seeding at the same value means the system starts in equilibrium.
-  const initTangSpeed = state.physics.diskTangSpeed ?? 0.6;
-  const BIG_BODY_SWIRL = initTangSpeed;
-  const MEDIUM_BODY_SWIRL = initTangSpeed;
+  // [LAW:one-source-of-truth] Circular velocity includes self-gravity + dark matter (halo + disk).
+  // This is the single formula that determines whether particles start in equilibrium.
+  const haloM = state.physics.haloMass ?? 5.0;
+  const haloA = state.physics.haloScale ?? 2.0;
+  const diskM = state.physics.diskMass ?? 3.0;
+  const diskA = state.physics.diskScaleA ?? 1.5;
+  const diskB = state.physics.diskScaleB ?? 0.3;
+  // [LAW:one-source-of-truth] Initial velocities must match the exact force the shader applies.
+  // haloMass and diskMass are GM-equivalent parameters here (decoupled from state.physics.G for
+  // the same reason as the shader — see nbody.compute.wgsl:142-148). Multiplying by G here would
+  // break initial equilibrium with the shader forces.
+  function darkMatterVcirc2(r: number): number {
+    // Plummer halo: v² = M * r² / (r² + a²)^(3/2)
+    const r2 = r * r;
+    const haloD2 = r2 + haloA * haloA;
+    const v2halo = haloM * r2 / (haloD2 * Math.sqrt(haloD2));
+    // Miyamoto-Nagai disk (in-plane, z≈0): v² = M * R² / (R² + (a+b)²)^(3/2)
+    const ab = diskA + diskB;
+    const diskD2 = r2 + ab * ab;
+    const v2disk = diskM * r2 / (diskD2 * Math.sqrt(diskD2));
+    return v2halo + v2disk;
+  }
+  const BIG_BODY_SWIRL = 0.6;    // fallback for non-spiral distributions
+  const MEDIUM_BODY_SWIRL = 0.6;
 
   const initData = new Float32Array(count * 12);
   const dist = state.physics.distribution;
@@ -1511,7 +1643,8 @@ function createPhysicsSimulation() {
         const avgM = ((BIG_BODY_MASS_MIN+BIG_BODY_MASS_MAX+MEDIUM_BODY_MASS_MIN+MEDIUM_BODY_MASS_MAX)/4);
         const refTotalM = 1000 * avgM;
         const Geff_m = (state.physics.G ?? 1.5) * 0.001 / Math.sqrt(Math.max(1, MASSIVE_BODY_COUNT) / 1000);
-        const vC_m = Math.sqrt(Math.max(0.001, Geff_m * (intR_m/intMax_m) * refTotalM / Math.max(r_m, 0.05)));
+        // Circular velocity from enclosed particle mass + dark matter potential.
+        const vC_m = Math.sqrt(Math.max(0.001, Geff_m * (intR_m/intMax_m) * refTotalM / Math.max(r_m, 0.05) + darkMatterVcirc2(r_m)));
         vx = (-Math.sin(angle_m)*orbitalTangent[0] + Math.cos(angle_m)*orbitalBitangent[0]) * vC_m;
         vy = (-Math.sin(angle_m)*orbitalTangent[1] + Math.cos(angle_m)*orbitalBitangent[1]) * vC_m;
         vz = (-Math.sin(angle_m)*orbitalTangent[2] + Math.cos(angle_m)*orbitalBitangent[2]) * vC_m;
@@ -1582,7 +1715,8 @@ function createPhysicsSimulation() {
         const refTotalMass = REF_SOURCES * avgMass;
         const enclosedMass = massFrac * refTotalMass;
         const Geff = (state.physics.G ?? 1.5) * 0.001 / Math.sqrt(Math.max(1, MASSIVE_BODY_COUNT) / 1000);
-        const vCirc = Math.sqrt(Math.max(0.001, Geff * enclosedMass / Math.max(r, 0.05)));
+        // Circular velocity from enclosed particle mass + dark matter potential.
+        const vCirc = Math.sqrt(Math.max(0.001, Geff * enclosedMass / Math.max(r, 0.05) + darkMatterVcirc2(r)));
 
         // Visible disk has real thickness — thicker at center, thinner at edge (like a real galaxy)
         const h = (Math.random() - 0.5) * (0.25 + r * 0.05);
@@ -1608,7 +1742,7 @@ function createPhysicsSimulation() {
         x = orbitalTangent[0]*Math.cos(angle)*r + orbitalBitangent[0]*Math.sin(angle)*r + orbitalNormal[0]*h;
         y = orbitalTangent[1]*Math.cos(angle)*r + orbitalBitangent[1]*Math.sin(angle)*r + orbitalNormal[1]*h;
         z = orbitalTangent[2]*Math.cos(angle)*r + orbitalBitangent[2]*Math.sin(angle)*r + orbitalNormal[2]*h;
-        const s = 0.6 / Math.sqrt(r + 0.15);
+        const s = Math.sqrt(Math.max(0.001, darkMatterVcirc2(r)));
         vx = (Math.sin(angle)*orbitalTangent[0] - Math.cos(angle)*orbitalBitangent[0])*s;
         vy = (Math.sin(angle)*orbitalTangent[1] - Math.cos(angle)*orbitalBitangent[1])*s;
         vz = (Math.sin(angle)*orbitalTangent[2] - Math.cos(angle)*orbitalBitangent[2])*s;
@@ -1627,7 +1761,7 @@ function createPhysicsSimulation() {
         x = orbitalTangent[0]*Math.cos(angle)*r + orbitalBitangent[0]*Math.sin(angle)*r + orbitalNormal[0]*h;
         y = orbitalTangent[1]*Math.cos(angle)*r + orbitalBitangent[1]*Math.sin(angle)*r + orbitalNormal[1]*h;
         z = orbitalTangent[2]*Math.cos(angle)*r + orbitalBitangent[2]*Math.sin(angle)*r + orbitalNormal[2]*h;
-        const s = initTangSpeed / Math.sqrt(r + 0.1);
+        const s = Math.sqrt(Math.max(0.001, darkMatterVcirc2(r)));
         vx = (-Math.sin(angle)*orbitalTangent[0] + Math.cos(angle)*orbitalBitangent[0])*s + orbitalNormal[0]*h*VERTICAL_DRIFT;
         vy = (-Math.sin(angle)*orbitalTangent[1] + Math.cos(angle)*orbitalBitangent[1])*s + orbitalNormal[1]*h*VERTICAL_DRIFT;
         vz = (-Math.sin(angle)*orbitalTangent[2] + Math.cos(angle)*orbitalBitangent[2])*s + orbitalNormal[2]*h*VERTICAL_DRIFT;
@@ -1761,9 +1895,10 @@ function createPhysicsSimulation() {
     initData[off] = x; initData[off + 1] = y; initData[off + 2] = z;
     initData[off + 3] = mass;
     initData[off + 4] = vx; initData[off + 5] = vy; initData[off + 6] = vz;
-    initData[off + 8] = x;
-    initData[off + 9] = y;
-    initData[off + 10] = z;
+    // Body._unused (was `home`): zero for DKD leapfrog — no stored acceleration needed.
+    initData[off + 8] = 0;
+    initData[off + 9] = 0;
+    initData[off + 10] = 0;
   }
 
   const bufferA = device.createBuffer({ size: bodyBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC, mappedAtCreation: true });
@@ -1775,8 +1910,8 @@ function createPhysicsSimulation() {
   // 96 bytes of header + 32 × 16-byte Attractor = 608 bytes total.
   const paramsBuffer = device.createBuffer({ size: 608, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
   const cameraBuffer = device.createBuffer({ size: CAMERA_STRIDE * 2, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-  const computeModule = device.createShaderModule({ code: SHADER_NBODY_COMPUTE_EDIT || SHADER_NBODY_COMPUTE });
-  const renderModule = device.createShaderModule({ code: SHADER_NBODY_RENDER_EDIT || SHADER_NBODY_RENDER });
+  const computeModule = createShaderModuleChecked('nbody.compute', SHADER_NBODY_COMPUTE_EDIT || SHADER_NBODY_COMPUTE);
+  const renderModule = createShaderModuleChecked('nbody.render', SHADER_NBODY_RENDER_EDIT || SHADER_NBODY_RENDER);
 
   const computeBGL = device.createBindGroupLayout({
     entries: [
@@ -1793,7 +1928,7 @@ function createPhysicsSimulation() {
 
   // --- Stats reduction: KE, PE, rmsRadius, rmsHeight, angular momentum, total mass ---
   // [LAW:one-source-of-truth] Disk normal is derived from angular momentum (slots 4-6) in this same pass.
-  const statsShaderModule = device.createShaderModule({ code: SHADER_NBODY_STATS });
+  const statsShaderModule = createShaderModuleChecked('nbody.stats', SHADER_NBODY_STATS);
   const statsBGL = device.createBindGroupLayout({
     entries: [
       { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
@@ -1877,30 +2012,32 @@ function createPhysicsSimulation() {
 
   let pingPong = 0;
   const depthRef: DepthRef = {};
-  // [LAW:one-source-of-truth] Disk normal is owned here; smoothed copy is the only thing the shader ever sees.
+  // [LAW:one-source-of-truth] Simulation clock: monotonic step counter replaces wall-clock.
+  // Deterministic tidal angle and attractor timing derive from simStep × dt, not performance.now().
+  let simStep = 0;
+  // Time direction: 1 = forward (normal), -1 = reverse (rewind).
+  // Controlled by UI (hold R key / mobile FAB). Negating dt in the DKD leapfrog gives exact reversal.
+  let timeDirection = 1;
+  // [LAW:one-source-of-truth] Disk normal is fixed — the dark matter MN potential defines the disk plane.
   const diskNormal: [number, number, number] = [0, 1, 0];
-  const DISK_NORMAL_SMOOTH = 0.02;
-  const DISK_L_MIN = 1e-4;
 
-  // --- Virial equilibrium controller ---
-  // Reads KE/PE + angular momentum from the stats reduction once per second.
-  // Also derives disk normal from angular momentum (slots 4-6).
-  // Bidirectional: adjusts BOTH damping (to cool) AND tidal strength (to heat).
-  // When virial > target: increase damping to remove energy.
-  // When virial < target: increase tidal to inject energy.
+  // ── ATTRACTOR JOURNAL ────────────────────────────────────────────────────────
+  // [LAW:one-source-of-truth] The journal is the canonical record of attractor forces at each sim step.
+  // Forward: compute attractor strengths normally, write to journal[simStep].
+  // Reverse: read from journal[simStep], skip live attractor computation.
+  // This ensures the reversed simulation sees the EXACT same forces that were applied forward.
+  const JOURNAL_CAPACITY = 18000;         // 5 minutes at 60fps
+  const JOURNAL_ENTRY_FLOATS = 1 + ATTRACTOR_MAX * 4; // count + 32 × (x, y, z, strength)
+  const journal = new Float32Array(JOURNAL_CAPACITY * JOURNAL_ENTRY_FLOATS);
+  let journalHighWater = 0;               // highest simStep ever written (for reverse boundary)
+
+  // --- Diagnostic stats (no feedback into simulation) ---
+  // Stats reduction still runs once/second for KE, PE, angular momentum readback.
+  // Dark matter provides stability — no virial controller needed.
   let statsPendingMap = false;
   let lastStatsTime = 0;
   const STATS_INTERVAL_MS = 1000;
-  let dynamicDamping = 1.0;
-  let dynamicTidal = state.physics.tidalStrength ?? 0.005;
-  const TARGET_VIRIAL = 1.0;
-  const DAMPING_ADJUST_RATE = 0.003;
-  const TIDAL_ADJUST_RATE = 0.001;
-  const DAMPING_MIN = 0.9;
-  const DAMPING_MAX = 1.0;
-  const TIDAL_MIN = 0.001;
-  const TIDAL_MAX = 0.05;
-  let lastStats = { ke: 0, pe: 0, virial: 0, rmsR: 0, rmsH: 0, damping: 1.0, tidal: 0.005 };
+  let lastStats = { ke: 0, pe: 0, virial: 0, rmsR: 0, rmsH: 0 };
 
   // Pre-allocated params staging buffer — avoids GC churn from per-frame ArrayBuffer allocation.
   // 608 bytes = 96-byte header + 32 × 16-byte Attractor array. Matches nbody.compute.wgsl Params struct.
@@ -1910,49 +2047,83 @@ function createPhysicsSimulation() {
   const paramsBytes = new Uint8Array(paramsData);
 
   return {
+    setTimeDirection(dir: number) { timeDirection = dir; },
+    getSimStep() { return simStep; },
+    getTimeDirection() { return timeDirection; },
+    getJournalCapacity() { return JOURNAL_CAPACITY; },
+    getJournalHighWater() { return journalHighWater; },
+
     compute(encoder: GPUCommandEncoder) {
+      // [LAW:dataflow-not-control-flow] Reverse boundary check: can't rewind past the journal start or step 0.
+      if (timeDirection < 0 && simStep <= 0) {
+        state.paused = true;
+        return;
+      }
+
+      // [LAW:one-source-of-truth] simStep adjustment happens BEFORE param packing so that
+      // time, attractor journal index, and tidal angle all refer to the same simulation step.
+      // Forward: enter with simStep=N, pack params(N), advance to N+1 by end of compute.
+      // Reverse: enter with simStep=N+1, decrement to N here, pack params(N) — same params
+      // as the original forward step that produced the current state. reverse(forward(s)) = s.
+      if (timeDirection < 0) simStep--;
+
       const p = state.physics;
+      const baseDt = 0.016 * state.fx.timeScale;
+      const dt = baseDt * timeDirection;
       // [LAW:one-source-of-truth] G normalized by sqrt(sourceCount) so gravity scales sub-linearly with particle count.
-      // Without normalization, 50K particles would have 50x the gravity of 1K. sqrt keeps it manageable.
-      // [LAW:one-source-of-truth] dynamicDamping is adjusted by the virial controller — use it instead of p.damping.
-      f32[0] = 0.016 * state.fx.timeScale; f32[1] = p.G * 0.001 / Math.sqrt(Math.max(1, MASSIVE_BODY_COUNT) / 1000); f32[2] = p.softening; f32[3] = dynamicDamping;
+      f32[0] = dt;
+      f32[1] = p.G * 0.001 / Math.sqrt(Math.max(1, MASSIVE_BODY_COUNT) / 1000);
+      f32[2] = p.softening;
+      f32[3] = p.haloMass ?? 5.0;
       u32[4] = count;
       u32[5] = MASSIVE_BODY_COUNT;
-      f32[6] = p.coreOrbit;
-      f32[7] = performance.now() * 0.001;
-      // [LAW:single-enforcer] Pruning lives in the main frame loop so the array stays clean
-      // regardless of mode (switching from physics mid-decay must not leak dead attractors).
-      // Here we just read the already-pruned array and compute per-attractor strength for the GPU.
-      const nowSec = f32[7];
-      const ceiling = p.interactionStrength ?? 1;
-      const attractors = state.attractors;
-      const attractorN = Math.min(attractors.length, ATTRACTOR_MAX);
-      u32[8] = attractorN;
-      u32[9] = 0; u32[10] = 0; u32[11] = 0; // pad slots (was targetX/Y/Z/active)
-      // diskNormal at offsets 12..14, pad at 15
+      f32[6] = p.haloScale ?? 2.0;
+      // [LAW:one-source-of-truth] Simulation clock: simStep × baseDt gives deterministic tidal angle.
+      f32[7] = simStep * baseDt;
+      // diskNormal: fixed orientation for the Miyamoto-Nagai potential.
       f32[12] = diskNormal[0]; f32[13] = diskNormal[1]; f32[14] = diskNormal[2];
-      // disk gain sliders, must match Params struct order in nbody.compute.wgsl
-      f32[16] = p.diskVertDamp ?? 0;
-      f32[17] = p.diskRadDamp ?? 0;
-      f32[18] = p.diskTangGain ?? 0;
-      f32[19] = p.diskVertSpring ?? 0;
-      f32[20] = p.diskAlignGain ?? 0;
-      f32[21] = 0; // pad (was interactionStrength — now baked into per-attractor strength)
-      f32[22] = p.diskTangSpeed ?? 0.5;
-      f32[23] = dynamicTidal;
-      // Attractor array at byte offset 96 = f32 index 24. Stride 4 floats per entry (pos.xyz, strength).
-      for (let i = 0; i < attractorN; i++) {
-        const a = attractors[i];
-        const base = 24 + i * 4;
-        f32[base] = a.x;
-        f32[base + 1] = a.y;
-        f32[base + 2] = a.z;
-        f32[base + 3] = attractorStrength(a, nowSec, ceiling);
-      }
-      // Zero any stale slots beyond active count (safety: strength=0 is inert, so not strictly needed, but clean).
-      for (let i = attractorN; i < ATTRACTOR_MAX; i++) {
-        const base = 24 + i * 4;
-        f32[base] = 0; f32[base + 1] = 0; f32[base + 2] = 0; f32[base + 3] = 0;
+      f32[16] = p.diskMass ?? 3.0;
+      f32[17] = p.diskScaleA ?? 1.5;
+      f32[18] = p.diskScaleB ?? 0.3;
+      f32[19] = 0; f32[20] = 0; f32[21] = 0; f32[22] = 0;
+      f32[23] = p.tidalStrength ?? 0.005;
+
+      // ── ATTRACTOR DATA: forward computes + journals; reverse reads from journal ──
+      if (timeDirection > 0) {
+        // Forward: compute attractor strengths from live state, write to journal.
+        // [LAW:one-source-of-truth] Wall clock for attractor lifecycle — matches chargeStart/releaseTime
+        // (set via nowSeconds()) and pruneAttractors(). Reverse reads journaled values, so reverse
+        // doesn't care which clock drove the forward computation.
+        const nowSec = nowSeconds();
+        const ceiling = p.interactionStrength ?? 1;
+        const attractors = state.attractors;
+        const attractorN = Math.min(attractors.length, ATTRACTOR_MAX);
+        u32[8] = attractorN;
+        u32[9] = 0; u32[10] = 0; u32[11] = 0;
+        for (let i = 0; i < attractorN; i++) {
+          const a = attractors[i];
+          const base = 24 + i * 4;
+          f32[base] = a.x;
+          f32[base + 1] = a.y;
+          f32[base + 2] = a.z;
+          f32[base + 3] = attractorStrength(a, nowSec, ceiling);
+        }
+        for (let i = attractorN; i < ATTRACTOR_MAX; i++) {
+          const base = 24 + i * 4;
+          f32[base] = 0; f32[base + 1] = 0; f32[base + 2] = 0; f32[base + 3] = 0;
+        }
+        // Journal write: snapshot the packed attractor data at this simStep.
+        const jBase = (simStep % JOURNAL_CAPACITY) * JOURNAL_ENTRY_FLOATS;
+        journal[jBase] = attractorN;
+        for (let i = 0; i < ATTRACTOR_MAX * 4; i++) journal[jBase + 1 + i] = f32[24 + i];
+        journalHighWater = Math.max(journalHighWater, simStep);
+        simStep++;
+      } else {
+        // Reverse: read attractor data from journal at simStep (already decremented above).
+        const jBase = (simStep % JOURNAL_CAPACITY) * JOURNAL_ENTRY_FLOATS;
+        u32[8] = journal[jBase]; // attractorCount
+        u32[9] = 0; u32[10] = 0; u32[11] = 0;
+        for (let i = 0; i < ATTRACTOR_MAX * 4; i++) f32[24 + i] = journal[jBase + 1 + i];
       }
       device.queue.writeBuffer(paramsBuffer, 0, paramsBytes);
 
@@ -1994,42 +2165,11 @@ function createPhysicsSimulation() {
             statsStaging.unmap();
             statsPendingMap = false;
 
-            const ke = d[0];
-            const pe = d[1];
-            const sumR2 = d[2];
-            const sumH2 = d[3];
-            const lx = d[4], ly = d[5], lz = d[6];
+            const ke = d[0], pe = d[1];
             const virial = Math.abs(pe) > 0.001 ? (2 * ke) / Math.abs(pe) : 1.0;
-            const rmsR = Math.sqrt(sumR2 / Math.max(count, 1));
-            const rmsH = Math.sqrt(sumH2 / Math.max(count, 1));
-
-            lastStats = { ke, pe, virial, rmsR, rmsH, damping: dynamicDamping, tidal: dynamicTidal };
-
-            // Disk normal from angular momentum — same data the old reduce shader computed separately.
-            const lLen = Math.sqrt(lx * lx + ly * ly + lz * lz);
-            // [LAW:dataflow-not-control-flow] When |L| is below threshold, keep the previous normal.
-            if (lLen > DISK_L_MIN) {
-              const nx = lx / lLen, ny = ly / lLen, nz = lz / lLen;
-              const sx = diskNormal[0] + (nx - diskNormal[0]) * DISK_NORMAL_SMOOTH;
-              const sy = diskNormal[1] + (ny - diskNormal[1]) * DISK_NORMAL_SMOOTH;
-              const sz = diskNormal[2] + (nz - diskNormal[2]) * DISK_NORMAL_SMOOTH;
-              const sLen = Math.sqrt(sx * sx + sy * sy + sz * sz) || 1;
-              diskNormal[0] = sx / sLen; diskNormal[1] = sy / sLen; diskNormal[2] = sz / sLen;
-            }
-
-            // Bidirectional virial controller:
-            // virial > target → system overheating → increase damping (remove energy)
-            // virial < target → system collapsing → increase tidal (inject energy)
-            const virialError = virial - TARGET_VIRIAL;
-            if (virialError > 0) {
-              dynamicDamping -= virialError * DAMPING_ADJUST_RATE;
-              dynamicTidal -= virialError * TIDAL_ADJUST_RATE;
-            } else {
-              dynamicTidal -= virialError * TIDAL_ADJUST_RATE;
-              dynamicDamping -= virialError * DAMPING_ADJUST_RATE;
-            }
-            dynamicDamping = Math.max(DAMPING_MIN, Math.min(DAMPING_MAX, dynamicDamping));
-            dynamicTidal = Math.max(TIDAL_MIN, Math.min(TIDAL_MAX, dynamicTidal));
+            const rmsR = Math.sqrt(d[2] / Math.max(count, 1));
+            const rmsH = Math.sqrt(d[3] / Math.max(count, 1));
+            lastStats = { ke, pe, virial, rmsR, rmsH };
           }).catch(() => { statsPendingMap = false; });
         });
       }
@@ -2236,8 +2376,8 @@ function createPhysicsClassicSimulation(): Simulation {
   const attractorBuffer = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
   const cameraBuffer = device.createBuffer({ size: CAMERA_STRIDE * 2, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
 
-  const computeModule = device.createShaderModule({ code: SHADER_NBODY_CLASSIC_COMPUTE_EDIT || SHADER_NBODY_CLASSIC_COMPUTE });
-  const renderModule = device.createShaderModule({ code: SHADER_NBODY_CLASSIC_RENDER_EDIT || SHADER_NBODY_CLASSIC_RENDER });
+  const computeModule = createShaderModuleChecked('nbody.classic.compute', SHADER_NBODY_CLASSIC_COMPUTE_EDIT || SHADER_NBODY_CLASSIC_COMPUTE);
+  const renderModule = createShaderModuleChecked('nbody.classic.render', SHADER_NBODY_CLASSIC_RENDER_EDIT || SHADER_NBODY_CLASSIC_RENDER);
 
   const computeBGL = device.createBindGroupLayout({ entries: [
     { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
@@ -2399,12 +2539,12 @@ function createFluidSimulation() {
   device.queue.writeBuffer(velA, 0, initVel);
 
   // Compile shaders
-  const forcesAdvectModule = device.createShaderModule({ code: SHADER_FLUID_FORCES_ADVECT_EDIT || SHADER_FLUID_FORCES_ADVECT });
-  const diffuseModule = device.createShaderModule({ code: SHADER_FLUID_DIFFUSE_EDIT || SHADER_FLUID_DIFFUSE });
-  const pressureModule = device.createShaderModule({ code: SHADER_FLUID_PRESSURE_EDIT || SHADER_FLUID_PRESSURE });
-  const divergenceModule = device.createShaderModule({ code: SHADER_FLUID_DIVERGENCE_EDIT || SHADER_FLUID_DIVERGENCE });
-  const gradientModule = device.createShaderModule({ code: SHADER_FLUID_GRADIENT_EDIT || SHADER_FLUID_GRADIENT });
-  const renderModule = device.createShaderModule({ code: SHADER_FLUID_RENDER_EDIT || SHADER_FLUID_RENDER });
+  const forcesAdvectModule = createShaderModuleChecked('fluid.forces', SHADER_FLUID_FORCES_ADVECT_EDIT || SHADER_FLUID_FORCES_ADVECT);
+  const diffuseModule = createShaderModuleChecked('fluid.diffuse', SHADER_FLUID_DIFFUSE_EDIT || SHADER_FLUID_DIFFUSE);
+  const pressureModule = createShaderModuleChecked('fluid.pressure', SHADER_FLUID_PRESSURE_EDIT || SHADER_FLUID_PRESSURE);
+  const divergenceModule = createShaderModuleChecked('fluid.divergence', SHADER_FLUID_DIVERGENCE_EDIT || SHADER_FLUID_DIVERGENCE);
+  const gradientModule = createShaderModuleChecked('fluid.gradient', SHADER_FLUID_GRADIENT_EDIT || SHADER_FLUID_GRADIENT);
+  const renderModule = createShaderModuleChecked('fluid.render', SHADER_FLUID_RENDER_EDIT || SHADER_FLUID_RENDER);
 
   // Forces + Advect pipeline: reads vel+dye from A, writes to B
   const faBGL = device.createBindGroupLayout({
@@ -2700,7 +2840,7 @@ function createParametricSimulation() {
   let time = 0;     // always advances; used only for param oscillation phase
   let animTime = 0; // advances only when any rate > 0; drives rotation + waves
 
-  const computeModule = device.createShaderModule({ code: SHADER_PARAMETRIC_COMPUTE_EDIT || SHADER_PARAMETRIC_COMPUTE });
+  const computeModule = createShaderModuleChecked('parametric.compute', SHADER_PARAMETRIC_COMPUTE_EDIT || SHADER_PARAMETRIC_COMPUTE);
   const computeBGL = device.createBindGroupLayout({
     entries: [
       { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
@@ -2716,7 +2856,7 @@ function createParametricSimulation() {
     { binding: 1, resource: { buffer: computeParamsBuffer } },
   ]});
 
-  const renderModule = device.createShaderModule({ code: SHADER_PARAMETRIC_RENDER_EDIT || SHADER_PARAMETRIC_RENDER });
+  const renderModule = createShaderModuleChecked('parametric.render', SHADER_PARAMETRIC_RENDER_EDIT || SHADER_PARAMETRIC_RENDER);
   const renderBGL = device.createBindGroupLayout({
     entries: [
       { binding: 0, visibility: GPUShaderStage.VERTEX, buffer: { type: 'read-only-storage' } },
@@ -2913,7 +3053,7 @@ function createReactionSimulation() {
   );
 
   // Compute pipeline
-  const computeModule = device.createShaderModule({ code: SHADER_REACTION_COMPUTE_EDIT || SHADER_REACTION_COMPUTE });
+  const computeModule = createShaderModuleChecked('reaction.compute', SHADER_REACTION_COMPUTE_EDIT || SHADER_REACTION_COMPUTE);
   const computeBGL = device.createBindGroupLayout({
     entries: [
       { binding: 0, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: 'float', viewDimension: '3d' } },
@@ -2942,7 +3082,7 @@ function createReactionSimulation() {
   ];
 
   // Render pipeline — raymarched volume
-  const renderModule = device.createShaderModule({ code: SHADER_REACTION_RENDER_EDIT || SHADER_REACTION_RENDER });
+  const renderModule = createShaderModuleChecked('reaction.render', SHADER_REACTION_RENDER_EDIT || SHADER_REACTION_RENDER);
   const sampler = device.createSampler({
     magFilter: 'linear', minFilter: 'linear',
     addressModeU: 'clamp-to-edge', addressModeV: 'clamp-to-edge', addressModeW: 'clamp-to-edge',
@@ -3387,6 +3527,41 @@ function setupGlobalControls() {
 
   // XR button setup
   setupXRButton();
+}
+
+// [LAW:single-enforcer] Time-reverse input is owned here. Desktop: hold R. Mobile: hold rewind FAB.
+// The physics sim's setTimeDirection() is the single channel for changing direction.
+function setupTimeReverseControls() {
+  const setReverse = (active: boolean) => {
+    const sim = simulations[state.mode];
+    if (!sim || !('setTimeDirection' in sim)) return;
+    (sim as any).setTimeDirection(active ? -1 : 1);
+    // Unblock pause if we were auto-paused at the journal boundary.
+    if (!active && state.paused) state.paused = false;
+  };
+
+  // Desktop: hold R key to rewind.
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'r' || e.key === 'R') {
+      if (e.repeat) return;
+      // Don't capture R when typing in an input or the shader editor.
+      const tag = (e.target as HTMLElement)?.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+      setReverse(true);
+    }
+  });
+  document.addEventListener('keyup', (e) => {
+    if (e.key === 'r' || e.key === 'R') setReverse(false);
+  });
+
+  // Mobile: hold rewind FAB.
+  const fabRewind = document.getElementById('fab-rewind');
+  if (fabRewind) {
+    fabRewind.addEventListener('pointerdown', () => setReverse(true));
+    fabRewind.addEventListener('pointerup', () => setReverse(false));
+    fabRewind.addEventListener('pointercancel', () => setReverse(false));
+    fabRewind.addEventListener('pointerleave', () => setReverse(false));
+  }
 }
 
 function buildThemeSelector() {
@@ -3920,8 +4095,12 @@ function describeParam(_mode: string, key: string, val: number | string): string
     visualRange: () => `visual range ${val}`,
     G: () => n > 5 ? `strong gravity (G=${val})` : n < 0.5 ? `weak gravity (G=${val})` : `G=${val}`,
     softening: () => `softening ${val}`,
-    damping: () => n < 0.995 ? `high damping (${val})` : `damping ${val}`,
-    coreOrbit: () => n < 0.1 ? `minimal core friction (${val})` : n > 0.8 ? `strong core friction (${val})` : `core friction ${val}`,
+    damping: () => n < 0.995 ? `high damping (${val})` : `damping ${val}`,  // classic physics only
+    haloMass: () => n > 8 ? `heavy halo (${val})` : n < 2 ? `light halo (${val})` : `halo mass ${val}`,
+    haloScale: () => `halo scale ${val}`,
+    diskMass: () => n < 0.1 ? `no disk potential` : `disk mass ${val}`,
+    diskScaleA: () => `disk scale A ${val}`,
+    diskScaleB: () => `disk scale B ${val}`,
     distribution: () => `${val} distribution`,
     resolution: () => `${val}x${val} grid`,
     viscosity: () => n > 0.5 ? `thick fluid (viscosity ${val})` : n < 0.05 ? `thin fluid (viscosity ${val})` : `viscosity ${val}`,
@@ -4494,26 +4673,42 @@ function setupXRButton() {
 
 async function toggleXR() {
   if (xrSession) {
+    logInfo('xr', 'exiting session (user clicked Exit VR)');
+    currentGpuPhase = 'xr:session.end';
     xrSession.end();
     return;
   }
 
   const btn = document.getElementById('btn-xr')!;
   btn.textContent = 'Starting...';
+  logInfo('xr', 'toggleXR start', {
+    hasWebXR: !!navigator.xr,
+    userAgent: navigator.userAgent,
+  });
 
   try {
     // Safari visionOS: 'webgpu' is required to get XRGPUBinding.
     // 'layers' is optional — Safari accepts it in updateRenderState({ layers: [...] })
     // even when not listed as required. 'local-floor' is optional; fall back to 'local'.
+    currentGpuPhase = 'xr:requestSession';
     xrSession = await navigator.xr!.requestSession('immersive-vr', {
       requiredFeatures: ['webgpu'],
       optionalFeatures: ['layers', 'local-floor'],
     });
+    logInfo('xr', 'session acquired', {
+      environmentBlendMode: (xrSession as unknown as { environmentBlendMode?: string }).environmentBlendMode,
+      interactionMode: (xrSession as unknown as { interactionMode?: string }).interactionMode,
+      visibilityState: (xrSession as unknown as { visibilityState?: string }).visibilityState,
+    });
     let gotFloor = false;
     try {
+      currentGpuPhase = 'xr:requestReferenceSpace(local-floor)';
       xrRefSpace = await xrSession.requestReferenceSpace('local-floor');
       gotFloor = true;
-    } catch (_) {
+      logInfo('xr', 'reference space = local-floor');
+    } catch (refErr) {
+      logInfo('xr', 'local-floor unavailable, falling back to local', (refErr as Error).message);
+      currentGpuPhase = 'xr:requestReferenceSpace(local)';
       xrRefSpace = await xrSession.requestReferenceSpace('local');
     }
 
@@ -4536,37 +4731,89 @@ async function toggleXR() {
     // XRGPUBinding is the WebXR–WebGPU bridge. It takes the XR session and the
     // GPUDevice (which must have been created with xrCompatible: true) and lets us
     // create GPU-backed projection layers and retrieve per-eye GPUTextureViews each frame.
+    currentGpuPhase = 'xr:new XRGPUBinding';
     xrBinding = new XRGPUBinding(xrSession, device);
 
     // getPreferredColorFormat() returns the texture format the XR compositor expects.
     // nativeProjectionScaleFactor is the device's native render resolution multiplier —
     // passing it to scaleFactor renders at full resolution instead of a default lower res.
     const preferredFormat = xrBinding.getPreferredColorFormat();
-    syncRenderConfig(preferredFormat, 1);
     const scaleFactor = xrBinding.nativeProjectionScaleFactor;
+    logInfo('xr', 'binding ready', { preferredFormat, nativeProjectionScaleFactor: scaleFactor });
+    syncRenderConfig(preferredFormat, 1);
 
-    // Try creating the projection layer with native scale, fall back to default scale.
-    // Depth is managed per-frame (see xrFrame) so we don't request depthStencilFormat here.
+    // Prefer texture-array configs WITH depth: the compositor needs per-pixel depth for
+    // parallax-correct reprojection, and texture-array layers guarantee the per-eye
+    // sub-image dimensions match our HDR scene target. Non-array layers share one wide
+    // texture between eyes (viewport-offset right eye), so pairing them with depth
+    // would produce a render-pass dimension mismatch (depth view wider than color view).
+    //
+    // depthStencilFormat is fixed to 'depth24plus' because all sim render pipelines are
+    // compiled with that format — a 'depth32float' layer would hand us a depth texture
+    // that no pipeline can bind. Adding 'depth32float' support would require either
+    // dual-compiling every pipeline or copying depth between formats each frame; neither
+    // is worth the complexity for a format fallback that likely never triggers in
+    // practice (depth24plus is universally supported).
+    //
+    // Fallback priority:
+    //   1. texture-array + depth24plus + native scale   ← ideal
+    //   2. texture-array + depth24plus, default scale   ← native scale rejected
+    //   3. texture-array, no depth                      ← depth rejected (loses reprojection)
+    //   4. non-array, no depth                          ← texture-array rejected
     const layerConfigs: XRGPUProjectionLayerInit[] = [
+      { colorFormat: preferredFormat, depthStencilFormat: 'depth24plus', scaleFactor, textureType: 'texture-array' },
+      { colorFormat: preferredFormat, depthStencilFormat: 'depth24plus', textureType: 'texture-array' },
       { colorFormat: preferredFormat, scaleFactor, textureType: 'texture-array' },
       { colorFormat: preferredFormat, textureType: 'texture-array' },
       { colorFormat: preferredFormat, scaleFactor },
       { colorFormat: preferredFormat },
     ];
+    currentGpuPhase = 'xr:createProjectionLayer';
+    let chosenConfig: XRGPUProjectionLayerInit | null = null;
+    const attemptLog: Array<{ config: XRGPUProjectionLayerInit; error: string }> = [];
     for (const config of layerConfigs) {
       try {
         xrLayer = xrBinding.createProjectionLayer(config);
+        chosenConfig = config;
         break;
       } catch (e) {
-        console.warn('[XR] Projection layer config failed, trying next:', (e as Error).message);
+        const msg = (e as Error).message;
+        attemptLog.push({ config, error: msg });
+        logInfo('xr', 'projection layer config rejected', { config, error: msg });
         xrLayer = null;
       }
     }
-    if (!xrLayer) throw new Error('All projection layer configurations failed');
+    if (!xrLayer) {
+      throw new Error(`All projection layer configurations failed. Attempts: ${JSON.stringify(attemptLog)}`);
+    }
+    logInfo('xr', 'projection layer created', {
+      config: chosenConfig,
+      textureWidth: xrLayer.textureWidth,
+      textureHeight: xrLayer.textureHeight,
+      textureArrayLength: (xrLayer as unknown as { textureArrayLength?: number }).textureArrayLength,
+      ignoreDepthValues: (xrLayer as unknown as { ignoreDepthValues?: boolean }).ignoreDepthValues,
+    });
+
+    // fixedFoveation = 0 → no peripheral blur. Vision Pro's default is non-zero and
+    // visibly softens anything not in the center of view. Silently ignored if the
+    // property isn't implemented on this platform.
+    try {
+      (xrLayer as unknown as { fixedFoveation: number }).fixedFoveation = 0;
+      logInfo('xr', 'fixedFoveation set to 0');
+    } catch (foveErr) {
+      logInfo('xr', 'fixedFoveation unsupported on this platform', (foveErr as Error).message);
+    }
 
     // Assign our GPU projection layer as the sole render target for this session.
     // This replaces the default baseLayer (canvas-backed) with our GPU texture layer.
-    xrSession.updateRenderState({ layers: [xrLayer] });
+    currentGpuPhase = 'xr:updateRenderState';
+    try {
+      xrSession.updateRenderState({ layers: [xrLayer] });
+      logInfo('xr', 'render state updated with projection layer');
+    } catch (rsErr) {
+      logError('xr:updateRenderState', rsErr);
+      throw rsErr;
+    }
     xrSession.addEventListener('selectstart', (event) => {
       const src = (event as XRInputSourceEvent).inputSource;
       // Defer decision (UI vs sim interaction) until the next XRFrame when a
@@ -4610,33 +4857,52 @@ async function toggleXR() {
 
     btn.textContent = 'Exit VR';
     state.xrEnabled = true;
+    currentGpuPhase = 'xr:awaiting first frame';
+
+    xrSession.addEventListener('visibilitychange', () => {
+      logInfo('xr', 'visibilitychange', {
+        visibilityState: (xrSession as unknown as { visibilityState?: string } | null)?.visibilityState,
+      });
+    });
 
     xrSession.requestAnimationFrame(xrFrame);
+    logInfo('xr', 'first frame requested; waiting for xrFrame callback');
 
     xrSession.addEventListener('end', () => {
+      logInfo('xr', 'session ended', { finalPhase: currentGpuPhase, framesRendered: xrFrameCount });
       xrSession = null;
       xrRefSpace = null;
       xrBinding = null;
       xrLayer = null;
       state.xrEnabled = false;
+      // Reset the frame counter so the first-frame diagnostics re-emit on re-entry —
+      // critical for diagnosing intermittent XR issues where session 2 differs from 1.
+      xrFrameCount = 0;
+      currentGpuPhase = 'desktop';
       syncRenderConfig(canvasFormat, 1);
       setXRInteractionSource(null);
       btn.textContent = 'Enter VR';
       requestAnimationFrame(frame);
     });
   } catch (e) {
-    console.error('[XR] Failed to start session:', e);
+    logError('xr:toggle', e, `session failed to start (phase=${currentGpuPhase})`);
     btn.textContent = `XR Error: ${(e as Error).message}`;
-    if (xrSession) { try { xrSession.end(); } catch (_) {} }
+    if (xrSession) { try { xrSession.end(); } catch (endErr) { logError('xr:cleanup-end', endErr); } }
     xrSession = null;
+    currentGpuPhase = 'desktop';
     setTimeout(() => { btn.textContent = 'Enter VR'; }, 4000);
   }
 }
+
+let xrFrameCount = 0;
+const XR_FIRST_FRAMES_TO_LOG = 3;
 
 function xrFrame(time: DOMHighResTimeStamp, xrFrameData: XRFrame) {
   if (!xrSession) return;
   xrSession.requestAnimationFrame(xrFrame);
   refreshThemeColors(time);
+  const isEarlyFrame = xrFrameCount < XR_FIRST_FRAMES_TO_LOG;
+  if (isEarlyFrame) logInfo('xr:frame', `xrFrame #${xrFrameCount} entered`, { mode: state.mode });
   // [LAW:single-enforcer] Same prune call as desktop frame loop — keeps the attractor array clean in XR too.
   pruneAttractors(time * 0.001);
 
@@ -4648,21 +4914,38 @@ function xrFrame(time: DOMHighResTimeStamp, xrFrameData: XRFrame) {
     fpsTime = time;
   }
 
+  // Scope GPU validation errors to this frame so we can attribute them to the
+  // XR render path specifically (otherwise uncapturederror reports them without
+  // any indication that they came from XR encoding).
+  currentGpuPhase = `xr:frame:${xrFrameCount}:pre-encode`;
+  device.pushErrorScope('validation');
+
   try {
     const pose = xrFrameData.getViewerPose(xrRefSpace!);
-    if (!pose) return;
+    if (!pose) {
+      if (isEarlyFrame) logInfo('xr:frame', 'no viewer pose yet');
+      // Don't pop here — finally handles it. Popping twice corrupts the scope stack.
+      return;
+    }
 
     const sim = simulations[state.mode];
-    if (!sim) return;
+    if (!sim) {
+      logError('xr:frame', new Error(`simulation for mode=${state.mode} is not initialized`));
+      return;
+    }
 
     // UI input runs first — it may claim a pinch that would otherwise drive the sim.
     updateXrUiInput(xrFrameData);
     updateXRSimulationInteraction(xrFrameData);
 
-    const encoder = device.createCommandEncoder();
+    currentGpuPhase = `xr:frame:${xrFrameCount}:createCommandEncoder`;
+    const encoder = device.createCommandEncoder({ label: `xr-frame-${xrFrameCount}` });
 
     // Compute runs once per frame — both eyes share the same simulation state.
-    if (!state.paused) sim.compute(encoder);
+    if (!state.paused) {
+      currentGpuPhase = `xr:frame:${xrFrameCount}:sim.compute(${state.mode})`;
+      sim.compute(encoder);
+    }
 
     // Render once per eye. pose.views is typically [left, right] on stereo devices.
     //
@@ -4670,21 +4953,49 @@ function xrFrame(time: DOMHighResTimeStamp, xrFrameData: XRFrame) {
     // camera buffer (viewIndex * CAMERA_STRIDE), so both writeBuffer calls coexist
     // in the queue without overwriting each other before the command buffer executes.
     // Each eye's render pass binds the camera buffer at its own offset via renderBGs[viewIndex].
+    if (isEarlyFrame) logInfo('xr:frame', `pose has ${pose.views.length} views`);
     for (let viewIndex = 0; viewIndex < pose.views.length; viewIndex++) {
       const view = pose.views[viewIndex];
 
       // getViewSubImage (Safari) / getSubImage (Chrome) returns the per-eye render target.
       // The returned GPUTexture is owned by the XR compositor — don't hold refs across frames.
+      currentGpuPhase = `xr:frame:${xrFrameCount}:getViewSubImage(eye=${viewIndex})`;
       const binding = xrBinding!;
       const subImage = binding.getViewSubImage
         ? binding.getViewSubImage(xrLayer!, view)
         : binding.getSubImage!(xrLayer!, view);
-      if (!subImage) continue;
+      if (!subImage) {
+        logError('xr:frame', new Error(`subImage null for eye ${viewIndex}`));
+        continue;
+      }
+      if (isEarlyFrame && viewIndex === 0) {
+        logInfo('xr:frame', 'subImage', {
+          viewport: subImage.viewport,
+          colorFormat: subImage.colorTexture.format,
+          hasDepth: !!subImage.depthStencilTexture,
+        });
+      }
 
       // getViewDescriptor() returns the correct GPUTextureViewDescriptor for this eye,
       // including the array layer index when the compositor uses a texture array.
+      currentGpuPhase = `xr:frame:${xrFrameCount}:createView(color,eye=${viewIndex})`;
       const viewDesc = subImage.getViewDescriptor ? subImage.getViewDescriptor() : {};
       const textureView = subImage.colorTexture.createView(viewDesc);
+
+      // [LAW:one-source-of-truth] Scene depth is written directly into the XR compositor's
+      // depth texture. With depth in hand, Vision Pro does per-pixel parallax-correct
+      // reprojection between render and scanout — eliminating the jitter/shear that
+      // planar-only warp produces during head motion.
+      //
+      // Safety gate: only use the XR depth view when the layer is a texture-array. For
+      // non-array layers the depth texture is full-width (2·eyeW) while our HDR scene
+      // is per-eye (eyeW, eyeH); mixing them in one render pass fails dimension
+      // validation. When we can't use it, getDepthAttachment falls back to postFx.depth
+      // (renders fine, no reprojection benefit — same as if depth wasn't requested).
+      currentGpuPhase = `xr:frame:${xrFrameCount}:createView(depth,eye=${viewIndex})`;
+      const isTextureArray = ((xrLayer as unknown as { textureArrayLength?: number }).textureArrayLength ?? 1) > 1;
+      const depthTex = subImage.depthStencilTexture;
+      xrDepthOverride = (depthTex && isTextureArray) ? depthTex.createView(viewDesc) : null;
 
       // Set the per-eye camera override so getCameraUniformData() uses XR matrices.
       const pos = view.transform.position;
@@ -4699,12 +5010,16 @@ function xrFrame(time: DOMHighResTimeStamp, xrFrameData: XRFrame) {
       // [LAW:dataflow-not-control-flow] XR uses the same HDR + bloom + composite pipeline as desktop.
       // HDR scene is sized to the eye render area; we share one HDR scene across both eyes
       // (clobbered between eyes). Trails do not persist in XR.
+      currentGpuPhase = `xr:frame:${xrFrameCount}:ensureHdrTargets(${width}x${height})`;
       ensureHdrTargets(width, height);
       postFx.needsClear = true; // force loadOp:clear; no XR trails
       const sceneIdx = postFx.sceneIdx;
+      currentGpuPhase = `xr:frame:${xrFrameCount}:sim.render(${state.mode},eye=${viewIndex})`;
       sim.render(encoder, postFx.scene[sceneIdx].createView(), null, viewIndex);
 
       // Overlay the XR UI panel into the HDR scene so it picks up tonemap + bloom.
+      // Reuse the same depth view so UI z-tests against scene depth and the stored
+      // depth going to the compositor reflects the final pixel occlusion.
       const uiPass = encoder.beginRenderPass({
         colorAttachments: [{
           view: postFx.scene[sceneIdx].createView(),
@@ -4712,25 +5027,39 @@ function xrFrame(time: DOMHighResTimeStamp, xrFrameData: XRFrame) {
           storeOp: 'store',
         }],
         depthStencilAttachment: {
-          view: postFx.depth!.createView(),
+          view: xrDepthOverride ?? postFx.depth!.createView(),
           depthLoadOp: 'load',
           depthStoreOp: 'store',
         },
       });
+      currentGpuPhase = `xr:frame:${xrFrameCount}:xr-ui(eye=${viewIndex})`;
       renderXrUi(uiPass, width / height, viewIndex);
       uiPass.end();
 
+      currentGpuPhase = `xr:frame:${xrFrameCount}:bloom(eye=${viewIndex})`;
       runBloomChain(encoder);
+      currentGpuPhase = `xr:frame:${xrFrameCount}:composite(eye=${viewIndex})`;
       const ctFormat = subImage.colorTexture.format;
       runComposite(encoder, textureView, ctFormat, [x, y, width, height]);
     }
 
-    // Clear overrides after all eyes are encoded — desktop frame loop must not inherit XR state.
-    xrCameraOverride = null;
-
+    currentGpuPhase = `xr:frame:${xrFrameCount}:submit`;
     device.queue.submit([encoder.finish()]);
+    if (isEarlyFrame) logInfo('xr:frame', `frame #${xrFrameCount} submitted OK`);
   } catch (e) {
-    console.error('[XR] Frame error:', e);
+    logError('xr:frame', e, `frame #${xrFrameCount} threw synchronously`);
+  } finally {
+    // Clear overrides unconditionally: if anything threw inside the try, a non-null
+    // xrDepthOverride would retain a compositor-owned GPUTextureView past the frame
+    // boundary (unsafe — compositor reclaims these between frames). xrCameraOverride
+    // leaking is less dangerous but would make the desktop frame loop use stale XR
+    // matrices if the user exits VR right after an error.
+    xrCameraOverride = null;
+    xrDepthOverride = null;
+    device.popErrorScope().then(err => {
+      if (err) logError('xr:frame:validation', err, `frame #${xrFrameCount}`);
+    }).catch(popErr => logError('xr:frame:popScope', popErr));
+    xrFrameCount++;
   }
 }
 
@@ -4901,6 +5230,19 @@ function updateStats() {
   const count = sim ? sim.getCount() : '--';
   document.getElementById('stat-count')!.textContent =
     (state.mode === 'fluid' || state.mode === 'reaction') ? `Grid: ${count}` : `Particles: ${count}`;
+
+  // Step counter: visible only in physics mode. Shows direction arrow.
+  const stepEl = document.getElementById('stat-step');
+  if (stepEl) {
+    if (state.mode === 'physics' && sim && 'getSimStep' in sim) {
+      const step = (sim as any).getSimStep();
+      const dir = (sim as any).getTimeDirection();
+      stepEl.style.display = '';
+      stepEl.textContent = `Step: ${step} ${dir < 0 ? '\u25C0' : '\u25B6'}`;
+    } else {
+      stepEl.style.display = 'none';
+    }
+  }
 }
 
 function resizeCanvas() {
@@ -5234,6 +5576,7 @@ async function main() {
     setupMouseControls();
   }
   setupShaderPanel();
+  setupTimeReverseControls();
   syncUIFromState();
   resizeCanvas();
   ensureSimulation();
