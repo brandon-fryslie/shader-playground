@@ -20,7 +20,6 @@ import SHADER_PARAMETRIC_RENDER from './shaders/parametric.render.wgsl?raw';
 import SHADER_REACTION_COMPUTE from './shaders/reaction.compute.wgsl?raw';
 import SHADER_REACTION_RENDER from './shaders/reaction.render.wgsl?raw';
 import SHADER_GRID from './shaders/grid.wgsl?raw';
-import SHADER_XR_UI from './shaders/xr.ui.wgsl?raw';
 import SHADER_POST_FADE from './shaders/post.fade.wgsl?raw';
 import SHADER_POST_DOWNSAMPLE from './shaders/post.downsample.wgsl?raw';
 import SHADER_POST_UPSAMPLE from './shaders/post.upsample.wgsl?raw';
@@ -1136,7 +1135,7 @@ async function initWebGPU(): Promise<boolean> {
   device.lost.then((info) => {
     logError('webgpu:device-lost', new Error(info.message), `reason=${info.reason}`);
     if (info.reason !== 'destroyed') {
-      initWebGPU().then(ok => { if (ok) { initGrid(); initXrUi(); ensureSimulation(); requestAnimationFrame(frame); } });
+      initWebGPU().then(ok => { if (ok) { initGrid(); ensureSimulation(); requestAnimationFrame(frame); } });
     }
   });
 
@@ -1221,211 +1220,6 @@ function renderGrid(pass: GPURenderPassEncoder, aspect: number, viewIndex = 0): 
   pass.setPipeline(gridPipeline);
   pass.setBindGroup(0, gridBGs[viewIndex]);
   pass.draw(30);
-}
-
-
-// ═══ XR UI PANEL RENDERER ═══
-// [LAW:one-source-of-truth] Panel layout constants live here; positions and widths
-// are mirrored in src/shaders/xr.ui.wgsl. Hit-test half-extents (e.g. GRAB_HALF_H)
-// are intentionally larger than the rendered SDF extents for easier targeting.
-const XR_UI_PANEL_CENTER: [number, number, number] = [0, -0.4, -3.5];
-const XR_UI_PANEL_SIZE: [number, number] = [1.2, 0.55];
-const XR_UI_BTN_Y = 0.16;
-const XR_UI_BTN_HALF_W = 0.18;  // wide enough for chevron + label side-by-side
-const XR_UI_BTN_HALF_H = 0.11;
-const XR_UI_PREV_X_FRAC = -0.30;  // aspect-relative
-const XR_UI_NEXT_X_FRAC =  0.30;
-const XR_UI_SLIDER_Y = -0.20;
-const XR_UI_SLIDER_HALF_H = 0.05;
-const XR_UI_SLIDER_HALF_W_FRAC = 0.42; // aspect-relative
-// Grab handle — thin pill at the bottom of the panel for repositioning.
-const XR_UI_GRAB_Y = -0.40;
-const XR_UI_GRAB_HALF_W = 0.10;
-const XR_UI_GRAB_HALF_H = 0.035;
-
-// Label atlas layout — single canvas with non-uniform sub-rects so each label's
-// aspect matches the panel rect it will be sampled into (no squishing):
-//   [0.00 .. 0.25] PREV   — sub-rect 256×128, aspect 2:1 (matches button label)
-//   [0.25 .. 0.50] NEXT   — sub-rect 256×128, aspect 2:1
-//   [0.50 .. 0.82] slider — sub-rect 328×128, aspect ~2.6:1 (matches slider label)
-//   [0.82 .. 1.00] FPS    — sub-rect 184×128, aspect ~1.4:1 (small stats readout)
-// u-ranges are mirrored in src/shaders/xr.ui.wgsl.
-const XR_UI_LABEL_CANVAS_W = 1024;
-const XR_UI_LABEL_CANVAS_H = 128;
-const XR_UI_LABEL_FONT_FAMILY = '-apple-system, BlinkMacSystemFont, "Segoe UI", "Helvetica Neue", sans-serif';
-
-let xrUiPipeline!: GPURenderPipeline;
-let xrUiBGs!: GPUBindGroup[];
-let xrUiCameraBuffer!: GPUBuffer;
-let xrUiParamsBuffer!: GPUBuffer;
-let xrUiLabelCanvas!: HTMLCanvasElement;
-let xrUiLabelCtx!: CanvasRenderingContext2D;
-let xrUiLabelTexture!: GPUTexture;
-let xrUiLabelSampler!: GPUSampler;
-let xrUiLabelCurrentMode: SimMode | null = null;
-
-function initXrUi() {
-  xrUiCameraBuffer?.destroy();
-  xrUiParamsBuffer?.destroy();
-  xrUiLabelTexture?.destroy();
-
-  xrUiCameraBuffer = device.createBuffer({ size: CAMERA_STRIDE * 2, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-  // UIParams layout (48 bytes): center.xyz, _pad, sizeX, sizeY, sliderValue, hover,
-  //                             hitX, hitY, hitActive, _pad2
-  xrUiParamsBuffer = device.createBuffer({ size: 48, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-
-  // Canvas used once per mode change to rasterize labels.
-  if (!xrUiLabelCanvas) {
-    xrUiLabelCanvas = document.createElement('canvas');
-    xrUiLabelCanvas.width = XR_UI_LABEL_CANVAS_W;
-    xrUiLabelCanvas.height = XR_UI_LABEL_CANVAS_H;
-    xrUiLabelCtx = xrUiLabelCanvas.getContext('2d')!;
-  }
-  xrUiLabelTexture = device.createTexture({
-    size: [XR_UI_LABEL_CANVAS_W, XR_UI_LABEL_CANVAS_H],
-    format: 'rgba8unorm',
-    usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.RENDER_ATTACHMENT,
-  });
-  xrUiLabelSampler = device.createSampler({
-    magFilter: 'linear',
-    minFilter: 'linear',
-  });
-  xrUiLabelCurrentMode = null; // force first render to upload
-
-  const uiModule = createShaderModuleChecked('xr.ui', SHADER_XR_UI);
-
-  const uiBGL = device.createBindGroupLayout({
-    entries: [
-      { binding: 0, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
-      { binding: 1, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
-      { binding: 2, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
-      { binding: 3, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'filtering' } },
-    ]
-  });
-
-  xrUiPipeline = device.createRenderPipeline({
-    layout: device.createPipelineLayout({ bindGroupLayouts: [uiBGL] }),
-    vertex: { module: uiModule, entryPoint: 'vs_main' },
-    fragment: {
-      module: uiModule, entryPoint: 'fs_main',
-      targets: [{
-        format: renderTargetFormat,
-        blend: {
-          color: { srcFactor: 'src-alpha', dstFactor: 'one-minus-src-alpha', operation: 'add' },
-          alpha: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha', operation: 'add' },
-        }
-      }]
-    },
-    primitive: { topology: 'triangle-list' },
-    // Depth-test disabled — the panel always renders on top of the sim.
-    depthStencil: { format: 'depth24plus', depthWriteEnabled: false, depthCompare: 'always' },
-    multisample: { count: renderSampleCount },
-  });
-
-  xrUiBGs = [0, 1].map(vi => device.createBindGroup({ layout: uiBGL, entries: [
-    { binding: 0, resource: { buffer: xrUiCameraBuffer, offset: vi * CAMERA_STRIDE, size: CAMERA_SIZE } },
-    { binding: 1, resource: { buffer: xrUiParamsBuffer } },
-    { binding: 2, resource: xrUiLabelTexture.createView() },
-    { binding: 3, resource: xrUiLabelSampler },
-  ]}));
-}
-
-// Draw a single label into a sub-rect, auto-shrinking the font until the text
-// fits with comfortable padding. Keeps long labels like "GRAVITY" from clipping.
-function drawXrUiLabel(
-  ctx: CanvasRenderingContext2D,
-  text: string,
-  rectX: number,
-  rectY: number,
-  rectW: number,
-  rectH: number,
-): void {
-  const maxTextW = rectW * 0.82;
-  const maxTextH = rectH * 0.75;
-  let fontPx = Math.floor(maxTextH);
-  ctx.font = `bold ${fontPx}px ${XR_UI_LABEL_FONT_FAMILY}`;
-  while (fontPx > 12 && ctx.measureText(text).width > maxTextW) {
-    fontPx -= 2;
-    ctx.font = `bold ${fontPx}px ${XR_UI_LABEL_FONT_FAMILY}`;
-  }
-  ctx.fillText(text, rectX + rectW / 2, rectY + rectH / 2);
-}
-
-// Rasterize label strings to the canvas and upload to the label texture.
-// Redraws when mode changes or FPS updates (once per second).
-let xrUiLastFps = -1;
-function updateXrUiLabels(mode: SimMode): void {
-  const fpsChanged = currentFps !== xrUiLastFps;
-  const modeChanged = xrUiLabelCurrentMode !== mode;
-  if (!modeChanged && !fpsChanged) return;
-  xrUiLabelCurrentMode = mode;
-  xrUiLastFps = currentFps;
-  const ctx = xrUiLabelCtx;
-  const w = XR_UI_LABEL_CANVAS_W;
-  const h = XR_UI_LABEL_CANVAS_H;
-  ctx.clearRect(0, 0, w, h);
-  ctx.fillStyle = 'white';
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'middle';
-
-  // Sub-rects (matching LABEL_*_U0/U1 in xr.ui.wgsl):
-  //   PREV:   [0.00w .. 0.25w]  → 256×128
-  //   NEXT:   [0.25w .. 0.50w]  → 256×128
-  //   SLIDER: [0.50w .. 0.82w]  → 328×128
-  //   FPS:    [0.82w .. 1.00w]  → 184×128
-  const quarter = w / 4;
-  const sliderEnd = Math.floor(w * 0.82);
-  const sliderW = sliderEnd - quarter * 2;
-  const fpsX = sliderEnd;
-  const fpsW = w - sliderEnd;
-  drawXrUiLabel(ctx, 'PREV', 0,             0, quarter,  h);
-  drawXrUiLabel(ctx, 'NEXT', quarter,       0, quarter,  h);
-  drawXrUiLabel(ctx, XR_UI_SLIDER_DEFS[mode].label.toUpperCase(),
-                      quarter * 2,   0, sliderW, h);
-  drawXrUiLabel(ctx, `${currentFps} FPS`, fpsX, 0, fpsW, h);
-
-  device.queue.copyExternalImageToTexture(
-    { source: xrUiLabelCanvas },
-    { texture: xrUiLabelTexture },
-    [w, h]
-  );
-}
-
-function xrUiHoverAsFloat(): number {
-  switch (xrUiState.hover) {
-    case 'prev':   return 1.0;
-    case 'next':   return 2.0;
-    case 'slider': return 3.0;
-    case 'grab':   return 4.0;
-    default:       return 0.0;
-  }
-}
-
-function renderXrUi(pass: GPURenderPassEncoder, aspect: number, viewIndex = 0): void {
-  // Rasterize labels on mode change (no-op otherwise).
-  updateXrUiLabels(state.mode);
-
-  device.queue.writeBuffer(xrUiCameraBuffer, viewIndex * CAMERA_STRIDE, getCameraUniformData(aspect));
-  // Only write params once per frame (both eyes see the same UI state).
-  if (viewIndex === 0) {
-    const data = new Float32Array(12);
-    data[0] = XR_UI_PANEL_CENTER[0];
-    data[1] = XR_UI_PANEL_CENTER[1];
-    data[2] = XR_UI_PANEL_CENTER[2];
-    data[3] = 0; // _pad1
-    data[4] = XR_UI_PANEL_SIZE[0];
-    data[5] = XR_UI_PANEL_SIZE[1];
-    data[6] = getXrSliderNormalized();
-    data[7] = xrUiHoverAsFloat();
-    data[8]  = xrUiState.lastHitPx;
-    data[9]  = xrUiState.lastHitPy;
-    data[10] = xrUiState.lastHitActive ? 1.0 : 0.0;
-    data[11] = 0; // _pad2
-    device.queue.writeBuffer(xrUiParamsBuffer, 0, data);
-  }
-  pass.setPipeline(xrUiPipeline);
-  pass.setBindGroup(0, xrUiBGs[viewIndex]);
-  pass.draw(6);
 }
 
 
@@ -5631,25 +5425,6 @@ function xrFrame(time: DOMHighResTimeStamp, xrFrameData: XRFrame) {
       currentGpuPhase = `xr:frame:${xrFrameCount}:sim.render(${state.mode},eye=${viewIndex})`;
       sim.render(encoder, postFx.scene[sceneIdx].createView(), null, viewIndex);
 
-      // Overlay the XR UI panel into the HDR scene so it picks up tonemap + bloom.
-      // Reuse the same depth view so UI z-tests against scene depth and the stored
-      // depth going to the compositor reflects the final pixel occlusion.
-      const uiPass = encoder.beginRenderPass({
-        colorAttachments: [{
-          view: postFx.scene[sceneIdx].createView(),
-          loadOp: 'load',
-          storeOp: 'store',
-        }],
-        depthStencilAttachment: {
-          view: xrDepthOverride ?? postFx.depth!.createView(),
-          depthLoadOp: 'load',
-          depthStoreOp: 'store',
-        },
-      });
-      currentGpuPhase = `xr:frame:${xrFrameCount}:xr-ui(eye=${viewIndex})`;
-      renderXrUi(uiPass, width / height, viewIndex);
-      uiPass.end();
-
       currentGpuPhase = `xr:frame:${xrFrameCount}:bloom(eye=${viewIndex})`;
       runBloomChain(encoder);
       currentGpuPhase = `xr:frame:${xrFrameCount}:composite(eye=${viewIndex})`;
@@ -6181,7 +5956,6 @@ async function main() {
   });
 
   initGrid();
-  initXrUi();
   loadState();
   if (isMobile) applyMobileDefaults();
   syncThemeTransition(state.colorTheme);
