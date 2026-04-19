@@ -4493,19 +4493,12 @@ type XrGesture =
 
 // Per-hand interaction state machine.
 // [LAW:one-source-of-truth] At most one interaction per hand.
-// Selection transitions (idle → pressing/dragging) use gazeRay at pinch-start.
-// Hover transitions (idle ↔ hovering) use currentRay (advisory).
+// [LAW:one-type-per-behavior] Single-hand dragging always means sim interaction.
+// Widget/UI interactions will add their own variants when the new panel lands.
 type XrInteraction =
   | { kind: 'idle' }
-  | { kind: 'hovering'; target: string }
-  | { kind: 'pressing'; target: string; element: XrUiElement; startedAt: number }
-  | { kind: 'dragging'; target: string;
+  | { kind: 'dragging';
       handOrigin: number[];      // hand position at drag start
-      dragType: 'slider' | 'panel-grab' | 'sim';
-      // Panel grab extras:
-      panelOriginWorld: [number, number, number] | null;
-      panelOriginCenter: [number, number, number] | null;
-      // Sim interaction extras:
       hasSample: boolean;
     }
   | { kind: 'two-hand-scale' };
@@ -4750,82 +4743,24 @@ function xrTransitionInteractions(gestures: XrGesture[], frame: XRFrame): void {
 }
 
 // Resolve a single-hand pinch-start into a concrete interaction.
-// [LAW:one-source-of-truth] gazeRay (frozen at pinch-start) is the sole authority for selection.
-function xrBeginSingleHandInteraction(hand: XrHand, gazeRay: XrRay, _frame: XRFrame): void {
-  const hit = hitTestXrUi(gazeRay.origin, gazeRay.dir);
-  if (hit && hit.element !== 'none') {
-    // UI interaction — pressing or dragging depending on element type.
-    if (hit.element === 'slider') {
-      setXrSliderFromHit(hit.px);
-      xrInteractions[hand] = {
-        kind: 'dragging', target: 'ui:slider', dragType: 'slider',
-        handOrigin: xrHandFrames[hand].pinch.origin,
-        panelOriginWorld: null, panelOriginCenter: null, hasSample: false,
-      };
-    } else if (hit.element === 'grab') {
-      const source = xrHandFrames[hand].source;
-      const worldHit = source ? xrRayPlaneHitWorld(gazeRay.origin, gazeRay.dir, XR_UI_PANEL_CENTER[2]) : null;
-      xrInteractions[hand] = {
-        kind: 'dragging', target: 'ui:grab', dragType: 'panel-grab',
-        handOrigin: xrHandFrames[hand].pinch.origin,
-        panelOriginWorld: worldHit ?? [0, 0, 0],
-        panelOriginCenter: [XR_UI_PANEL_CENTER[0], XR_UI_PANEL_CENTER[1], XR_UI_PANEL_CENTER[2]],
-        hasSample: false,
-      };
-    } else {
-      // prev/next button — pressing, commit on release.
-      xrInteractions[hand] = {
-        kind: 'pressing', target: `ui:${hit.element}`, element: hit.element,
-        startedAt: performance.now(),
-      };
-    }
-    xrUiState.pressed = hit.element;
-    xrUiState.hover = hit.element;
-    applyHitToUiState(hit);
-  } else {
-    // Space interaction — sim attractor/fluid.
-    xrInteractions[hand] = {
-      kind: 'dragging', target: 'sim', dragType: 'sim',
-      handOrigin: xrHandFrames[hand].pinch.origin,
-      panelOriginWorld: null, panelOriginCenter: null, hasSample: false,
-    };
-  }
+// gazeRay is the sole authority for selection once the widget system lands.
+function xrBeginSingleHandInteraction(hand: XrHand, _gazeRay: XrRay, _frame: XRFrame): void {
+  xrInteractions[hand] = {
+    kind: 'dragging',
+    handOrigin: xrHandFrames[hand].pinch.origin,
+    hasSample: false,
+  };
 }
 
 // Clean up when a hand releases its pinch.
 function xrEndInteraction(hand: XrHand): void {
   const ix = xrInteractions[hand];
   switch (ix.kind) {
-    case 'pressing': {
-      // Commit button action if still hovering over it.
-      const hf = xrHandFrames[hand];
-      const ray = hf.currentRay;
-      const stillOnTarget = ray ? hitTestXrUi(ray.origin, ray.dir) : null;
-      if (stillOnTarget?.element === ix.element) {
-        if (ix.element === 'prev') cycleXrUiMode(-1);
-        else if (ix.element === 'next') cycleXrUiMode(1);
-      }
-      xrUiState.pressed = 'none';
-      xrUiState.hover = 'none';
-      xrUiState.lastHitActive = false;
+    case 'dragging':
+      setSimulationInteractionInactive();
+      releaseAttractor(XR_ATTRACTOR_POINTER_ID);
       break;
-    }
-    case 'dragging': {
-      if (ix.dragType === 'slider') {
-        syncUIFromState();
-        saveState();
-      }
-      if (ix.dragType === 'sim') {
-        setSimulationInteractionInactive();
-        releaseAttractor(XR_ATTRACTOR_POINTER_ID);
-      }
-      xrUiState.pressed = 'none';
-      xrUiState.hover = 'none';
-      xrUiState.lastHitActive = false;
-      break;
-    }
     case 'two-hand-scale':
-    case 'hovering':
     case 'idle':
       break;
   }
@@ -4861,7 +4796,7 @@ function xrApplyInteractions(_frame: XRFrame): void {
     return;
   }
 
-  // Per-hand effects.
+  // Per-hand sim interaction — attractor (physics) / force injection (fluid).
   let anySimDrag = false;
   for (const hand of ['left', 'right'] as XrHand[]) {
     const ix = xrInteractions[hand];
@@ -4870,90 +4805,45 @@ function xrApplyInteractions(_frame: XRFrame): void {
     const ray = hf.currentRay;
     if (!ray) continue;
 
-    switch (ix.dragType) {
-      case 'slider': {
-        const hit = hitTestXrUi(ray.origin, ray.dir);
-        applyHitToUiState(hit);
-        xrUiState.hover = hit ? hit.element : 'none';
-        if (hit) setXrSliderFromHit(hit.px);
-        break;
-      }
-      case 'panel-grab': {
-        if (ix.panelOriginWorld && ix.panelOriginCenter) {
-          const worldHit = xrRayPlaneHitWorld(ray.origin, ray.dir, ix.panelOriginCenter[2]);
-          if (worldHit) {
-            XR_UI_PANEL_CENTER[0] = ix.panelOriginCenter[0] + (worldHit[0] - ix.panelOriginWorld[0]);
-            XR_UI_PANEL_CENTER[1] = ix.panelOriginCenter[1] + (worldHit[1] - ix.panelOriginWorld[1]);
-          }
-        }
-        xrUiState.lastHitPx = 0;
-        xrUiState.lastHitPy = XR_UI_GRAB_Y;
-        xrUiState.lastHitActive = true;
-        xrUiState.hover = 'grab';
-        break;
-      }
-      case 'sim': {
-        anySimDrag = true;
-        const worldPoint = state.mode === 'fluid'
-          ? intersectRayWithPlane(ray.origin, ray.dir, 0)
-          : closestPointOnRayToOrigin(ray.origin, ray.dir);
-        if (!worldPoint) {
-          setSimulationInteractionInactive();
-          ix.hasSample = false;
-          break;
-        }
-        state.mouse.down = true;
-        state.mouse.worldX = worldPoint[0];
-        state.mouse.worldY = worldPoint[1];
-        state.mouse.worldZ = worldPoint[2];
-        if (state.mode === 'fluid') {
-          const uv = worldToFluidUV(worldPoint);
-          if (!uv) { setSimulationInteractionInactive(); ix.hasSample = false; break; }
-          state.mouse.dx = ix.hasSample ? (uv[0] - state.mouse.x) * 10 : 0;
-          state.mouse.dy = ix.hasSample ? (uv[1] - state.mouse.y) * 10 : 0;
-          state.mouse.x = uv[0];
-          state.mouse.y = uv[1];
-        } else {
-          state.mouse.dx = 0; state.mouse.dy = 0;
-          state.mouse.x = worldPoint[0]; state.mouse.y = worldPoint[1];
-        }
-        if (state.mode === 'physics') {
-          if (state.pointerToAttractor.has(XR_ATTRACTOR_POINTER_ID)) {
-            moveAttractor(XR_ATTRACTOR_POINTER_ID, worldPoint);
-          } else {
-            createAttractor(XR_ATTRACTOR_POINTER_ID, worldPoint);
-          }
-        }
-        ix.hasSample = true;
-        break;
+    anySimDrag = true;
+    const worldPoint = state.mode === 'fluid'
+      ? intersectRayWithPlane(ray.origin, ray.dir, 0)
+      : closestPointOnRayToOrigin(ray.origin, ray.dir);
+    if (!worldPoint) {
+      setSimulationInteractionInactive();
+      ix.hasSample = false;
+      continue;
+    }
+    state.mouse.down = true;
+    state.mouse.worldX = worldPoint[0];
+    state.mouse.worldY = worldPoint[1];
+    state.mouse.worldZ = worldPoint[2];
+    if (state.mode === 'fluid') {
+      const uv = worldToFluidUV(worldPoint);
+      if (!uv) { setSimulationInteractionInactive(); ix.hasSample = false; continue; }
+      state.mouse.dx = ix.hasSample ? (uv[0] - state.mouse.x) * 10 : 0;
+      state.mouse.dy = ix.hasSample ? (uv[1] - state.mouse.y) * 10 : 0;
+      state.mouse.x = uv[0];
+      state.mouse.y = uv[1];
+    } else {
+      state.mouse.dx = 0; state.mouse.dy = 0;
+      state.mouse.x = worldPoint[0]; state.mouse.y = worldPoint[1];
+    }
+    if (state.mode === 'physics') {
+      if (state.pointerToAttractor.has(XR_ATTRACTOR_POINTER_ID)) {
+        moveAttractor(XR_ATTRACTOR_POINTER_ID, worldPoint);
+      } else {
+        createAttractor(XR_ATTRACTOR_POINTER_ID, worldPoint);
       }
     }
+    ix.hasSample = true;
   }
 
-  // If no sim drag is active, ensure sim interaction state is clean.
+  // [LAW:single-enforcer] If no sim drag is active, ensure sim interaction state is clean.
   if (!anySimDrag) {
     // Only deactivate if we were previously active (avoid clobbering desktop mouse).
     if (state.xrEnabled && state.mouse.down) setSimulationInteractionInactive();
   }
-
-  // [LAW:dataflow-not-control-flow] Passive UI reticle: recompute fresh each
-  // frame so a previous hit never lingers when the pinch sweeps off-panel.
-  // uiOwns guards against stomping reticle state set by slider/panel-grab/pressing.
-  let uiOwns = false;
-  let passiveHit: { px: number; py: number; element: XrUiElement } | null = null;
-  for (const hand of ['left', 'right'] as XrHand[]) {
-    const ix = xrInteractions[hand];
-    if (ix.kind === 'pressing' ||
-        (ix.kind === 'dragging' && (ix.dragType === 'slider' || ix.dragType === 'panel-grab'))) {
-      uiOwns = true;
-      continue;
-    }
-    const hf = xrHandFrames[hand];
-    if (hf.pinch.active && hf.currentRay && !passiveHit) {
-      passiveHit = hitTestXrUi(hf.currentRay.origin, hf.currentRay.dir);
-    }
-  }
-  if (!uiOwns || passiveHit) applyHitToUiState(passiveHit);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
