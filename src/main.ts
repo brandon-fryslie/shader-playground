@@ -4429,6 +4429,10 @@ let xrRefSpace: XRReferenceSpace | null = null;
 let xrBaseRefSpace: XRReferenceSpace | null = null; // pre-gesture reference space
 let xrBinding: XRGPUBinding | null = null;
 let xrLayer: XRProjectionLayer | null = null;
+// [LAW:one-source-of-truth] Single session-scoped flag for hand-tracking availability.
+// Set at session acquisition from xrSession.enabledFeatures; reset on session end.
+// Ticket .5 reads this to decide whether to attempt frame.getJointPose() queries.
+let xrHandTrackingAvailable = false;
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // XR INPUT PIPELINE
@@ -4929,12 +4933,19 @@ async function toggleXR() {
     currentGpuPhase = 'xr:requestSession';
     xrSession = await navigator.xr!.requestSession('immersive-vr', {
       requiredFeatures: ['webgpu'],
-      optionalFeatures: ['layers', 'local-floor'],
+      optionalFeatures: ['layers', 'local-floor', 'hand-tracking'],
     });
+    // [LAW:one-source-of-truth] enabledFeatures is the WebXR-spec synchronous report
+    // of which optional features the runtime granted. Missing/empty → false, which
+    // is the correct conservative default ([LAW:no-defensive-null-guards]).
+    const enabledFeatures = (xrSession as unknown as { enabledFeatures?: readonly string[] }).enabledFeatures;
+    xrHandTrackingAvailable = !!enabledFeatures && enabledFeatures.includes('hand-tracking');
     logInfo('xr', 'session acquired', {
       environmentBlendMode: (xrSession as unknown as { environmentBlendMode?: string }).environmentBlendMode,
       interactionMode: (xrSession as unknown as { interactionMode?: string }).interactionMode,
       visibilityState: (xrSession as unknown as { visibilityState?: string }).visibilityState,
+      handTracking: xrHandTrackingAvailable,
+      enabledFeatures,
     });
     let gotFloor = false;
     try {
@@ -5074,6 +5085,7 @@ async function toggleXR() {
       xrBaseRefSpace = null;
       xrBinding = null;
       xrLayer = null;
+      xrHandTrackingAvailable = false;
       state.xrEnabled = false;
       xrFrameCount = 0;
       currentGpuPhase = 'desktop';
