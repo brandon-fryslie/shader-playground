@@ -4,8 +4,8 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>WebGPU Compute Shader Playground</title>
-  <script type="module" crossorigin src="/shader-playground/r43-c129245/assets/index-DiObn7_w.js"></script>
-  <link rel="stylesheet" crossorigin href="/shader-playground/r43-c129245/assets/index-BNSndYL-.css">
+  <script type="module" crossorigin src="/shader-playground/r80-884c49f/assets/index-i05e7Yaf.js"></script>
+  <link rel="stylesheet" crossorigin href="/shader-playground/r80-884c49f/assets/index-BuQAwGlY.css">
 </head>
 <body>
 
@@ -55,11 +55,13 @@
     <div class="canvas-stats">
       <span id="stat-fps">FPS: --</span>
       <span id="stat-count">Particles: --</span>
+      <span id="stat-step" style="display:none"></span>
     </div>
     <button class="xr-btn" id="btn-xr" disabled>Enter VR</button>
     <div class="mobile-fab">
       <button class="fab-btn" id="fab-pause" aria-label="Pause">&#x23F8;</button>
       <button class="fab-btn" id="fab-reset" aria-label="Reset">&#x21BA;</button>
+      <button class="fab-btn" id="fab-rewind" aria-label="Rewind">&#x23EA;</button>
     </div>
     <button id="shader-toggle">&lt;/&gt;</button>
     <div id="shader-panel">
@@ -84,7 +86,7 @@
 (function(){
   var MANIFEST_URL = "../versions.json";
   var INDEX_URL = "../_versions/";
-  var CURRENT = "r43-c129245";
+  var CURRENT = "r80-884c49f";
   var ICON_SVG = "<svg viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\" aria-hidden=\"true\"><path d=\"M12.83 2.18a2 2 0 0 0-1.66 0L2.6 6.08a1 1 0 0 0 0 1.83l8.58 3.91a2 2 0 0 0 1.66 0l8.58-3.9a1 1 0 0 0 0-1.83Z\"/><path d=\"m22 17.65-9.17 4.16a2 2 0 0 1-1.66 0L2 17.65\"/><path d=\"m22 12.65-9.17 4.16a2 2 0 0 1-1.66 0L2 12.65\"/><\/svg>";
   var LABEL_TEMPLATE = "{version}";
   var POSITION = "right 80%";
