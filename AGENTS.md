@@ -58,3 +58,12 @@ Safari visionOS requires: `requiredFeatures: ['webgpu']` (not `'layers'`). Use `
 ### WGSL Shaders
 
 13 shader files in `src/shaders/`, imported as raw strings. The parametric compute shader contains ALL 5 shape equations in one file — shape selection is via a `shapeId` uniform, not pipeline recompilation.
+
+<!-- BEGIN LINKS INTEGRATION -->
+## links Agent-Native Workflow
+
+This repository is configured for agent-native issue tracking with `lit`.
+
+Run `lit quickstart` to get instructions.
+
+<!-- END LINKS INTEGRATION -->
