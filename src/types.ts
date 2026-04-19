@@ -30,8 +30,8 @@ export interface PhysicsParams {
   distribution: Distribution;
   interactionStrength: number;
   tidalStrength: number;
-  attractorDecayRatio: number;  // decay duration = this × holdDuration, capped by attractorDecayCap
-  attractorDecayCap: number;    // seconds — upper bound on decay duration
+  attractorDecayRatio: number;  // decay duration (in steps) = this × holdSteps, capped by attractorDecayCap
+  attractorDecayCap: number;    // seconds — upper bound on decay duration (converted via STEPS_PER_SECOND)
   // Dark matter potential — conservative forces replacing dissipative disk recovery.
   haloMass: number;       // Plummer halo gravitational mass
   haloScale: number;      // Plummer halo softening radius
@@ -123,9 +123,9 @@ export interface FxParams {
 
 export interface Attractor {
   x: number; y: number; z: number;
-  chargeStart: number;
-  releaseTime: number;
-  holdDuration: number;
+  chargeStep: number;    // sim step when created
+  releaseStep: number;   // sim step when released; -1 while still held
+  holdSteps: number;     // releaseStep - chargeStep (at release); -1 while still held
 }
 
 export interface AppState {
