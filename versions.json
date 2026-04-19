@@ -4,15 +4,22 @@
     {
       "version": "pr-7",
       "ref": "refs/pull/7/merge",
-      "sha": "6a283aeac22394a2bd199693d942de1e6ec4e7dc",
-      "timestamp": "2026-04-19T00:46:30.933Z",
+      "sha": "afc77654cfa08528de620a41fb385b31f8da965a",
+      "timestamp": "2026-04-19T00:55:40.791Z",
       "commits": [
         {
-          "sha": "6a283aeac22394a2bd199693d942de1e6ec4e7dc",
+          "sha": "afc77654cfa08528de620a41fb385b31f8da965a",
           "author_name": "Brandon Fryslie",
           "author_email": "530235+brandon-fryslie@users.noreply.github.com",
-          "timestamp": "2026-04-18T18:46:17-06:00",
-          "message": "Merge 66865c92862217d77590ba4f2046196ae4d716ae into acf6fbcb2fd5464c6c9dfb3e26903f7e551ab810\n"
+          "timestamp": "2026-04-19T00:55:29Z",
+          "message": "Merge f8e40e38313541c425844ed2ab759e54012daada into acf6fbcb2fd5464c6c9dfb3e26903f7e551ab810\n"
+        },
+        {
+          "sha": "f8e40e38313541c425844ed2ab759e54012daada",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-18T18:55:22-06:00",
+          "message": "fix(physics): unify attractor time base + clarify dark-matter GM semantics\n\nTwo related fixes surfaced by PR review:\n\n1. Attractor strength time base. Forward compute was computing\n   `nowSec = simStep * baseDt` for attractorStrength(), while chargeStart\n   and releaseTime are stamped with `nowSeconds()` (wall clock). At low\n   simStep values the two diverged enough to push `(now - chargeStart)`\n   negative, which `Math.min(1, x)` happily forwarded into `t*t*ceiling`\n   and produced huge spurious strengths on the first frames after a\n   click. Switched the forward path to wall clock so every site that\n   touches attractor lifecycle — chargeStart, releaseTime, prune, strength\n   at composite, strength at compute — shares one clock. Reverse still\n   replays journaled strengths verbatim, so determinism is unchanged.\n\n2. Dark-matter force comments. Shader said `F = -G*M_halo * r / ...` as\n   if G were a separate factor; the code (intentionally) omits params.G\n   because params.G is normalized for the pairwise N-body sum and would\n   crush the single-source halo/disk forces by ~1000x. haloMass and\n   diskMass are GM-equivalent parameters. Updated the shader comments\n   and darkMatterVcirc2() comment to document this so future readers do\n   not \"fix\" the missing G and silently detune the galaxy.\n\nGenerated with [Claude Code](https://claude.ai/code)\nvia [Happy](https://happy.engineering)\n\nCo-Authored-By: Claude <noreply@anthropic.com>\nCo-Authored-By: Happy <yesreply@happy.engineering>\n"
         },
         {
           "sha": "66865c92862217d77590ba4f2046196ae4d716ae",
