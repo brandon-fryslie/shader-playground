@@ -2,6 +2,595 @@
   "schema": 2,
   "versions": [
     {
+      "version": "r83-dfd2010",
+      "ref": "refs/heads/master",
+      "sha": "dfd20103999f38d7cff8f398609a62793ea45c39",
+      "timestamp": "2026-04-19T11:07:49.704Z",
+      "commits": [
+        {
+          "sha": "dfd20103999f38d7cff8f398609a62793ea45c39",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-19T05:07:28-06:00",
+          "message": "Merge pull request #10 from brandon-fryslie/fix/attractor-sim-step-clock\n\nfix(physics): drive attractor lifecycle from simStep, not wall clock"
+        },
+        {
+          "sha": "5f33577eb0c0eca7329242b3c067cfb5b7f66e04",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-19T05:06:46-06:00",
+          "message": "fix(physics): align reticle/replay with simStep (PR #10 review)\n\n- STEPS_PER_SECOND now derives from PHYSICS_BASE_DT (0.016) so the\n  \"seconds\" decay cap maps to the same step count the sim actually\n  advances per simulated second (62.5, not 60). One source of truth for\n  step/second conversion.\n- attractorStrength now treats `currentStep < releaseStep` as charging.\n  Without this, rewinding below an attractor's release and replaying\n  forward would overwrite journal entries with 0, breaking the\n  reverse→forward→reverse invariant the PR claims.\n- runComposite uses the last-packed sim step for reticle strength\n  (simStep-1 forward, simStep reverse) so the overlay stays aligned\n  with the force field the shader actually applied.\n"
+        },
+        {
+          "sha": "6337d4aab0e34ebbd66353c1444b6476874542de",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-18T19:46:16-06:00",
+          "message": "fix(physics): drive attractor lifecycle from simStep, not wall clock\n"
+        },
+        {
+          "sha": "884c49f1952d559c5b6b1c503831d0f3d4e27735",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-18T19:03:44-06:00",
+          "message": "Merge pull request #7 from brandon-fryslie/reversible-physics\n\nfeat: time-reversible N-body — Phase 1 (DKD leapfrog + dark matter)"
+        },
+        {
+          "sha": "f8e40e38313541c425844ed2ab759e54012daada",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-18T18:55:22-06:00",
+          "message": "fix(physics): unify attractor time base + clarify dark-matter GM semantics\n\nTwo related fixes surfaced by PR review:\n\n1. Attractor strength time base. Forward compute was computing\n   `nowSec = simStep * baseDt` for attractorStrength(), while chargeStart\n   and releaseTime are stamped with `nowSeconds()` (wall clock). At low\n   simStep values the two diverged enough to push `(now - chargeStart)`\n   negative, which `Math.min(1, x)` happily forwarded into `t*t*ceiling`\n   and produced huge spurious strengths on the first frames after a\n   click. Switched the forward path to wall clock so every site that\n   touches attractor lifecycle — chargeStart, releaseTime, prune, strength\n   at composite, strength at compute — shares one clock. Reverse still\n   replays journaled strengths verbatim, so determinism is unchanged.\n\n2. Dark-matter force comments. Shader said `F = -G*M_halo * r / ...` as\n   if G were a separate factor; the code (intentionally) omits params.G\n   because params.G is normalized for the pairwise N-body sum and would\n   crush the single-source halo/disk forces by ~1000x. haloMass and\n   diskMass are GM-equivalent parameters. Updated the shader comments\n   and darkMatterVcirc2() comment to document this so future readers do\n   not \"fix\" the missing G and silently detune the galaxy.\n\nGenerated with [Claude Code](https://claude.ai/code)\nvia [Happy](https://happy.engineering)\n\nCo-Authored-By: Claude <noreply@anthropic.com>\nCo-Authored-By: Happy <yesreply@happy.engineering>\n"
+        },
+        {
+          "sha": "66865c92862217d77590ba4f2046196ae4d716ae",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-18T18:46:04-06:00",
+          "message": "Merge remote-tracking branch 'origin/master' into reversible-physics\n\n# Conflicts:\n#\tsrc/main.ts\n#\tsrc/types.ts\n"
+        },
+        {
+          "sha": "87980eb7ab5b84139164f53207f778cc8f8cf8da",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-18T18:40:49-06:00",
+          "message": "Merge remote-tracking branch 'origin/reversible-physics' into reversible-physics\n"
+        },
+        {
+          "sha": "da0906cf874d545348beaf5eee61a355c4c44e8e",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-18T07:07:44-06:00",
+          "message": "Merge pull request #9 from brandon-fryslie/physics-simstep-order\n\nrefactor(physics): move simStep decrement before param packing"
+        },
+        {
+          "sha": "f1f879fbb38fb19e763cf85b538a2f42ce3f3824",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-18T06:59:08-06:00",
+          "message": "docs: clarify simStep semantics in comment and CLAUDE.md\n\n- Inline comment: rephrase \"increments to N+1 after journal write\" to\n  \"advance to N+1 by end of compute\", which more accurately describes\n  the forward pattern without implying an ordering relative to the\n  journal write specifically.\n\n- CLAUDE.md \"Simulation Clock\": drop the outdated \"monotonic integer\n  counter, incremented each compute dispatch\" claim — reverse mode\n  decrements. Document that simStep now advances by timeDirection, and\n  explain why the decrement happens at the top of compute() (single\n  source of truth for \"which step these params describe\").\n\n- CLAUDE.md \"Attractor Journal\": make the forward/reverse bullets\n  explicit about the order of operations — forward writes then\n  increments, reverse decrements then reads.\n\nGenerated with [Claude Code](https://claude.ai/code)\nvia [Happy](https://happy.engineering)\n\nCo-Authored-By: Claude <noreply@anthropic.com>\nCo-Authored-By: Happy <yesreply@happy.engineering>\n"
+        },
+        {
+          "sha": "f52cfcb0d272e6b2bf94957e330d9bf92f59ebec",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-18T06:16:46-06:00",
+          "message": "refactor(physics): move simStep decrement before param packing\n\nPreviously, reverse-mode (timeDirection < 0) decremented simStep inside\nthe else-branch of attractor handling — AFTER tidal angle, sim clock, and\njournal index were already computed from the pre-decrement simStep. That\nmeant the reverse step at simStep=N used the params from step N, then\ndecremented to N-1 after reading the journal at index N.\n\nThe consequence: forward and reverse at matching simStep values used\ndifferent params. On forward, step N uses simStep=N then increments to\nN+1. On reverse, we want step N+1 → N to use the exact same params as\nthe original forward step that produced that state. Deferring the\ndecrement meant we were using the wrong clock and journal index.\n\nFix: decrement simStep at the top of compute() for reverse mode, so that\nevery downstream consumer (tidal angle at f32[7], attractor journal\nlookup, `nowSec`) refers to the simulation step we're integrating back\ntoward — matching the original forward-step params exactly.\n\nThis is required for the time-reversal invariant: reverse(forward(s)) = s.\n\nGenerated with [Claude Code](https://claude.ai/code)\nvia [Happy](https://happy.engineering)\n\nCo-Authored-By: Claude <noreply@anthropic.com>\nCo-Authored-By: Happy <yesreply@happy.engineering>\n"
+        },
+        {
+          "sha": "e6ab187c83ed1f670c0db5b170e99105e2083942",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-18T06:52:30-06:00",
+          "message": "Merge pull request #8 from brandon-fryslie/xr-depth-reprojection\n\nfix(xr): submit scene depth for parallax-correct reprojection"
+        },
+        {
+          "sha": "226b55db1eb75a1b044b9b05cbc8e525aa137024",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-18T06:23:13-06:00",
+          "message": "fix(xr): drop unknown casts, move override cleanup to finally\n\n- Use subImage.depthStencilTexture directly (typed as GPUTexture | null\n  in webxr-gpu.d.ts); the unknown cast weakened TS's null-handling\n  contract without adding safety.\n\n- Move xrCameraOverride and xrDepthOverride null-assignment into the\n  finally block. Previously, a throw inside the try left the overrides\n  set, retaining a compositor-owned depth view past the frame boundary\n  (compositor reclaims those between frames — unsafe) and leaking XR\n  matrices into the desktop frame loop if the user exits VR after an\n  error. The finally now clears both regardless of outcome.\n\nGenerated with [Claude Code](https://claude.ai/code)\nvia [Happy](https://happy.engineering)\n\nCo-Authored-By: Claude <noreply@anthropic.com>\nCo-Authored-By: Happy <yesreply@happy.engineering>\n"
+        },
+        {
+          "sha": "568f71a1eb1a78f7177f4a1064017fc2b1f019d4",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-18T06:15:26-06:00",
+          "message": "fix(xr): address PR review feedback\n\nRemove unrelated simStep refactor; fix validation-scope double-pop; guard\ndepth override for non-array fallback; add follow-up polish.\n\n1. Revert simStep refactor in createPhysicsSimulation\n   Unrelated N-body time-reversal reordering (moved `simStep--` from the\n   else-branch to before param packing) was accidentally included in the\n   original depth commit. It's a semantic change to reverse-time physics\n   that warrants its own review context. Reverted here; will ship in a\n   separate focused PR.\n\n2. Fix double-pop of validation error scope in xrFrame\n   The `!pose` and `!sim` early-return paths were calling popErrorScope\n   before returning, and then the finally block popped a second time.\n   Since WebGPU error scopes are stacked, the second pop either returned\n   a rejected promise (empty stack) or captured errors from a parent\n   scope that didn't belong to us. Now only the finally pops.\n\n3. Drop non-array + depth projection-layer configs\n   When a non-texture-array layer is combined with a depth attachment,\n   the XR-provided depth texture is full-width (2·eyeW) while our HDR\n   scene is per-eye (eyeW, eyeH). Mixing them in one render pass fails\n   validation. Non-array layers are now only used in depth-less fallback\n   configs; xrDepthOverride additionally guards with a runtime\n   textureArrayLength > 1 check so any future layer variant is safe.\n\n4. Note: depth32float fallback intentionally omitted\n   All sim pipelines compile against depth24plus. A depth32float layer\n   would hand us a texture no pipeline can bind. Documented the\n   reasoning inline so future readers don't reintroduce it without\n   also dual-compiling pipelines.\n\n5. Reset xrFrameCount on session.end\n   Lets diagnostic logging re-emit first-frame info on session re-entry,\n   which is critical for diagnosing intermittent XR failures where\n   session 2 behaves differently from session 1.\n\n6. Cap __errorLog at 200 entries (ring buffer)\n   A device-lost loop or repeat-fire shader warning can produce hundreds\n   of entries per second; unbounded growth would retain old stacks\n   indefinitely.\n\nGenerated with [Claude Code](https://claude.ai/code)\nvia [Happy](https://happy.engineering)\n\nCo-Authored-By: Claude <noreply@anthropic.com>\nCo-Authored-By: Happy <yesreply@happy.engineering>\n"
+        },
+        {
+          "sha": "acf6fbcb2fd5464c6c9dfb3e26903f7e551ab810",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-18T05:49:18-06:00",
+          "message": "feat: extend zoom-out range from 50 to 200 (#6)\n\nRaises the camera distance clamp from 50 to 200 (desktop wheel + mobile\npinch) and bumps the far plane from 160 to 500 so geometry stays visible\nat the new maximum distance."
+        },
+        {
+          "sha": "0d87c13c15f156acecf26ffaf728a73384ac45e6",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-18T02:02:56-06:00",
+          "message": "feat(logging): comprehensive WebXR and WebGPU error diagnostics\n\nRoot issue: XR sessions were failing silently on Vision Pro — the permission\nprompt appeared but the session never entered immersive mode, and nothing\nwas logged anywhere. WebGPU validation errors surface asynchronously via\nonuncapturederror with no indication of which operation caused them, and\nshader compile failures do not throw from createShaderModule at all.\n\nInfrastructure (new Section 0):\n- logError(kind, err, extra?): central error sink — console + DOM overlay +\n  in-memory __errorLog array, all tagged with the current GPU phase\n- currentGpuPhase: rolling label updated before every risky GPU/XR call so\n  async errors can be attributed to the operation that caused them\n- window.error and window.unhandledrejection listeners catch anything that\n  escapes our try/catch blocks\n- window.__errorLog() / window.__gpuPhase() for remote inspection via\n  Safari Web Inspector\n\nShader compilation:\n- createShaderModuleChecked(label, code) wraps device.createShaderModule and\n  schedules getCompilationInfo() — logs every error and warning with the\n  offending source line quoted and a caret marker. All 23 shader-module\n  call sites across boids / nbody / fluid / parametric / reaction / grid /\n  xr.ui / post-fx migrated to the checked variant.\n\nXR lifecycle:\n- toggleXR now logs a phase transition before every step (requestSession,\n  requestReferenceSpace, new XRGPUBinding, createProjectionLayer,\n  updateRenderState, fixedFoveation, first frame requested)\n- Projection layer fallback loop records every rejected config with its\n  error message; if all configs fail the final error includes the full\n  attempt log as JSON\n- visibilitychange listener logs compositor state transitions\n- session.end logs the final phase for post-mortem correlation\n\nPer-frame scoping:\n- xrFrame pushes a validation error scope around encoding; pops it in a\n  finally block with error reporting so GPU validation failures get\n  attributed to the frame number + sub-phase\n- First 3 xrFrame invocations log entry, subImage metadata, and successful\n  submit — enough to diagnose \"session starts but nothing renders\"\n- Phase markers at every encode step (compute, per-eye getViewSubImage,\n  createView color/depth, ensureHdrTargets, sim.render, UI pass, bloom,\n  composite, submit) so uncapturederror reports pinpoint the failure\n\nonuncapturederror + device.lost now route through logError so they inherit\nphase attribution and DOM overlay rendering.\n\nGenerated with [Claude Code](https://claude.ai/code)\nvia [Happy](https://happy.engineering)\n\nCo-Authored-By: Claude <noreply@anthropic.com>\nCo-Authored-By: Happy <yesreply@happy.engineering>\n"
+        },
+        {
+          "sha": "078771a38b2dcc54b55f97afdee27570118a1eb6",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-18T01:49:10-06:00",
+          "message": "fix(xr): submit scene depth to compositor for parallax-correct reprojection\n\nVision Pro's compositor reprojects each rendered frame to the actual head\npose at scanout (~11-16ms after render). Without a depth buffer, it can\nonly planar-warp — which shears the world during head motion and reads as\njitter/instability. Also sets fixedFoveation=0 to kill peripheral blur.\n\n- Add xrDepthOverride module variable; getDepthAttachment uses it when set\n- Projection layer configs now request depthStencilFormat='depth24plus'\n  (depth-less configs kept as last-resort fallbacks)\n- xrFrame binds subImage.depthStencilTexture per eye before sim.render\n  and the UI overlay pass; overrides cleared after both eyes encode\n- Set xrLayer.fixedFoveation = 0 for full peripheral resolution\n- Log chosen layer config + texture dimensions to aid diagnosis\n\nGenerated with [Claude Code](https://claude.ai/code)\nvia [Happy](https://happy.engineering)\n\nCo-Authored-By: Claude <noreply@anthropic.com>\nCo-Authored-By: Happy <yesreply@happy.engineering>\n"
+        },
+        {
+          "sha": "acb7fc6cefbc6572298786eb45ece78c83722551",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-18T01:04:39-06:00",
+          "message": "Merge branch 'zoom-range' into reversible-physics\n"
+        },
+        {
+          "sha": "0cfc7e33833484649a3e85946cd30103746a1854",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-18T00:04:48-06:00",
+          "message": "docs: rewrite CLAUDE.md for conservative physics + time reversal architecture\n\nComprehensive update reflecting the Phase 1+2 changes:\n\n- DKD leapfrog integrator with inline half-drift (replaces Euler)\n- All-conservative force inventory (dark matter halo + MN disk, no dissipation)\n- Simulation clock (monotonic step counter, not wall-clock)\n- Attractor wand system (charge/decay lifecycle, per-pointer tracking)\n- Time reversal (journal, R key, boundary conditions, timeline branching)\n- Post-processing bind group caching + per-attractor reticle rendering\n- Updated params struct layout (608-byte uniform with attractor array)\n- Body struct changes (home → _unused)\n- Phase 3 gas grid forward reference\n"
+        },
+        {
+          "sha": "44d29a287e6887a21c35613c92015b8a689e1415",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-17T23:53:32-06:00",
+          "message": "Add justfile\n"
+        },
+        {
+          "sha": "a3b394ffe33c903ec640ef332698d5b93443a50d",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-17T23:53:23-06:00",
+          "message": "Add spiral galaxy doc\n"
+        },
+        {
+          "sha": "afd28ca56de3fbd2d5d08ac504d8d7c3393a69d3",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-17T17:42:00-06:00",
+          "message": "feat: time reversal — attractor journal + R key to rewind (Phase 2)\n\nHold R (desktop) or the rewind FAB (mobile) to run the simulation\nbackwards in time. Release to resume forward. The DKD leapfrog\nintegrator is exactly time-reversible under dt negation — the reversed\nsimulation retraces the forward trajectory with full fidelity.\n\nATTRACTOR JOURNAL (9.3 MB circular buffer):\n- Stores the packed attractor uniform array (count + 32 × pos/strength)\n  at each simulation step — 129 floats × 18000 steps = 5 minutes of history.\n- Forward: compute attractor strengths from live mouse state, write to\n  journal[simStep]. Reverse: read from journal[simStep], skip live\n  computation. This ensures reversed forces match the original exactly.\n- Timeline branching: resuming forward after a rewind overwrites the\n  old journal from the current step onward.\n\nTIME DIRECTION:\n- setTimeDirection(1 | -1) on the physics sim, toggled by R key hold.\n- dt passed to shader = baseDt × timeDirection. Negative dt → DKD runs\n  the exact inverse of the forward step.\n- Boundary: can't reverse past step 0 → auto-pause.\n- Step counter shown in stats bar (Step: 1234 ◀/▶).\n\nATTRACTOR DECAY SLIDERS (previously dead, now wired):\n- attractorDecayDuration() reads state.physics.attractorDecayRatio/Cap\n  instead of the hardcoded ATTRACTOR_DECAY_MULTIPLIER = 2.0.\n- Single enforcer: one function owns max(MIN_DECAY, min(cap, ratio × hold)).\n\nCLEANUP:\n- Removed coreOrbit from describeParam() (dead after Phase 1).\n- Added dark matter param descriptions (haloMass, haloScale, etc.).\n- Removed damping from getStats() type signature (no longer returned).\n- Attractor creation blocked during reverse (journal owns forces).\n"
+        },
+        {
+          "sha": "6b5f2da3ea5c083e87c701b60a6b852ebda1bfe3",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-17T06:11:15-06:00",
+          "message": "feat: time-reversible N-body with DKD leapfrog + dark matter potentials\n\nPhase 1 of the reversible-physics architecture: replace all dissipative\nforces with conservative dark matter potentials and switch to a\ntime-reversible integrator.\n\nINTEGRATOR: DKD leapfrog with inline half-drift\n- Semi-implicit Euler → Drift-Kick-Drift leapfrog\n- Forces computed at half-step positions: each source particle is\n  half-drifted inline during the tile load (srcHalf = src.pos + src.vel * dt/2)\n- Exactly time-reversible: negating dt hits the same midpoint → same forces\n- One force evaluation per step (same GPU cost as before)\n\nFORCES REMOVED (7 dissipative, all velocity-dependent):\n- Global damping, attractor friction, attractor drag\n- Home reentry spring + damping, core friction\n- Disk recovery: vertical/radial damping, tangential nudge, flow align\n\nFORCES ADDED (2 conservative, position-only):\n- Plummer dark matter halo: F = -M r / (r² + a²)^(3/2)\n  Spherical confinement replacing global damping + boundary + home reentry\n- Miyamoto-Nagai disk: F = -M (R_vec + n·z·a/B) / D³\n  Axisymmetric vertical confinement replacing disk recovery forces\n\nSIMULATION CLOCK: performance.now() → monotonic simStep counter.\nTidal angle = simStep × dt × rate. Fully deterministic.\n\nVIRIAL CONTROLLER: removed entirely. Dark matter provides structural\nstability without feedback. Stats reduction kept for diagnostics only.\n\nINITIALIZATION: circular velocity formula now includes enclosed dark\nmatter mass (halo + MN disk) so particles start in equilibrium with the\ncombined potential.\n\nBody struct: `home` field (initial position, used by removed home spring)\nrepurposed as `_unused`. Body stays 48 bytes for layout compatibility.\n\nUI: \"Disk Recovery\" slider section replaced with \"Dark Matter\" section\n(Halo Mass, Halo Scale, Disk Mass, Disk Scale A/B). Damping and Core\nFriction sliders removed.\n"
+        },
+        {
+          "sha": "5d53bdd416e4c57674df030a2c80aab13c7b3f46",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-17T04:06:14-06:00",
+          "message": "feat: extend zoom-out range from 50 to 200\n\nRaises the camera distance clamp from 50 to 200 (desktop wheel + mobile\npinch) and bumps the far plane from 160 to 500 so geometry stays visible\nat the new maximum distance.\n"
+        },
+        {
+          "sha": "f80699f40d15d48ad120d523cffeb8da448963dc",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-17T04:05:03-06:00",
+          "message": "fix: attractor decay sliders + review fixes (missed in PR #3 merge) (#5)\n\n* fix: cache bind groups, tighten attractor lifecycle, fix uint64 timestamps\n\nSeveral small hardening fixes:\n\n**Bind group caching.** ensureHdrTargets already pre-builds fadeBGs,\ndownsampleBGs, upsampleBGs, and compositeBGs on resize, but the fade,\nbloom, and composite passes were still calling device.createBindGroup\nevery frame, defeating the cache. Switch each pass to read from the\ncached array. Downsample uses the [sceneIdx, i+1] mapping (ping-pong\nsources live at indices 0-1, mip chain at 2+).\n\n**Attractor pruning.** pruneAttractors() lived inside the physics sim's\ncompute path, so switching away from physics mid-decay would leak dead\nattractors into state.attractors until the user returned to physics.\nMove the prune call into the main frame loop (and the XR frame loop),\nso the array stays clean regardless of active mode.\n\n**XR wand resume.** XR pinch wand was keying on xrInteractionHasSample\n(local bool) to decide create-vs-move. That flag gets reset on transient\ntracking/pose losses, so a brief occlusion mid-pinch would orphan the\ncharging attractor and spawn a fresh one. Switch to\nstate.pointerToAttractor.has(XR_ATTRACTOR_POINTER_ID) — the authoritative\ntruth for \"is there a held attractor for this pointer\" — so drops resume\nthe same attractor.\n\n**Uint64 timestamps.** WebGPU timestamp queries are unsigned 64-bit\ncounters; BigInt64Array would yield negative durations if the high bit\nis ever set. Swap to BigUint64Array.\n\n**Reticle strength range comment.** The per-attractor strength field is\nactually in [0, interactionStrength ceiling] (up to ~3.0 at max slider),\nnot [0, 1]. mix() with s > 1 extrapolates beyond the anchor values,\nwhich is intentional (a high-ceiling attractor should look stronger) —\njust making that explicit in the shader comment.\n\n* feat: decay ratio + cap sliders for attractor lifecycle\n\nAttractor decay duration is now user-tunable via two new N-body sliders:\n\n- **Decay Ratio** (default 0.5, range 0.1..4.0) — decay duration is\n  this × holdDuration. Previous hard-coded value was 2.0 (long tail);\n  0.5 gives a snappier feel where a 1s hold decays over 0.5s.\n\n- **Decay Cap (s)** (default 2.0, range 0.5..10.0) — upper bound on\n  decay duration. Prevents pathologically long decays on long holds\n  (a 30s hold × 0.5 ratio would be 15s without a cap).\n\nDecay duration is now computed in one place (attractorDecayDuration)\nwith `max(MIN_DECAY, min(cap, ratio × holdDuration))` — single enforcer,\nclamped at both ends. Added a MIN_DECAY floor of 50ms so instant-tap\nreleases still play a visible decay animation.\n\nPerformance: zero cost. Two slider values are read once per frame in the\nper-attractor strength computation (sub-nanosecond per attractor).\nNo shader changes, no uniform changes."
+        },
+        {
+          "sha": "58f24755de058838e75647f19385db1382a05fe4",
+          "author_name": "Copilot",
+          "author_email": "198982749+Copilot@users.noreply.github.com",
+          "timestamp": "2026-04-16T22:07:20-06:00",
+          "message": "Prevent text selection on canvas for mobile long-press (#4)"
+        },
+        {
+          "sha": "59fcd8d323c1ac677109d2d5b4c33a7f921619f7",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-16T20:26:36-06:00",
+          "message": "feat: placeable attractor wand for N-body interaction (#3)"
+        },
+        {
+          "sha": "d6cf8ad54ce275954125f6f22f27964444c1772f",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-14T04:35:24-06:00",
+          "message": "perf: revert tile size to 64 (benchmarked 64/128/256 — no significant difference)\n\nTile size benchmark at 80K particles (headless Chrome, macOS):\n  64: 37-42 fps\n  128: 37-39 fps\n  256: 40-43 fps\nAll within noise. Bottleneck is force evaluation count (80K × 8192 = 655M/frame),\nnot workgroup size. Using 64 for lowest shared memory pressure.\n"
+        },
+        {
+          "sha": "be0b1096434697453595a10625a6382b01a99858",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-14T03:50:32-06:00",
+          "message": "feat: add FPS tracking to diagnostic output\n\nEach diagnostic snapshot now reports FPS from __simState().\nHeadless Chrome baseline: 28-54 FPS across presets (GPU-limited in software).\nStats pass costs ~10% (35→32 fps at 100K) — not the primary bottleneck.\n"
+        },
+        {
+          "sha": "34070111104189f88abc093e9cf458e0f38834ed",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-14T03:13:13-06:00",
+          "message": "fix: count-independent init velocity for spiral galaxy\n\nInit circular velocity now uses fixed REF_SOURCES=1000 * avgMass as the\nreference total mass, so vCirc doesn't scale with particle count.\nPreviously, enclosedMass scaled with MASSIVE_BODY_COUNT while G_eff\ndivided by sqrt(MASSIVE_BODY_COUNT), giving sqrt(N) speed dependence.\n\nResults: virial at t=0 now 0.74 (10K) and 1.09 (100K) instead of\n0.58 and 0.55. 100K reaches near-perfect equilibrium (virial=0.98)\nwith no controller adjustment needed (tidal stays at 0.005).\n"
+        },
+        {
+          "sha": "7ceaabfe403ee9b4d71da61888360cae08b56c85",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-14T01:43:29-06:00",
+          "message": "fix: calibrate PE estimate + bidirectional virial controller\n\nStats shader: use actual mass (not clamped), G_eff (not G_raw), avg mass 0.9.\nController: bidirectional — increases tidal when sub-virial, increases damping when super-virial.\nResults: virial 0.58→0.85, armContrast 0.33→1.32 over 46s, system stable.\n"
+        },
+        {
+          "sha": "7acf8b079228e0a5a0bafcc414e3bd0351c4cefc",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-13T21:28:24-06:00",
+          "message": "feat: virial equilibrium controller + GPU stats reduction shader\n\nNew nbody.stats.wgsl: single-workgroup reduction computing KE, PE estimate,\nrmsRadius, rmsHeight, angular momentum, total mass in one pass.\n\nBidirectional virial controller (runs once/second):\n- virial > target → increase damping + decrease tidal (cool the system)\n- virial < target → increase tidal + decrease damping (heat the system)\n\nDynamic damping and tidal strength auto-adjust to maintain equilibrium.\nExposed via window.__simStats() for diagnostics.\n\nNOTE: PE estimate in stats shader needs calibration — virial ratios\ncurrently read too high (7-47 instead of ~1), likely due to G normalization\nbeing applied twice. Controller logic is correct but input is wrong.\n"
+        },
+        {
+          "sha": "22c551aae7e78ea899f359e8040315a53c0d16ce",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-13T21:02:15-06:00",
+          "message": "feat: spiral galaxy — rotating tidal bar + global damping equilibrium\n\nBased on Duke wave dark matter paper: persistent spiral structure requires\na rotating non-axisymmetric potential (our tidal quadrupole) balanced by\nenergy dissipation (their inelastic collisions → our global damping).\n\ntidal=0.03, damping=0.98: energy injection ≈ dissipation\n- rmsRadius stable at 1.1-1.4 over 30s (radiusRate: -0.008)\n- armContrast sustained: 0.83→1.26→0.82 (persists, doesn't dissolve)\n- Flat disk: rmsH < 0.01 after t=7\n- Dense core maintained: radial bin[0] always dominant\n"
+        },
+        {
+          "sha": "9548f1ec717a8e61122dd9a444867c44cbecfbeb",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-13T20:12:28-06:00",
+          "message": "feat: spiral galaxy — exponential disk + vertical damping, arms persist 30s+\n\nReverted to exponential disk for massive bodies (no dark matter halo).\nSimple vertical damping (diskVertDamp=1.0, diskVertSpring=0.3) keeps\ndisk coherent without killing in-plane arm dynamics.\n\nDiagnostics over 30s:\n- rmsRadius stable: 1.3→2.1 (slow expansion, contained)\n- rmsHeight: 0.35→0.002 (flattens without going paper-thin due to init thickness)\n- armContrast grows: 0.22→0.55→0.82→1.01 (arms strengthen over time!)\n- Radial profile: centrally concentrated throughout (bin[0] 760-980)\n- tangentialFrac: 0.81→0.70 (mild heating, orbits stay mostly circular)\n"
+        },
+        {
+          "sha": "49f76884615260b055dafd967c0882d5c025ff36",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-13T17:17:23-06:00",
+          "message": "feat: spiral galaxy — pure gravity, no disk recovery, all bodies in disk\n\nAll massive bodies follow same exponential disk profile as tracers (no dark\nmatter halo). Zero disk recovery — pure gravity drives dynamics.\nLAMBDA=5, DISK_SCALE=3.5 concentrates particles centrally.\n\nResults (100K particles, 30s):\n- Dense core maintained: radial bin[0] stays 800-1000 throughout\n- Arms emerge naturally: armContrast 0.29→0.93 by t=13, persists >0.69\n- Slow expansion: rmsR 1.2→2.8 over 30s (radiusRate 0.05)\n- Vertical heating: rmsH 0.32→0.68 (no flattening forces)\n"
+        },
+        {
+          "sha": "aa83c4515f18bdf6511a6d5aac574d9cc670e040",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-13T17:08:36-06:00",
+          "message": "feat: spiral galaxy rewrite — barnes-hut style emergent arms\n\nReplaced seeded spiral arms with smooth exponential disk + enclosed-mass\ncircular velocities. Arms emerge from N-body dynamics (swing amplification\nof N-body noise in differentially rotating disk). Based on maxw179/barnes-hut.\n\n- Exponential radial profile: r = exp(-lambda * U) * scale\n- Circular velocity from integrated enclosed mass fraction\n- G=1.5, softening=0.15 (was 2.0 — eliminated ring attractor)\n- No radDamp/tangGain/alignGain — pure gravity drives arm formation\n- armContrast reaches 0.46 at t=9s (emergent, not seeded)\n"
+        },
+        {
+          "sha": "33e8c24400b2b47e1b6ee2c84cc191f10ec649a7",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-13T15:03:06-06:00",
+          "message": "feat: spiral galaxy tuned via quantitative diagnostics\n\nG=0.6, zero radDamp/tangGain/alignGain — gravity alone holds the system,\nno circularization forces to erase arm density contrast.\nDark matter halo spread to sqrt(random)*5 for flat rotation curve.\nInit speed matches diskTangSpeed (removed 0.3x factor).\nMassive body radii spread wider (big 0.2-2.5, medium 0.5-4.0).\nTidal 0.012 sustains arms — armContrast grows from 0.2 to 0.57 by t=31.\nSystem oscillates rmsR 1.9→4.5, contained within maxR<11, flat (rmsH<0.01).\n"
+        },
+        {
+          "sha": "d3d186c25f6458e9625e043509b911aacb88b59c",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-13T14:46:11-06:00",
+          "message": "feat: add headless diagnostic script for N-body preset evaluation\n\nscripts/diagnose-preset.sh — self-contained: starts dev server + headless\nChrome, switches to a preset, captures diagnostic readbacks at multiple\ntime points, outputs JSON with trend analysis to stdout.\n\nscripts/_diagnose-cdp.mjs — CDP client that navigates, calls __simDiagnose()\nvia Runtime.evaluate with awaitPromise, and computes status classification\n(STABLE/EXPANDING/COLLAPSING, FLAT/THICK, ARM-STRUCTURE/NO-ARMS, etc).\n\nUsage: ./scripts/diagnose-preset.sh \"Spiral Galaxy\" --wait 20 --measures 4\n"
+        },
+        {
+          "sha": "f4479dd21a3e20fa4caeaeddc7a4236568f74484",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-13T12:33:22-06:00",
+          "message": "fix: XR UI shader uniform control flow + strided diagnostic sampling\n\nXR UI shader: removed non-uniform discard before textureSample calls.\nAll sampleLabel() calls now unconditional, discard moved to end.\n\nDiagnostic sampling: 8 large chunks from evenly-spaced regions across\nthe tracer population, skipping massive/dark-matter bodies.\n"
+        },
+        {
+          "sha": "f07e74181f920ced47ca6762b3de768ab6102f0e",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-13T06:29:05-06:00",
+          "message": "feat: dark matter halo for spiral galaxy — invisible mass creates stable potential well\n\nSpiral preset now places all massive bodies as a stationary spherical dark matter\nhalo (NFW-like profile). They provide the gravitational well but are invisible\n(clustered at center, zero velocity, no visual bloom across the disk).\n\nVisible tracers are placed along spiral arms and orbit in the dark matter potential.\nDisk recovery restored (radDamp 0.3, tangGain 0.4) for interaction recovery.\nG raised to 0.8 for deeper potential well.\n"
+        },
+        {
+          "sha": "7cd0b6d1caf1ffa267cf37e8e4cfc45f8a4b2aba",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-13T06:25:11-06:00",
+          "message": "feat: spiral galaxy — zero radial damping and tangential gain for arm preservation\n\nradDamp=0, tangGain=0, alignGain=0, coreOrbit=0: no circularization forces\nthat would erase radial density variation. Only vertical flattening active.\nTidal 0.035→0.02 to reduce central disruption.\n"
+        },
+        {
+          "sha": "c129245e3db29f00c97fb485b4e72de1cfaecb19",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-13T06:23:27-06:00",
+          "message": "feat: rewrite spiral galaxy init with epicyclic density wave orbits\n\n- ARM_WIND 0.45→1.2: tighter winding for more visible spiral turns\n- ARM_FRAC 0.65→0.80: higher arm density contrast\n- ARM_WIDTH 0.35→0.18: narrower arms for sharper visual\n- Inter-arm mass power 4→5: much fainter background\n- Epicyclic velocity perturbation: particles displaced from arm centerline\n  get radial kick proportional to angular offset, creating density wave\n  oscillation (slow entering arm, fast leaving) that maintains structure\n- Arm particle mass power 2→1.5: brighter arm stars\n"
+        },
+        {
+          "sha": "ad375031e5d23a00f0e83b94cfd5e0884665cef5",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-13T06:03:15-06:00",
+          "message": "feat: fill galaxy center hole, tune spiral arms preservation\n\n- Big body radii 0.15-1.5 (was 0.4-2.0), medium 0.5-3.0 (was 1.5-3.5)\n- Spiral Galaxy preset: radDamp 0.15 (was 0.6), tangGain 0.6 (was 1.2),\n  tangSpeed 0.6 (was 2.0), tidalStrength 0.035 (was 0.02), alignGain 0.1\n- Lower disk recovery lets differential rotation maintain spiral arm contrast\n- Higher tidal field actively sustains m=2 density perturbation\n"
+        },
+        {
+          "sha": "de1a58cc4c3141a14a311df85210df8e8cbbc079",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-13T00:41:15-06:00",
+          "message": "docs: document N-body diagnostic system in CLAUDE.md\n\nGPU readback diagnostics, global JS API, healthy baseline values,\nand typical diagnostic workflow via Electric Cherry MCP.\n"
+        },
+        {
+          "sha": "9b3b62365ab978b0fbcbb0698bbed01a141679cf",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-13T00:02:11-06:00",
+          "message": "perf: stabilize N-body force balance — all presets contained within boundary\n\n- sqrt normalization for G (was linear — too aggressive)\n- Init speeds matched to diskTangSpeed * 0.3 (below escape velocity)\n- Bidirectional tangential nudge (reverted max(0) — one-way injected energy without limit)\n- Disk recovery fade widened to 5.0-7.5 (was 3.0-5.0 — particles escaped before recovery could act)\n- All 7 presets verified via GPU diagnostic readback at t=1 and t=10:\n  every preset stays within maxR < 6.0 after 10 seconds\n"
+        },
+        {
+          "sha": "02b02eb1bf6fc977f2fd795625f448ab40a7df33",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-12T23:15:03-06:00",
+          "message": "feat: add GPU diagnostic readback for N-body simulation analysis\n\n- diagnose() method on physics simulation samples 2048 particles via staging buffer\n- Computes: COM, RMS height/radius/speed, radial/angular density profiles,\n  tangential velocity fraction, arm contrast, disk normal\n- Exposed via window.__simDiagnose(), __simPreset(), __simState()\n- Added COPY_SRC to particle buffers for readback support\n"
+        },
+        {
+          "sha": "79adbc3f4c3973b46e7d2b7794826a7f38fb3e81",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-12T20:01:35-06:00",
+          "message": "feat: unique preset initial states + fix workgroup barrier uniform control flow\n\nPresets now seed distinct particle geometries:\n- Spiral Galaxy: logarithmic spiral arms with exponential radial profile\n- Cosmic Web: shell with grid attractor perturbations for filaments\n- Star Cluster: 5 merging Plummer-sphere sub-clumps\n- Maelstrom: 4 counter-rotating tilted rings\n- Dust Cloud: 150K particles with curl-noise turbulent velocity field\n- Binary: two offset tilted sub-disks with tidal bridge\n\nFix workgroupBarrier uniform control flow: replace early return with\nalive flag so all threads participate in barriers. Remove self-skip\nbranch from inner loop (softening handles it). Default count 80K.\n"
+        },
+        {
+          "sha": "d7da32b47db5f4e946850958f7a66be6b852d8e4",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-12T06:13:20-06:00",
+          "message": "feat: N-body simulation redesign — slower convergence, emergent structure, richer visuals\n\n- Rebalanced force model: count-normalized gravity, reduced masses, wider spatial scale\n- Rotating tidal quadrupole seeds spiral arms via differential rotation\n- Count-scaled interaction with gravitational lensing composite effect\n- 10-color stellar palette with per-particle PCG hash for visual variety\n- Tracer subpopulations: retrograde, eccentric, halo orbits\n- Disk recovery fades with distance — scattered particles drift freely\n- Stripped pressure from inner loop, tile size 256, source cap 8192 for perf\n- Expanded parameter ranges with Spiral/Filaments presets\n"
+        },
+        {
+          "sha": "c3ee4ad1c75f3a3d2144df0f85a956b582668f34",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-11T15:31:27-06:00",
+          "message": "perf: tiled N-body compute with shared memory, eliminate hot-loop waste\n\n- Shared memory tiling: source bodies loaded cooperatively into\n  var<workgroup> tile (128 bodies per tile as vec4f pos+mass).\n  Reduces global memory reads ~64-100x per workgroup.\n- inverseSqrt() replaces 1.0/sqrt() for native GPU rsqrt instruction.\n- Eliminated redundant dot(diff,diff) in inner loop.\n- Pre-allocate params staging buffer once at init instead of\n  allocating ArrayBuffer + typed array views every frame.\n- Workgroup size 64 -> 128 for better occupancy.\n"
+        },
+        {
+          "sha": "f0bfc7f7dc152d25e8397fa8b938652d93ef6edb",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-11T14:37:31-06:00",
+          "message": "perf: remove per-frame GPU error scopes, clarify XR grab hit-test\n\n- Remove pushErrorScope/popErrorScope from the render loop. These ran\n  every frame, creating 60+ promise allocations/sec and microtask churn.\n  device.onuncapturederror (already wired up) catches validation errors\n  without per-frame overhead. Targeted scopes in ensureSimulation()\n  remain for creation-time error attribution.\n\n- Clarify XR UI panel comment: hit-test half-extents (e.g. GRAB_HALF_H\n  = 0.035) are intentionally larger than the shader's rendered SDF\n  extents (0.02) for easier targeting. The comment previously said\n  \"mirrored\" which implied they should match.\n"
+        },
+        {
+          "sha": "ea0c7f3327dc4d8c7851c84496d5231c0bd78807",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-11T14:34:34-06:00",
+          "message": "Update src/main.ts\n\nCo-authored-by: Copilot <175728472+Copilot@users.noreply.github.com>"
+        },
+        {
+          "sha": "c93ade90b9fe7e7b3bcb56e7146a46e86a54f45a",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-11T14:34:09-06:00",
+          "message": "Update src/shaders/reaction.compute.wgsl\n\nCo-authored-by: Copilot <175728472+Copilot@users.noreply.github.com>"
+        },
+        {
+          "sha": "f1939062cbab7d8015312bfc85dda882bfde5d50",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-11T14:33:55-06:00",
+          "message": "Update src/shaders/reaction.compute.wgsl\n\nCo-authored-by: Copilot <175728472+Copilot@users.noreply.github.com>"
+        },
+        {
+          "sha": "0b9622e473bdf07798fd0eff0c7ac19402156255",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-11T13:53:22-06:00",
+          "message": "mobile: fix sheet swipe, compact FAB pill, remove gear button\n\n- Bottom sheet swipe now works: touch listeners on entire sheet with\n  overflow-y:hidden when collapsed so browser scroll doesn't steal events.\n  Downward pull at scrollTop=0 collapses when expanded.\n- FAB changed from vertical stack of 44px circles to a compact horizontal\n  pill (two 36px icons in a single rounded bar).\n- Removed redundant gear/controls FAB button.\n"
+        },
+        {
+          "sha": "ae694d12d043a14808fca54d1fb75f382b4f2f24",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-11T13:51:22-06:00",
+          "message": "Add in-world WebXR UI panel (prev/next/slider) (#1)\n\n* add Gray-Scott reaction-diffusion simulation (3D)\n\nNew simulation mode: Gray-Scott reaction-diffusion on a 3D volume,\nrendered via fullscreen raymarch of an isosurface on the v-field.\nIntroduces the first texture-backed sim state (rg16float 3D ping-pong)\nand the first raymarched renderer in the codebase — plumbing that\nfollow-up sims (Physarum, wave equation) can reuse.\n\nPresets: Spots, Mazes, Worms, Mitosis, Coral.\n\n* Add in-world WebXR UI panel (prev/next/slider)\n\nRenders a floating 3D panel in immersive-vr mode so users can switch\nsimulation modes and tweak one primary parameter without leaving the\nheadset.\n\n- New procedural SDF shader (src/shaders/xr.ui.wgsl) draws a rounded\n  background, two chevron buttons, and a slider track/fill/knob in one\n  quad — no textures, no glyph atlas.\n- Per-mode slider bindings in main.ts map to an existing state field\n  (e.g. fluid.forceStrength, physics.G).\n- Ray-plane hit-testing routes pinch input between UI and simulation\n  through a single-enforcer check in updateXRSimulationInteraction.\n- selectstart defers resolution to the first XRFrame so hit-tests have\n  a real pose; selectend triggers button actions or cleanly clears.\n- UI renders into the HDR scene between sim.render and bloom so it\n  picks up tonemap + glow.\n\n* fix reaction sim black-screen and add per-frame error surfacing\n\nTwo bugs in the initial reaction-diffusion implementation:\n\n1. rg16float is NOT in WebGPU's baseline storage-texture format list.\n   Texture creation failed silently and the sim rendered garbage or\n   nothing at all. Switched to rgba16float (always in the baseline),\n   using only .rg channels in the shader. Fixed bytesPerRow (N*4 → N*8)\n   and seed array stride (*2 → *4) accordingly.\n\n2. Sim failures produced zero user feedback — black screen or freeze,\n   with no way to know what went wrong. Now:\n\n   - ensureSimulation() wraps factory creation in validation/internal/\n     OOM error scopes. Any failure surfaces via showSimError() into the\n     existing top-left red overlay.\n\n   - frame() wraps sim.compute/render in a frame-level validation scope\n     plus a try/catch. On any failure the broken sim is destroyed and\n     dropped from the registry so the app stops hammering bad GPU state\n     every frame. The user sees the error and can switch modes.\n\nThis addresses the \"black screen / freeze / eject from XR\" experience —\nwhatever goes wrong next will say so.\n\n* reaction sim: fix diffusion scaling + raymarch aliasing\n\nTwo linked bugs produced the \"frozen boxes with ribs\" look and the\n\"changes when I move the camera\" artifact:\n\nPhysics:\n- The Laplacian divided neighbors by 6, but the canonical Gray-Scott\n  atlas (Du=0.2097, Dv=0.105) assumes a UNIT-weight Laplacian. Effective\n  diffusion was running at 1/6 strength, so most presets froze as the\n  reaction term couldn't compete with the weak spread. Removed /6.\n- dt was 1.0, which is right at the stability edge for Du=0.2097\n  (limit ~1/(6·Du) ≈ 0.79). Lowered to 0.7 for headroom.\n\nRendering:\n- stepCount=96 through a 3-unit volume meant step size ≈ texel size.\n  Under camera orbit, the fixed-stride march aligned to different texel\n  boundaries per frame, producing visible ribs that appeared to \"change\n  with the camera\". Bumped to 256 and added a per-pixel hash-based\n  start offset (stochastic sampling), which converts what would be\n  coherent aliasing into smooth noise that bloom easily absorbs.\n- Widened the soft-iso smoothstep band from ±0.04 to ±0.08 so sub-texel\n  surfaces fade in rather than popping.\n\nAll five presets should now evolve recognizably within a few seconds:\nSpots stabilizes into blobs, Mazes into maze patterns, Mitosis visibly\ndivides, Coral fills space, Worms produces worm-like channels.\n\n* XR UI panel: text labels, ray reticle, fix arrow direction\n\n- Added text labels (PREV / NEXT / current slider parameter) via a\n  canvas-rasterized label atlas uploaded to a GPUTexture. Labels are\n  redrawn on mode change with dynamic font sizing so long labels like\n  \"GRAVITY\" auto-fit.\n- Added a glowing reticle at the XR ray / panel intersection whenever\n  a pinch is active, giving Vision Pro users visual feedback about\n  where their gaze-then-hand-corrected ray is pointing (since natural\n  input only exposes a ray during a pinch).\n- Fixed chevron direction: prev button now points left (<) and next\n  points right (>).\n- Widened button boxes to 0.36 world units so each fits a chevron\n  plus a 2:1 aspect label rect with breathing room.\n- Non-uniform label atlas sub-rects (2:1 for buttons, 4:1 for slider\n  label) so text isn't stretched when sampled at the panel surface.\n- Single-enforcer mode-cycling refactor: introduced selectMode() used\n  by both DOM tab clicks and XR prev/next so state.mode, DOM classes,\n  and simulation registry move together.\n- XR slider drags now call syncUIFromState() + saveState() on release\n  so DOM sliders show the updated value when the user exits VR.\n\n* reaction sim: remove visible cube, scatter-noise seed\n\nThree user-visible issues addressed:\n\n1. Invisible boundary cube: patterns were piling up against the hard\n   clamped-coord texture edge and you could see the cube outline.\n   Added Dirichlet boundary in the compute shader — a smooth band at\n   r > 0.80 of half-size pulls every cell toward (u=1, v=0), creating\n   a \"reservoir\" zone that absorbs patterns before they reach the wall.\n   Patterns now die in the interior; they literally cannot escape.\n\n2. Visible cube edges in render: added a spherical alpha falloff\n   (1 - smoothstep(0.78, 0.95, radial distance)) so the render has no\n   cube edges at all — only a soft spherical fade to invisible.\n\n3. \"Keeps growing the same blobs again\" on reset: the old seed was 12\n   big spherical blobs in a fixed central region, so every reset\n   produced the same general silhouette regardless of preset. Replaced\n   with a scattered noise seed — 80 tiny random points (1-2 cell\n   radius) in the center 40% of the volume. Each reset now looks\n   genuinely different and early-time patterns are fine-grained\n   instead of obviously spherical.\n\nThe reset plumbing itself was already correct: applyPreset calls\nresetCurrentSim which destroys + recreates the sim, so the factory\nre-runs Math.random for every preset click.\n\n* fix reaction time knob, bg race, nbody classic reserved word\n\n1. Reaction time slider: timeScale now drives substep count, not dt.\n   Previously multiplying into dt blew past the explicit-Euler stability\n   bound (~0.79 for Du=0.2097), producing NaN and a disappearing sim.\n\n2. Reaction render ping-pong was off-by-one: renderBGs[pong] was reading\n   the STALE texture. Swapped mapping so render sees the latest write.\n\n3. Error scope handlers were deleting whatever sim currently lived at\n   simulations[mode], which could be a fresh one the user just reset.\n   Now captures the sim instance and only drops it if still the same.\n\n4. nbody.classic.render.wgsl: renamed struct field 'active' -> 'enabled'.\n   'active' is a WGSL reserved keyword, caused compile failure at 26:26.\n\n* XR UI panel: add grab handle for repositioning\n\nAdds a visionOS-style grab bar at the bottom of the panel that lets\nusers pinch-drag to reposition the panel anywhere in 3D space.\n\n- New 'grab' element type in hit-testing and hover encoding\n- Thin rounded pill at y=-0.40 below the slider, lights up with\n  camera.accent on hover\n- Drag tracks the world-space delta between initial and current\n  ray/Z-plane intersection, offsetting XR_UI_PANEL_CENTER each frame\n- Panel position persists across pinch releases within a session\n- Grab state cleanly cleared on selectend alongside other UI state\n\n* Update src/main.ts\n\nCo-authored-by: Copilot <175728472+Copilot@users.noreply.github.com>\n\n* Update src/main.ts\n\nCo-authored-by: Copilot <175728472+Copilot@users.noreply.github.com>\n\n* persistence: derive saved modes from DEFAULTS registry\n\nsaveState/loadState previously hardcoded each sim mode by name, causing\nreaction and physics_classic to be silently omitted. Rather than adding\nto the manual list, loop over Object.keys(DEFAULTS) — the canonical mode\nregistry — so any future mode added to DEFAULTS is automatically persisted\nwith no further edits.\n\n[LAW:one-source-of-truth] DEFAULTS was already the single source of which\nmodes exist; the persistence layer now derives from it instead of\nmaintaining a parallel list.\n\n* mobile UI: bottom sheet controls, touch gestures, mode stepper\n\nAuto-detects mobile via matchMedia (max-width: 768px) and switches to\na mobile-optimized layout:\n\n- Canvas fills full viewport, controls become a bottom sheet overlay\n  with drag handle and peek state showing the mode stepper\n- Prev/next mode stepper replaces the 6-tab bar on small screens\n- FAB buttons (pause/reset/controls) overlay the canvas top-right\n- Multi-touch gesture system: 1-finger = sim interaction, 2-finger\n  drag = orbit camera, pinch = zoom (replaces ctrl+drag and wheel)\n- Touch-friendly sizing: 24px slider thumbs, 44px buttons\n- Reduced default particle counts for mobile GPUs on fresh installs\n- Theme selector and prompt bar hidden on mobile\n- Shader editor goes full-width on mobile\n- Desktop UI completely unchanged\n\n---------\n\nCo-authored-by: Copilot <175728472+Copilot@users.noreply.github.com>"
+        },
+        {
+          "sha": "801483402712081b69953a05826897c86330268b",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-07T15:33:18-06:00",
+          "message": "switch behavior of orbit and interact\n"
+        },
+        {
+          "sha": "6cae4e1dbbbc7b5a17c344c588cfa3d69bbe8ac8",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-07T15:29:34-06:00",
+          "message": "improvements and tweaks\n"
+        },
+        {
+          "sha": "fd4f15414b3638d3a94292bb068fc2f2a8d27577",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-07T05:20:51-06:00",
+          "message": "nbody: anisotropic disk recovery with tangential nudge\n\nAdds the JS-side wiring for the disk-recovery layer in the n-body\nshader: 5 disk gain sliders + interaction-strength + orbit-speed\nsliders, async angular-momentum readback for disk-normal estimation,\nand a 96-byte Params layout. Defaults are tuned so disks emerge over\n~5-15s without snapping; without the tangential term, damping alone\njust collapsed bodies inward.\n"
+        },
+        {
+          "sha": "787b69afdbe75ac90520a2ec8626f76d3036cffc",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-07T05:16:04-06:00",
+          "message": "wip: nbody disk physics tuning + boids tweaks\n\nAdds interactionStrength and diskTangSpeed knobs to nbody params,\nintroduces nbody.reduce.wgsl, and extends FluidParams type with disk\ndamping/spring/alignment fields. Boids compute shader tweaks as well.\n"
+        },
+        {
+          "sha": "57fd68fec8bf5f4848f29be57bd8067901588a60",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-07T05:14:33-06:00",
+          "message": "Merge remote-tracking branch 'origin/master' into crazy_grav\n\n# Conflicts:\n#\tsrc/shaders/fluid.render.wgsl\n"
+        },
+        {
+          "sha": "57cec3d27cfb1a6e429bf8595b2054f41d86db6b",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-07T05:02:22-06:00",
+          "message": "fix(fluid): use dye alpha for surface height\n\nRender shader was computing height from length(d.rgb), which scales\nwith the dye color vector's magnitude. Single mode (~1.12), rainbow\n(~1.73), and temperature dyes therefore produced visibly different\nsurface heights for the same injected density. Use d.a — the\nmode-invariant splat amount written by fluid.forces.wgsl — so all\npresets render at the same scale.\n"
+        },
+        {
+          "sha": "60daed80584462e1d0cfc7604c9419aadfabb732",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-06T22:05:36-06:00",
+          "message": "ci: use r<count>-<sha> slots for master deploys\n\nEach push to master now gets a persistent, monotonically increasing\nversion slot like r247-abc1234 instead of overwriting /master/. Tags\nand PRs keep their existing slot semantics.\n"
+        },
+        {
+          "sha": "175a0d6ab80033db1143a3de5f179dbeb9d27aa3",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-06T19:47:23-06:00",
+          "message": "ci: add gh-pages-multiplexer for versioned deploys\n\nReplaces actions/deploy-pages with brandon-fryslie/gh-pages-multiplexer.\nBuilds with VITE_BASE matching the version slot so vite emits correct\nabsolute asset paths; multiplexer publishes into per-ref subdirectories\non gh-pages and generates an index page. PRs get their own pr-N slot.\n"
+        },
+        {
+          "sha": "2435974946cb8fb929c3d2eb9bc859b0c969816a",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-03T07:48:50-06:00",
+          "message": "add script for screenshot\n"
+        },
+        {
+          "sha": "565fbd5081c557b18276975e8ee5ce4e807a05eb",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-03T07:16:52-06:00",
+          "message": "crazy grav\n"
+        },
+        {
+          "sha": "5267177ced066832d771578c3aaaf7ea9d9e89b7",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-03T06:24:22-06:00",
+          "message": "Animate theme transitions without simulation resets\n"
+        },
+        {
+          "sha": "0045073fb638ea386fca78b4651fa889dc53399c",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-03T06:14:03-06:00",
+          "message": "Add walls\n"
+        },
+        {
+          "sha": "7814d7b8511a2e32188a4b2eadd7ffcbe3c5afce",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-03T07:16:52-06:00",
+          "message": "crazy grav\n"
+        },
+        {
+          "sha": "6b42098ab12a062cefab5f1452bfdc324410c66f",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-03T06:50:20-06:00",
+          "message": "Tune fluid volume rendering and interaction\n"
+        },
+        {
+          "sha": "113fc66dafcd9c794896778cb79383d013da9af9",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-03T06:24:22-06:00",
+          "message": "Animate theme transitions without simulation resets\n"
+        },
+        {
+          "sha": "e59f67a93b85c8d47c1492b28154d38ab26593f5",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-03T06:14:03-06:00",
+          "message": "Add walls\n"
+        },
+        {
+          "sha": "c8f5a24a83e61041c21db5dd2e4285ad439d2e3a",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-03T05:47:19-06:00",
+          "message": "Remove MSAA from XR render. Improve shapes shader\n"
+        },
+        {
+          "sha": "e51df3a679c28259714c52ada9379ade4564d01d",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-02T18:51:08-06:00",
+          "message": "Add MSAA render attachments\n"
+        },
+        {
+          "sha": "f9b60232155cb818b447d170f2ac191ef5252bd4",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-02T18:49:17-06:00",
+          "message": "Fix XR stereo: use per-view camera buffer offsets instead of overwriting\n\nRoot cause: sim.render() called device.queue.writeBuffer(cameraBuffer, 0, ...)\nfor each eye. writeBuffer is a queue operation that executes before any submitted\ncommand buffer — so the right eye's write overwrote the left eye's data, and\nboth render passes used the right eye's view matrix.\n\nFix (proper approach, matching the WebXR barebones sample):\n- Expand all camera buffers to CAMERA_STRIDE * 2 (2 × 256 bytes)\n- Create per-view bind groups for all simulations and the grid renderer,\n  each binding the camera buffer at its eye's 256-byte-aligned offset\n- render() and renderGrid() accept viewIndex (default 0) and write to\n  viewIndex * CAMERA_STRIDE, so left and right eye data coexist in the\n  buffer without conflict\n- Single encoder + single submit preserved — no extra overhead\n"
+        },
+        {
+          "sha": "686361926fabcc89e1b47fb3a8aab464fe28bafb",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-02T18:47:16-06:00",
+          "message": "fix webxr render\n"
+        },
+        {
+          "sha": "9504c67be48935d67ece793175784b79c4ea6841",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-02T18:28:42-06:00",
+          "message": "Move XR viewer back 5m so simulation is in front, not surrounding\n\nApply getOffsetReferenceSpace() after acquiring the reference space to shift\nthe user's reported pose 5 units behind the world origin (z: -5 in WebGL\nforward convention). Simulation geometry at [-2,2]^3 then appears 5m ahead.\n\nFor local-floor, also apply y: +1.6 to raise the reference space to eye level\nso the simulation center is at roughly eye height rather than at the user's feet.\n"
+        },
+        {
+          "sha": "de921097beab0c96d50800cd7114f1774b186e9b",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-02T18:19:11-06:00",
+          "message": "Use npm install instead of npm ci in deploy workflow\n\nVite 8 rolldown has platform-native bindings. Lockfile generated on macOS\narm64 doesn't include Linux x64 emnapi packages CI needs, so npm ci fails.\nnpm install resolves correctly per-platform without lockfile sync errors.\n"
+        },
+        {
+          "sha": "edc4e1b7b2ec9bc0b098015d0eadbb42289be83d",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-02T18:17:15-06:00",
+          "message": "Update package-lock.json to sync with package.json\n"
+        },
+        {
+          "sha": "b04f712f179dfa86c43c338891dd26692e9a9930",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-02T18:16:32-06:00",
+          "message": "Add GitHub Actions workflow to deploy to GitHub Pages\n\nBuilds with VITE_BASE=/shader-playground/ so asset paths resolve correctly\nunder the repo subpath. vite.config.ts reads VITE_BASE from env, defaulting\nto '/' so local dev is unaffected.\n"
+        },
+        {
+          "sha": "94e57d8babf547866fded741e508166a810fbb2b",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-02T18:14:45-06:00",
+          "message": "Simplify XR session config to Safari visionOS only\n\nThis is a Safari/AVP-only demo. Replace the browser-detection waterfall\nwith a single known-working config: webgpu required, layers + local-floor\noptional (Safari accepts layers in updateRenderState without it being required).\n"
+        },
+        {
+          "sha": "c7fb127fb621b80e108ba95f0d48a19a08028244",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-02T18:07:30-06:00",
+          "message": "Clean up WebXR code and add explanatory comments\n\n- Remove debug console.log probes (XRGPUBinding method inspection, per-frame\n  texture/viewport dumps, frame counter guards)\n- Remove xrFrameCount — only existed to gate debug logs\n- Collapse 5-config session waterfall to 3 known-working configs with comment\n  explaining Chrome vs Safari visionOS feature string differences\n- Collapse 4-config layer waterfall to 2 (with/without native scaleFactor)\n- Simplify for-loop to for-of in xrFrame\n- Add comments explaining XRGPUBinding, getViewSubImage, getViewDescriptor,\n  texture array slices, xrCameraOverride seam, and depth fallback\n"
+        },
+        {
+          "sha": "9b7d60f3bdb102a6d49e4452c99d65ed69ce68b2",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-02T18:04:28-06:00",
+          "message": "Add README and ignore .idea/ directory\n\nDocuments setup, Vision Pro HTTPS workflow, and a detailed explanation\nof the WebXR–WebGPU integration (XRGPUBinding, stereo render loop,\ncamera override seam, Safari vs Chrome API differences).\n"
+        },
+        {
+          "sha": "db269aee65202f1a8e138efcc82bd88f0ac588ab",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-03-30T23:31:01-06:00",
+          "message": "Add TypeScript types to all code with strict mode compliance\n\n- Remove @ts-nocheck from main.ts and add full type annotations\n- Install @webgpu/types for WebGPU type definitions\n- Create webxr-gpu.d.ts with WebXR + WebGPU binding types\n- Add ShapeName, Distribution, DyeMode union types to types.ts\n- Add ModeParamsMap type and modeParams() helper for correlated types\n- Type all function signatures, module-level variables, and DOM access\n- Fix initSimAndLoop undefined reference with inline recovery logic\n"
+        },
+        {
+          "sha": "49118cbf06d87969e4a0e5370853d52bd514202f",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-03-30T03:29:19-06:00",
+          "message": "WebGPU compute shader playground with WebXR stereo rendering\n\nSingle-file HTML playground for experimenting with WebGPU compute shaders.\nFour simulation modes (boids, N-body physics, fluid dynamics, parametric\nshapes), each with interactive controls, presets, and real-time parameter\nmodulation. Features include:\n\n- 3D rendering with orbit camera, background reference grid with animated pulses\n- WebXR stereo rendering for Apple Vision Pro (XRGPUBinding path)\n- Color palette system with 10 curated themes from popular editor themes\n- Ctrl+drag interaction (attractor for boids/N-body, dye injection for fluid,\n  surface deformation for parametric shapes)\n- Shader debug panel with live editing and recompilation\n- State persistence to localStorage with Reset All button\n- HTTPS dev server for Vision Pro testing (self-signed cert)\n"
+        }
+      ]
+    },
+    {
       "version": "pr-10",
       "ref": "refs/pull/10/merge",
       "sha": "2aaac004586d99a3503b709ee849967e84d2c2ec",
