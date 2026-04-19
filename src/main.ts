@@ -4036,10 +4036,10 @@ function setupMobileFab() {
     resetCurrentSim();
   });
 
-  // Mode stepper prev/next — reuse XR_UI_MODE_ORDER for consistent ordering
+  const modeOrder: SimMode[] = ['physics', 'boids', 'physics_classic', 'fluid', 'parametric', 'reaction'];
   const stepMode = (delta: number) => {
-    const idx = XR_UI_MODE_ORDER.indexOf(state.mode);
-    const next = XR_UI_MODE_ORDER[(idx + delta + XR_UI_MODE_ORDER.length) % XR_UI_MODE_ORDER.length];
+    const idx = modeOrder.indexOf(state.mode);
+    const next = modeOrder[(idx + delta + modeOrder.length) % modeOrder.length];
     selectMode(next);
   };
   document.getElementById('mode-prev')!.addEventListener('click', () => stepMode(-1));
@@ -4548,96 +4548,6 @@ const twoHandState = {
 // Previous frame's pinch state for edge detection (gesture events).
 const xrPrevPinch: Record<XrHand, boolean> = { left: false, right: false };
 
-// ─── LEGACY UI STATE (bridges to current panel renderer until binding system lands) ──
-
-type XrUiElement = 'none' | 'prev' | 'next' | 'slider' | 'grab';
-
-interface XrUiSliderDef { key: string; label: string; min: number; max: number; }
-const XR_UI_SLIDER_DEFS: Record<SimMode, XrUiSliderDef> = {
-  boids:           { key: 'maxSpeed',      label: 'Speed',   min: 0.1,  max: 10  },
-  physics:         { key: 'G',             label: 'Gravity', min: 0.05, max: 5.0 },
-  physics_classic: { key: 'G',             label: 'Gravity', min: 0.01, max: 100 },
-  fluid:           { key: 'forceStrength', label: 'Force',   min: 1,    max: 500 },
-  parametric:      { key: 'scale',         label: 'Scale',   min: 0.1,  max: 5   },
-  reaction:        { key: 'feed',          label: 'Feed',    min: 0.0,  max: 0.1 },
-};
-const XR_UI_MODE_ORDER: SimMode[] = ['physics', 'boids', 'physics_classic', 'fluid', 'parametric', 'reaction'];
-
-// Reticle/hover state consumed by the XR UI shader.
-const xrUiState = {
-  hover:              'none' as XrUiElement,
-  pressed:            'none' as XrUiElement,
-  lastHitPx:          0,
-  lastHitPy:          0,
-  lastHitActive:      false,
-};
-
-function getXrSliderNormalized(): number {
-  const def = XR_UI_SLIDER_DEFS[state.mode];
-  const modeParamsObj = state[state.mode] as unknown as Record<string, number>;
-  const v = modeParamsObj[def.key];
-  if (typeof v !== 'number') return 0;
-  return Math.max(0, Math.min(1, (v - def.min) / (def.max - def.min)));
-}
-
-// Ray-plane intersection against the panel (plane at z = center[2], normal = +Z).
-// Returns panel-local (px, py) in aspect-corrected coords and the element under the hit.
-function hitTestXrUi(origin: number[], dir: number[]): { px: number; py: number; element: XrUiElement } | null {
-  const [cx, cy, cz] = XR_UI_PANEL_CENTER;
-  const [sx, sy] = XR_UI_PANEL_SIZE;
-  if (Math.abs(dir[2]) < 1e-6) return null;
-  const t = (cz - origin[2]) / dir[2];
-  if (t < 0) return null;
-  const hitX = origin[0] + dir[0] * t;
-  const hitY = origin[1] + dir[1] * t;
-  const u = (hitX - cx) / sx + 0.5;
-  const v = (hitY - cy) / sy + 0.5;
-  if (u < 0 || u > 1 || v < 0 || v > 1) return null;
-
-  const aspect = sx / sy;
-  const px = (u - 0.5) * aspect;
-  const py = v - 0.5;
-
-  // Classify — box tests matching the shader's element placements.
-  let element: XrUiElement = 'none';
-  if (Math.abs(px - XR_UI_PREV_X_FRAC * aspect) < XR_UI_BTN_HALF_W && Math.abs(py - XR_UI_BTN_Y) < XR_UI_BTN_HALF_H) {
-    element = 'prev';
-  } else if (Math.abs(px - XR_UI_NEXT_X_FRAC * aspect) < XR_UI_BTN_HALF_W && Math.abs(py - XR_UI_BTN_Y) < XR_UI_BTN_HALF_H) {
-    element = 'next';
-  } else if (Math.abs(py - XR_UI_GRAB_Y) < XR_UI_GRAB_HALF_H && Math.abs(px) < XR_UI_GRAB_HALF_W) {
-    element = 'grab';
-  } else {
-    const trackHalfW = aspect * XR_UI_SLIDER_HALF_W_FRAC;
-    if (Math.abs(py - XR_UI_SLIDER_Y) < XR_UI_SLIDER_HALF_H && Math.abs(px) < trackHalfW + 0.04) {
-      element = 'slider';
-    }
-  }
-  return { px, py, element };
-}
-
-// Intersect a ray with a Z-plane, returning the world-space hit point.
-function xrRayPlaneHitWorld(origin: number[], dir: number[], planeZ: number): [number, number, number] | null {
-  if (Math.abs(dir[2]) < 1e-6) return null;
-  const t = (planeZ - origin[2]) / dir[2];
-  if (t < 0) return null;
-  return [origin[0] + dir[0] * t, origin[1] + dir[1] * t, planeZ];
-}
-
-function setXrSliderFromHit(px: number): void {
-  const aspect = XR_UI_PANEL_SIZE[0] / XR_UI_PANEL_SIZE[1];
-  const trackHalfW = aspect * XR_UI_SLIDER_HALF_W_FRAC;
-  const t = Math.max(0, Math.min(1, (px + trackHalfW) / (2 * trackHalfW)));
-  const def = XR_UI_SLIDER_DEFS[state.mode];
-  const modeParamsObj = state[state.mode] as unknown as Record<string, number>;
-  modeParamsObj[def.key] = def.min + (def.max - def.min) * t;
-}
-
-function cycleXrUiMode(delta: number): void {
-  const idx = XR_UI_MODE_ORDER.indexOf(state.mode);
-  const next = XR_UI_MODE_ORDER[(idx + delta + XR_UI_MODE_ORDER.length) % XR_UI_MODE_ORDER.length];
-  selectMode(next);
-}
-
 // Synthetic pointer id for the single XR interaction channel — keeps the attractor
 // system's per-pointer-id contract uniform across desktop/mobile/XR.
 const XR_ATTRACTOR_POINTER_ID = -1;
@@ -4683,16 +4593,6 @@ function findHandForSource(source: XRInputSource): XrHand | null {
   if (xrHandFrames.left.source === source) return 'left';
   if (xrHandFrames.right.source === source) return 'right';
   return null;
-}
-
-function applyHitToUiState(hit: { px: number; py: number; element: XrUiElement } | null): void {
-  if (hit) {
-    xrUiState.lastHitPx = hit.px;
-    xrUiState.lastHitPy = hit.py;
-    xrUiState.lastHitActive = true;
-  } else {
-    xrUiState.lastHitActive = false;
-  }
 }
 
 // ── REFERENCE SPACE MANAGEMENT ─────────────────────────────────────────────────
