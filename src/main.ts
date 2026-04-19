@@ -3509,6 +3509,8 @@ function selectMode(mode: SimMode): void {
     t.classList.toggle('active', t.dataset.mode === mode));
   document.querySelectorAll<HTMLElement>('.param-group').forEach(g =>
     g.classList.toggle('active', g.dataset.mode === mode));
+  document.querySelectorAll<HTMLElement>('.debug-panel').forEach(g =>
+    g.classList.toggle('active', g.dataset.mode === mode));
   // Sync mobile stepper label
   const stepperLabel = document.getElementById('mode-stepper-label');
   if (stepperLabel) stepperLabel.textContent = MODE_TAB_LABELS[mode];
@@ -3525,11 +3527,26 @@ function setupTabs() {
   });
 }
 
+// [LAW:single-enforcer] Pause-button text/active-state is reflected in exactly one place so the
+// desktop button, mobile FAB, and any programmatic pause (breakpoint, skip completion) all agree.
+function syncPauseButtons() {
+  const btn = document.getElementById('btn-pause');
+  if (btn) {
+    btn.textContent = state.paused ? 'Resume' : 'Pause';
+    btn.classList.toggle('active', state.paused);
+  }
+  const fab = document.getElementById('fab-pause');
+  if (fab) {
+    fab.textContent = state.paused ? '\u25B6' : '\u23F8';
+    fab.classList.toggle('active', state.paused);
+  }
+}
+
 function setupGlobalControls() {
   document.getElementById('btn-pause')!.addEventListener('click', () => {
     state.paused = !state.paused;
-    document.getElementById('btn-pause')!.textContent = state.paused ? 'Resume' : 'Pause';
-    document.getElementById('btn-pause')!.classList.toggle('active', state.paused);
+    if (state.paused) cancelDebugMovement();
+    syncPauseButtons();
   });
 
   document.getElementById('btn-reset')!.addEventListener('click', () => {
@@ -3588,6 +3605,239 @@ function setupTimeReverseControls() {
     fabRewind.addEventListener('pointerup', () => setReverse(false));
     fabRewind.addEventListener('pointercancel', () => setReverse(false));
     fabRewind.addEventListener('pointerleave', () => setReverse(false));
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// DEBUG / TIME CONTROL
+// ═══════════════════════════════════════════════════════════════════════════════
+// [LAW:one-source-of-truth] Debug state drives three behaviors that would otherwise diverge:
+// manual step (discrete advance), skip-to-step (bounded seek), and breakpoint (auto-pause at step).
+// All three funnel through runDebugCompute() in the frame loop so the frame-level gating stays uniform.
+
+interface DebugState {
+  skipTarget: number | null;          // step we're seeking toward (null = not skipping)
+  skipChunk: number;                  // max compute dispatches per frame while skipping/stepping
+  breakAtStep: number | null;         // auto-pause when simStep reaches this (null = no breakpoint)
+  manualStepsRemaining: number;       // discrete-step requests pending (from ±1 / ±10 / ±60 buttons)
+  manualDirection: number;            // +1 or -1 for the manual-step queue
+}
+
+const debugState: DebugState = {
+  skipTarget: null,
+  skipChunk: 200,
+  breakAtStep: null,
+  manualStepsRemaining: 0,
+  manualDirection: 1,
+};
+
+// [LAW:single-enforcer] Clearing pending movement happens in exactly one place so "user pressed pause"
+// and "user pressed anything else that cancels" produce identical internal state.
+function cancelDebugMovement() {
+  debugState.skipTarget = null;
+  debugState.manualStepsRemaining = 0;
+}
+
+// [LAW:dataflow-not-control-flow] Same dispatch every frame — runDebugCompute always runs on physics mode.
+// What varies is (a) how many steps, (b) which direction — both pure functions of debugState + pause state.
+// Non-physics modes fall through to the simple "compute iff not paused" behavior.
+function runDebugCompute(sim: Simulation, encoder: GPUCommandEncoder): void {
+  if (state.mode !== 'physics' || !('getSimStep' in sim)) {
+    if (!state.paused) sim.compute(encoder);
+    return;
+  }
+  const pSim = sim as Simulation & {
+    getSimStep(): number;
+    getTimeDirection(): number;
+    setTimeDirection(d: number): void;
+  };
+
+  let stepCount = 0;
+  let overrideDir: number | null = null;
+
+  if (debugState.skipTarget !== null) {
+    const delta = debugState.skipTarget - pSim.getSimStep();
+    if (delta === 0) {
+      debugState.skipTarget = null;
+      state.paused = true;
+      syncPauseButtons();
+      return;
+    }
+    overrideDir = delta > 0 ? 1 : -1;
+    stepCount = Math.min(debugState.skipChunk, Math.abs(delta));
+  } else if (debugState.manualStepsRemaining > 0) {
+    overrideDir = debugState.manualDirection;
+    stepCount = Math.min(debugState.skipChunk, debugState.manualStepsRemaining);
+    debugState.manualStepsRemaining -= stepCount;
+  } else if (!state.paused) {
+    stepCount = 1; // normal play respects whatever time direction the R-key has set
+  }
+
+  if (stepCount === 0) return;
+
+  const savedDir = pSim.getTimeDirection();
+  const needRestore = overrideDir !== null && overrideDir !== savedDir;
+  if (needRestore) pSim.setTimeDirection(overrideDir!);
+
+  // NOTE: we do NOT check `state.paused` inside this loop. stepBy/initiateSkip deliberately
+  // set state.paused=true to freeze normal play while the chunk executes, so a `paused` check
+  // would abort after iteration 0. The sim's reverse-boundary guard inside compute() already
+  // early-returns as a no-op once simStep <= 0 with negative dir, so finishing the chunk is safe.
+  for (let i = 0; i < stepCount; i++) {
+    pSim.compute(encoder);
+    const curStep = pSim.getSimStep();
+    // Breakpoint: auto-pause on exact match, regardless of direction.
+    if (debugState.breakAtStep !== null && curStep === debugState.breakAtStep) {
+      debugState.breakAtStep = null;
+      cancelDebugMovement();
+      state.paused = true;
+      syncPauseButtons();
+      refreshBreakpointUI();
+      break;
+    }
+    // Skip target: finish when we hit it.
+    if (debugState.skipTarget !== null && curStep === debugState.skipTarget) {
+      debugState.skipTarget = null;
+      state.paused = true;
+      syncPauseButtons();
+      break;
+    }
+  }
+
+  if (needRestore) pSim.setTimeDirection(savedDir);
+}
+
+function refreshBreakpointUI(): void {
+  const status = document.getElementById('debug-break-status');
+  const val = document.getElementById('debug-break-val');
+  if (!status || !val) return;
+  if (debugState.breakAtStep !== null) {
+    val.textContent = String(debugState.breakAtStep);
+    status.style.display = '';
+  } else {
+    status.style.display = 'none';
+  }
+}
+
+function setupDebugControls() {
+  const byId = <T extends HTMLElement>(id: string): T | null =>
+    document.getElementById(id) as T | null;
+
+  const stepBy = (n: number, dir: number) => {
+    cancelDebugMovement();
+    state.paused = true;
+    syncPauseButtons();
+    debugState.manualStepsRemaining = n;
+    debugState.manualDirection = dir;
+  };
+
+  byId('debug-rev60')?.addEventListener('click', () => stepBy(60, -1));
+  byId('debug-rev10')?.addEventListener('click', () => stepBy(10, -1));
+  byId('debug-rev1')?.addEventListener('click', () => stepBy(1, -1));
+  byId('debug-fwd1')?.addEventListener('click', () => stepBy(1, 1));
+  byId('debug-fwd10')?.addEventListener('click', () => stepBy(10, 1));
+  byId('debug-fwd60')?.addEventListener('click', () => stepBy(60, 1));
+
+  const chunkSelect = byId<HTMLSelectElement>('debug-skip-chunk');
+  if (chunkSelect) {
+    chunkSelect.addEventListener('change', () => {
+      const n = parseInt(chunkSelect.value, 10);
+      if (Number.isFinite(n) && n > 0) debugState.skipChunk = n;
+    });
+  }
+
+  const initiateSkip = (target: number) => {
+    if (target < 0) return;
+    cancelDebugMovement();
+    state.paused = true;
+    syncPauseButtons();
+    debugState.skipTarget = target;
+  };
+
+  const skipInput = byId<HTMLInputElement>('debug-skip-target');
+  byId('debug-skip-btn')?.addEventListener('click', () => {
+    const v = parseInt(skipInput?.value ?? '', 10);
+    if (Number.isFinite(v)) initiateSkip(v);
+  });
+  skipInput?.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      const v = parseInt(skipInput.value, 10);
+      if (Number.isFinite(v)) initiateSkip(v);
+    }
+  });
+
+  const breakInput = byId<HTMLInputElement>('debug-break-step');
+  byId('debug-break-btn')?.addEventListener('click', () => {
+    const v = parseInt(breakInput?.value ?? '', 10);
+    if (Number.isFinite(v) && v >= 0) {
+      debugState.breakAtStep = v;
+      refreshBreakpointUI();
+    }
+  });
+  breakInput?.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      const v = parseInt(breakInput.value, 10);
+      if (Number.isFinite(v) && v >= 0) {
+        debugState.breakAtStep = v;
+        refreshBreakpointUI();
+      }
+    }
+  });
+  byId('debug-break-clear')?.addEventListener('click', () => {
+    debugState.breakAtStep = null;
+    refreshBreakpointUI();
+  });
+
+  const scrub = byId<HTMLInputElement>('debug-scrub');
+  // 'change' fires on release; drag is cheap since each "live" change would queue a skip.
+  // Use 'change' so we don't spam the sim with seek requests during the drag.
+  scrub?.addEventListener('change', () => {
+    const v = parseInt(scrub.value, 10);
+    if (Number.isFinite(v)) initiateSkip(v);
+  });
+
+  byId('debug-screenshot')?.addEventListener('click', () => {
+    const sim = simulations['physics'];
+    const step = sim && 'getSimStep' in sim
+      ? (sim as { getSimStep(): number }).getSimStep()
+      : 0;
+    canvas.toBlob((blob) => {
+      if (!blob) return;
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `shader-playground-step-${step}.png`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    }, 'image/png');
+  });
+}
+
+// Per-frame update for the big step display + scrubber position. Cheap — DOM text only.
+function updateDebugPanel(): void {
+  if (state.mode !== 'physics') return;
+  const sim = simulations['physics'];
+  if (!sim || !('getSimStep' in sim)) return;
+  const p = sim as unknown as { getSimStep(): number; getTimeDirection(): number; getJournalHighWater(): number };
+  const step = p.getSimStep();
+  const dir = p.getTimeDirection();
+  const highWater = p.getJournalHighWater();
+
+  const numEl = document.getElementById('debug-step-num');
+  if (numEl) numEl.textContent = String(step);
+  const dirEl = document.getElementById('debug-step-dir');
+  if (dirEl) dirEl.textContent = dir < 0 ? '\u25C0' : '\u25B6';
+
+  const scrub = document.getElementById('debug-scrub') as HTMLInputElement | null;
+  const scrubHigh = document.getElementById('debug-scrub-high');
+  if (scrub && scrubHigh) {
+    const max = Math.max(highWater, step);
+    if (scrub.max !== String(max)) scrub.max = String(max);
+    // Don't clobber the value while the user is dragging (matches :active on thumb).
+    if (document.activeElement !== scrub) scrub.value = String(step);
+    scrubHigh.textContent = String(max);
   }
 }
 
@@ -3984,11 +4234,8 @@ function setupMobileTouchControls() {
 function setupMobileFab() {
   document.getElementById('fab-pause')!.addEventListener('click', () => {
     state.paused = !state.paused;
-    document.getElementById('fab-pause')!.textContent = state.paused ? '\u25B6' : '\u23F8';
-    document.getElementById('fab-pause')!.classList.toggle('active', state.paused);
-    // Sync desktop button too
-    document.getElementById('btn-pause')!.textContent = state.paused ? 'Resume' : 'Pause';
-    document.getElementById('btn-pause')!.classList.toggle('active', state.paused);
+    if (state.paused) cancelDebugMovement();
+    syncPauseButtons();
   });
 
   document.getElementById('fab-reset')!.addEventListener('click', () => {
@@ -4385,12 +4632,130 @@ let SHADER_REACTION_RENDER_EDIT: string | null = null;
 
 let xrSession: XRSession | null = null;
 let xrRefSpace: XRReferenceSpace | null = null;
+let xrBaseRefSpace: XRReferenceSpace | null = null; // pre-gesture reference space
 let xrBinding: XRGPUBinding | null = null;
 let xrLayer: XRProjectionLayer | null = null;
-let xrInteractionSource: XRInputSource | null = null;
-let xrInteractionHasSample = false;
 
-// --- XR UI state ---
+// ═══════════════════════════════════════════════════════════════════════════════
+// XR INPUT PIPELINE
+// ═══════════════════════════════════════════════════════════════════════════════
+// Architecture from design-docs/XR-UX-PROPOSALS.md:
+//   raw XR inputs → HandFrame[] → Gesture[] → InteractionState transitions → side effects
+//
+// [LAW:one-source-of-truth] All XR input flows through this pipeline.
+// selectstart/selectend produce raw pinch events.
+// Each frame: update HandFrames → detect Gestures → transition InteractionStates → apply effects.
+
+// ─── TYPES ───────────────────────────────────────────────────────────────────
+
+type XrHand = 'left' | 'right';
+interface XrRay { origin: number[]; dir: number[] }
+
+// Per-hand, per-frame snapshot. Core of the input pipeline.
+// Joints/palmNormal/grip are stubs — populated when hand-tracking feature lands.
+interface XrHandFrame {
+  hand: XrHand;
+  tracked: boolean;
+  source: XRInputSource | null;  // the XR input source for this hand (null when idle)
+  pinch: {
+    active: boolean;
+    startTime: number;          // performance.now() at pinch-start
+    origin: number[];           // hand position at pinch-start
+    current: number[];          // current hand position
+  };
+  // Gaze-seeded ray: frozen at pinch-start, authoritative for SELECTION.
+  gazeRay: XrRay | null;
+  // Hand-steered ray: updated each frame during pinch. Drives drag/scrub.
+  currentRay: XrRay | null;
+  // Stubs for future hand-tracking features:
+  palmNormal: number[] | null;
+  joints: null;
+  grip: null;
+}
+
+function makeIdleHandFrame(hand: XrHand): XrHandFrame {
+  return {
+    hand, tracked: false, source: null,
+    pinch: { active: false, startTime: 0, origin: [0, 0, 0], current: [0, 0, 0] },
+    gazeRay: null, currentRay: null,
+    palmNormal: null, joints: null, grip: null,
+  };
+}
+
+// Gesture events — pure data produced by the detector, consumed by the state machine.
+type XrGesture =
+  | { kind: 'pinch-start'; hand: XrHand; gazeRay: XrRay }
+  | { kind: 'pinch-hold';  hand: XrHand; dur: number }
+  | { kind: 'pinch-end';   hand: XrHand; dur: number }
+  // Cooperative gestures (involve both hands):
+  | { kind: 'two-hand-pinch-start' }
+  | { kind: 'two-hand-pinch-end' }
+  // Stubs — detected when hand-tracking joints are available:
+  | { kind: 'fine-modifier-on';  hand: XrHand }
+  | { kind: 'fine-modifier-off'; hand: XrHand }
+  | { kind: 'palm-up';   hand: XrHand }
+  | { kind: 'palm-down'; hand: XrHand }
+  | { kind: 'wrist-flick'; hand: XrHand; axis: 'roll' | 'pitch' | 'yaw'; sign: 1 | -1 };
+
+// Per-hand interaction state machine.
+// [LAW:one-source-of-truth] At most one interaction per hand.
+// Selection transitions (idle → pressing/dragging) use gazeRay at pinch-start.
+// Hover transitions (idle ↔ hovering) use currentRay (advisory).
+type XrInteraction =
+  | { kind: 'idle' }
+  | { kind: 'hovering'; target: string }
+  | { kind: 'pressing'; target: string; element: XrUiElement; startedAt: number }
+  | { kind: 'dragging'; target: string;
+      handOrigin: number[];      // hand position at drag start
+      dragType: 'slider' | 'panel-grab' | 'sim';
+      // Panel grab extras:
+      panelOriginWorld: [number, number, number] | null;
+      panelOriginCenter: [number, number, number] | null;
+      // Sim interaction extras:
+      hasSample: boolean;
+    }
+  | { kind: 'two-hand-scale' };
+
+// ─── STATE ───────────────────────────────────────────────────────────────────
+
+// Hand frames — updated every XR frame.
+const xrHandFrames: Record<XrHand, XrHandFrame> = {
+  left: makeIdleHandFrame('left'),
+  right: makeIdleHandFrame('right'),
+};
+
+// Per-hand interaction state.
+const xrInteractions: Record<XrHand, XrInteraction> = {
+  left: { kind: 'idle' },
+  right: { kind: 'idle' },
+};
+
+// Pending pinch-starts: sources added at selectstart, resolved to a hand
+// on the first frame with a pose available.
+const xrPendingSources: XRInputSource[] = [];
+
+// Gesture tuning — global modifier state.
+const xrTuning = {
+  gainMultiplier: 1.0,  // 0.1 when fine-modifier active (future)
+};
+
+// View offset (modified by two-hand scale).
+// [LAW:one-source-of-truth] xrViewOffset is the single source for the user's
+// virtual viewpoint position relative to the simulation.
+const xrViewOffset = { x: 0, y: 0, z: -5 };
+let xrViewOffsetY = 0;
+
+// Two-hand scale shared state.
+const twoHandState = {
+  startDistance: 0,
+  startOffset: { x: 0, y: 0, z: 0 },
+};
+
+// Previous frame's pinch state for edge detection (gesture events).
+const xrPrevPinch: Record<XrHand, boolean> = { left: false, right: false };
+
+// ─── LEGACY UI STATE (bridges to current panel renderer until binding system lands) ──
+
 type XrUiElement = 'none' | 'prev' | 'next' | 'slider' | 'grab';
 
 interface XrUiSliderDef { key: string; label: string; min: number; max: number; }
@@ -4404,20 +4769,13 @@ const XR_UI_SLIDER_DEFS: Record<SimMode, XrUiSliderDef> = {
 };
 const XR_UI_MODE_ORDER: SimMode[] = ['physics', 'boids', 'physics_classic', 'fluid', 'parametric', 'reaction'];
 
+// Reticle/hover state consumed by the XR UI shader.
 const xrUiState = {
   hover:              'none' as XrUiElement,
   pressed:            'none' as XrUiElement,
-  pressingSource:     null as XRInputSource | null,
-  pendingPressSource: null as XRInputSource | null,
-  grabbed:            false,
-  // Last ray/panel intersection — drives the in-shader reticle. Only set when
-  // an XR input is pinching and its ray hits the panel plane.
   lastHitPx:          0,
   lastHitPy:          0,
   lastHitActive:      false,
-  // Panel drag state — recorded at grab-start so we can compute deltas.
-  grabDragOriginWorld: null as [number, number, number] | null,
-  grabDragOriginCenter: null as [number, number, number] | null,
 };
 
 function getXrSliderNormalized(): number {
@@ -4483,20 +4841,38 @@ function setXrSliderFromHit(px: number): void {
 function cycleXrUiMode(delta: number): void {
   const idx = XR_UI_MODE_ORDER.indexOf(state.mode);
   const next = XR_UI_MODE_ORDER[(idx + delta + XR_UI_MODE_ORDER.length) % XR_UI_MODE_ORDER.length];
-  // Route through the single mode-change enforcer so DOM, state, and
-  // simulation registry all move together — even while we're in XR.
   selectMode(next);
 }
 
-function getXrInputRay(frame: XRFrame, source: XRInputSource): { origin: number[]; dir: number[] } | null {
+// Synthetic pointer id for the single XR interaction channel — keeps the attractor
+// system's per-pointer-id contract uniform across desktop/mobile/XR.
+const XR_ATTRACTOR_POINTER_ID = -1;
+
+// ─── LOW-LEVEL HELPERS ───────────────────────────────────────────────────────
+
+function getXRTargetRayDirection(transform: XRRigidTransform) {
+  const m = transform.matrix;
+  return normalize3([-m[8], -m[9], -m[10]]);
+}
+
+function getXrInputRay(frame: XRFrame, source: XRInputSource): XrRay | null {
   if (!xrRefSpace) return null;
   const pose = frame.getPose(source.targetRaySpace, xrRefSpace);
   if (!pose) return null;
   const p = pose.transform.position;
-  return {
-    origin: [p.x, p.y, p.z],
-    dir: getXRTargetRayDirection(pose.transform),
-  };
+  return { origin: [p.x, p.y, p.z], dir: getXRTargetRayDirection(pose.transform) };
+}
+
+function getXrHandPosition(frame: XRFrame, source: XRInputSource): number[] | null {
+  if (!xrRefSpace) return null;
+  const pose = frame.getPose(source.gripSpace || source.targetRaySpace, xrRefSpace);
+  if (!pose) return null;
+  const p = pose.transform.position;
+  return [p.x, p.y, p.z];
+}
+
+function sourceToHand(source: XRInputSource): XrHand {
+  return source.handedness === 'left' ? 'left' : 'right';
 }
 
 function applyHitToUiState(hit: { px: number; py: number; element: XrUiElement } | null): void {
@@ -4509,175 +4885,389 @@ function applyHitToUiState(hit: { px: number; py: number; element: XrUiElement }
   }
 }
 
-function updateXrUiInput(frame: XRFrame): void {
-  // Pending press from selectstart — resolve it against the first available ray.
-  if (xrUiState.pendingPressSource) {
-    const src = xrUiState.pendingPressSource;
-    const ray = getXrInputRay(frame, src);
-    if (ray) {
-      const hit = hitTestXrUi(ray.origin, ray.dir);
-      xrUiState.pendingPressSource = null;
-      applyHitToUiState(hit);
-      if (hit && hit.element !== 'none') {
-        xrUiState.pressed = hit.element;
-        xrUiState.pressingSource = src;
-        xrUiState.hover = hit.element;
-        if (hit.element === 'slider') {
-          xrUiState.grabbed = true;
-          setXrSliderFromHit(hit.px);
-        } else if (hit.element === 'grab') {
-          // Record the initial world-space hit and panel center for delta drag.
-          const worldHit = xrRayPlaneHitWorld(ray.origin, ray.dir, XR_UI_PANEL_CENTER[2]);
-          if (worldHit) {
-            xrUiState.grabDragOriginWorld = worldHit;
-            xrUiState.grabDragOriginCenter = [XR_UI_PANEL_CENTER[0], XR_UI_PANEL_CENTER[1], XR_UI_PANEL_CENTER[2]];
+// ── REFERENCE SPACE MANAGEMENT ─────────────────────────────────────────────────
+function applyXrViewOffset(): void {
+  if (!xrBaseRefSpace) return;
+  type XRRigidTransformCtor = new (position: DOMPointInit, orientation?: DOMPointInit) => XRRigidTransform;
+  const RigidTransform = (globalThis as unknown as { XRRigidTransform: XRRigidTransformCtor }).XRRigidTransform;
+  xrRefSpace = xrBaseRefSpace.getOffsetReferenceSpace(
+    new RigidTransform({ x: xrViewOffset.x, y: xrViewOffset.y + xrViewOffsetY, z: xrViewOffset.z })
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// PIPELINE STAGE 1: UPDATE HAND FRAMES
+// ═══════════════════════════════════════════════════════════════════════════════
+// Resolve pending sources, update rays and positions for active pinches.
+
+function xrUpdateHandFrames(frame: XRFrame): void {
+  // Resolve pending sources: get their first ray and assign to a hand.
+  for (let i = xrPendingSources.length - 1; i >= 0; i--) {
+    const source = xrPendingSources[i];
+    const ray = getXrInputRay(frame, source);
+    if (!ray) continue; // no pose yet — keep pending
+    xrPendingSources.splice(i, 1);
+
+    const hand = sourceToHand(source);
+    const pos = getXrHandPosition(frame, source) ?? ray.origin;
+    const hf = xrHandFrames[hand];
+    hf.tracked = true;
+    hf.source = source;
+    hf.pinch.active = true;
+    hf.pinch.startTime = performance.now();
+    hf.pinch.origin = pos;
+    hf.pinch.current = pos;
+    // [LAW:one-source-of-truth] gazeRay frozen at pinch-start — authoritative for selection.
+    hf.gazeRay = { origin: [...ray.origin], dir: [...ray.dir] };
+    hf.currentRay = ray;
+  }
+
+  // Update current ray and position for all active hands.
+  for (const hand of ['left', 'right'] as XrHand[]) {
+    const hf = xrHandFrames[hand];
+    if (!hf.pinch.active || !hf.source) continue;
+    const ray = getXrInputRay(frame, hf.source);
+    if (ray) hf.currentRay = ray;
+    const pos = getXrHandPosition(frame, hf.source);
+    if (pos) hf.pinch.current = pos;
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// PIPELINE STAGE 2: DETECT GESTURES
+// ═══════════════════════════════════════════════════════════════════════════════
+// [LAW:dataflow-not-control-flow] Pure function of current + previous hand state.
+// Produces gesture events; no side effects.
+
+function xrDetectGestures(): XrGesture[] {
+  const gestures: XrGesture[] = [];
+  const leftActive = xrHandFrames.left.pinch.active;
+  const rightActive = xrHandFrames.right.pinch.active;
+  const bothActive = leftActive && rightActive;
+  const prevBoth = xrPrevPinch.left && xrPrevPinch.right;
+
+  for (const hand of ['left', 'right'] as XrHand[]) {
+    const hf = xrHandFrames[hand];
+    const wasActive = xrPrevPinch[hand];
+    const isActive = hf.pinch.active;
+
+    if (isActive && !wasActive && hf.gazeRay) {
+      gestures.push({ kind: 'pinch-start', hand, gazeRay: hf.gazeRay });
+    } else if (isActive && wasActive) {
+      gestures.push({ kind: 'pinch-hold', hand, dur: performance.now() - hf.pinch.startTime });
+    } else if (!isActive && wasActive) {
+      gestures.push({ kind: 'pinch-end', hand, dur: performance.now() - hf.pinch.startTime });
+    }
+  }
+
+  // Two-hand cooperative gestures.
+  if (bothActive && !prevBoth) {
+    gestures.push({ kind: 'two-hand-pinch-start' });
+  } else if (!bothActive && prevBoth) {
+    gestures.push({ kind: 'two-hand-pinch-end' });
+  }
+
+  // Snapshot for next frame's edge detection.
+  xrPrevPinch.left = leftActive;
+  xrPrevPinch.right = rightActive;
+
+  return gestures;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// PIPELINE STAGE 3: TRANSITION INTERACTION STATES
+// ═══════════════════════════════════════════════════════════════════════════════
+// Consumes gesture events and transitions per-hand InteractionState.
+
+function xrTransitionInteractions(gestures: XrGesture[], frame: XRFrame): void {
+  for (const g of gestures) {
+    switch (g.kind) {
+      case 'two-hand-pinch-start': {
+        // End any single-hand interactions to enter two-hand scale.
+        xrEndInteraction('left');
+        xrEndInteraction('right');
+        const leftPos = xrHandFrames.left.pinch.current;
+        const rightPos = xrHandFrames.right.pinch.current;
+        const d = sub3(leftPos, rightPos);
+        twoHandState.startDistance = Math.max(0.01, Math.sqrt(dot3(d, d)));
+        twoHandState.startOffset = { ...xrViewOffset };
+        xrInteractions.left = { kind: 'two-hand-scale' };
+        xrInteractions.right = { kind: 'two-hand-scale' };
+        break;
+      }
+      case 'two-hand-pinch-end': {
+        // End scale on both hands — remaining single hand may start a new
+        // interaction on next frame's pinch-hold.
+        if (xrInteractions.left.kind === 'two-hand-scale') xrInteractions.left = { kind: 'idle' };
+        if (xrInteractions.right.kind === 'two-hand-scale') xrInteractions.right = { kind: 'idle' };
+        break;
+      }
+      case 'pinch-start': {
+        // Two-hand scale is already handled above; don't start single-hand
+        // interactions if both hands are pinching.
+        if (xrHandFrames.left.pinch.active && xrHandFrames.right.pinch.active) break;
+        xrBeginSingleHandInteraction(g.hand, g.gazeRay, frame);
+        break;
+      }
+      case 'pinch-hold': {
+        // If idle (e.g. was in two-hand-scale, partner released, we're still pinching),
+        // start a single-hand interaction now.
+        if (xrInteractions[g.hand].kind === 'idle' && xrHandFrames[g.hand].gazeRay) {
+          const otherHand: XrHand = g.hand === 'left' ? 'right' : 'left';
+          if (!xrHandFrames[otherHand].pinch.active) {
+            xrBeginSingleHandInteraction(g.hand, xrHandFrames[g.hand].gazeRay!, frame);
           }
         }
-        return; // suppress sim interaction for this press
+        break;
       }
-      // Press is not on the UI — start sim interaction as normal.
-      setXRInteractionSource(src);
+      case 'pinch-end': {
+        xrEndInteraction(g.hand);
+        break;
+      }
+      // Stubs — consumed when hand-tracking features land:
+      case 'fine-modifier-on':  xrTuning.gainMultiplier = 0.1; break;
+      case 'fine-modifier-off': xrTuning.gainMultiplier = 1.0; break;
+      case 'palm-up':
+      case 'palm-down':
+      case 'wrist-flick':
+        break;
+    }
+  }
+}
+
+// Resolve a single-hand pinch-start into a concrete interaction.
+// [LAW:one-source-of-truth] gazeRay (frozen at pinch-start) is the sole authority for selection.
+function xrBeginSingleHandInteraction(hand: XrHand, gazeRay: XrRay, _frame: XRFrame): void {
+  const hit = hitTestXrUi(gazeRay.origin, gazeRay.dir);
+  if (hit && hit.element !== 'none') {
+    // UI interaction — pressing or dragging depending on element type.
+    if (hit.element === 'slider') {
+      setXrSliderFromHit(hit.px);
+      xrInteractions[hand] = {
+        kind: 'dragging', target: 'ui:slider', dragType: 'slider',
+        handOrigin: xrHandFrames[hand].pinch.origin,
+        panelOriginWorld: null, panelOriginCenter: null, hasSample: false,
+      };
+    } else if (hit.element === 'grab') {
+      const source = xrHandFrames[hand].source;
+      const worldHit = source ? xrRayPlaneHitWorld(gazeRay.origin, gazeRay.dir, XR_UI_PANEL_CENTER[2]) : null;
+      xrInteractions[hand] = {
+        kind: 'dragging', target: 'ui:grab', dragType: 'panel-grab',
+        handOrigin: xrHandFrames[hand].pinch.origin,
+        panelOriginWorld: worldHit ?? [0, 0, 0],
+        panelOriginCenter: [XR_UI_PANEL_CENTER[0], XR_UI_PANEL_CENTER[1], XR_UI_PANEL_CENTER[2]],
+        hasSample: false,
+      };
+    } else {
+      // prev/next button — pressing, commit on release.
+      xrInteractions[hand] = {
+        kind: 'pressing', target: `ui:${hit.element}`, element: hit.element,
+        startedAt: performance.now(),
+      };
+    }
+    xrUiState.pressed = hit.element;
+    xrUiState.hover = hit.element;
+    applyHitToUiState(hit);
+  } else {
+    // Space interaction — sim attractor/fluid.
+    xrInteractions[hand] = {
+      kind: 'dragging', target: 'sim', dragType: 'sim',
+      handOrigin: xrHandFrames[hand].pinch.origin,
+      panelOriginWorld: null, panelOriginCenter: null, hasSample: false,
+    };
+  }
+}
+
+// Clean up when a hand releases its pinch.
+function xrEndInteraction(hand: XrHand): void {
+  const ix = xrInteractions[hand];
+  switch (ix.kind) {
+    case 'pressing': {
+      // Commit button action if still hovering over it.
+      const hf = xrHandFrames[hand];
+      const ray = hf.currentRay;
+      const stillOnTarget = ray ? hitTestXrUi(ray.origin, ray.dir) : null;
+      if (stillOnTarget?.element === ix.element) {
+        if (ix.element === 'prev') cycleXrUiMode(-1);
+        else if (ix.element === 'next') cycleXrUiMode(1);
+      }
+      xrUiState.pressed = 'none';
+      xrUiState.hover = 'none';
+      xrUiState.lastHitActive = false;
+      break;
+    }
+    case 'dragging': {
+      if (ix.dragType === 'slider') {
+        syncUIFromState();
+        saveState();
+      }
+      if (ix.dragType === 'sim') {
+        setSimulationInteractionInactive();
+        releaseAttractor(XR_ATTRACTOR_POINTER_ID);
+      }
+      xrUiState.pressed = 'none';
+      xrUiState.hover = 'none';
+      xrUiState.lastHitActive = false;
+      break;
+    }
+    case 'two-hand-scale':
+    case 'hovering':
+    case 'idle':
+      break;
+  }
+  xrInteractions[hand] = { kind: 'idle' };
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// PIPELINE STAGE 4: APPLY SIDE EFFECTS
+// ═══════════════════════════════════════════════════════════════════════════════
+// Reads current InteractionState + HandFrame, produces outputs (state mutations,
+// reference space changes, UI state for rendering).
+
+function xrApplyInteractions(_frame: XRFrame): void {
+  // Two-hand scale: both hands cooperating.
+  if (xrInteractions.left.kind === 'two-hand-scale' && xrInteractions.right.kind === 'two-hand-scale') {
+    const d = sub3(xrHandFrames.left.pinch.current, xrHandFrames.right.pinch.current);
+    const dist = Math.sqrt(dot3(d, d));
+    if (twoHandState.startDistance >= 0.01) {
+      const ratio = dist / twoHandState.startDistance;
+      xrViewOffset.z = Math.max(-50, Math.min(-1, twoHandState.startOffset.z / ratio));
+      applyXrViewOffset();
     }
     return;
   }
 
-  // Active UI press — keep the hover synced and drag the slider if grabbed.
-  if (xrUiState.pressingSource) {
-    const ray = getXrInputRay(frame, xrUiState.pressingSource);
-    if (ray) {
-      // Panel drag: move center by world-space delta from the grab origin.
-      if (xrUiState.pressed === 'grab' && xrUiState.grabDragOriginWorld && xrUiState.grabDragOriginCenter) {
-        const worldHit = xrRayPlaneHitWorld(ray.origin, ray.dir, xrUiState.grabDragOriginCenter[2]);
-        if (worldHit) {
-          XR_UI_PANEL_CENTER[0] = xrUiState.grabDragOriginCenter[0] + (worldHit[0] - xrUiState.grabDragOriginWorld[0]);
-          XR_UI_PANEL_CENTER[1] = xrUiState.grabDragOriginCenter[1] + (worldHit[1] - xrUiState.grabDragOriginWorld[1]);
+  // Per-hand effects.
+  let anySimDrag = false;
+  for (const hand of ['left', 'right'] as XrHand[]) {
+    const ix = xrInteractions[hand];
+    const hf = xrHandFrames[hand];
+    if (ix.kind !== 'dragging' || !hf.source) continue;
+    const ray = hf.currentRay;
+    if (!ray) continue;
+
+    switch (ix.dragType) {
+      case 'slider': {
+        const hit = hitTestXrUi(ray.origin, ray.dir);
+        applyHitToUiState(hit);
+        xrUiState.hover = hit ? hit.element : 'none';
+        if (hit) setXrSliderFromHit(hit.px);
+        break;
+      }
+      case 'panel-grab': {
+        if (ix.panelOriginWorld && ix.panelOriginCenter) {
+          const worldHit = xrRayPlaneHitWorld(ray.origin, ray.dir, ix.panelOriginCenter[2]);
+          if (worldHit) {
+            XR_UI_PANEL_CENTER[0] = ix.panelOriginCenter[0] + (worldHit[0] - ix.panelOriginWorld[0]);
+            XR_UI_PANEL_CENTER[1] = ix.panelOriginCenter[1] + (worldHit[1] - ix.panelOriginWorld[1]);
+          }
         }
-        // During drag, reticle stays on the grab bar.
         xrUiState.lastHitPx = 0;
         xrUiState.lastHitPy = XR_UI_GRAB_Y;
         xrUiState.lastHitActive = true;
         xrUiState.hover = 'grab';
-        return;
+        break;
       }
-
-      const hit = hitTestXrUi(ray.origin, ray.dir);
-      applyHitToUiState(hit);
-      xrUiState.hover = hit ? hit.element : 'none';
-      if (xrUiState.grabbed && hit) {
-        setXrSliderFromHit(hit.px);
+      case 'sim': {
+        anySimDrag = true;
+        const worldPoint = state.mode === 'fluid'
+          ? intersectRayWithPlane(ray.origin, ray.dir, 0)
+          : closestPointOnRayToOrigin(ray.origin, ray.dir);
+        if (!worldPoint) {
+          setSimulationInteractionInactive();
+          ix.hasSample = false;
+          break;
+        }
+        state.mouse.down = true;
+        state.mouse.worldX = worldPoint[0];
+        state.mouse.worldY = worldPoint[1];
+        state.mouse.worldZ = worldPoint[2];
+        if (state.mode === 'fluid') {
+          const uv = worldToFluidUV(worldPoint);
+          if (!uv) { setSimulationInteractionInactive(); ix.hasSample = false; break; }
+          state.mouse.dx = ix.hasSample ? (uv[0] - state.mouse.x) * 10 : 0;
+          state.mouse.dy = ix.hasSample ? (uv[1] - state.mouse.y) * 10 : 0;
+          state.mouse.x = uv[0];
+          state.mouse.y = uv[1];
+        } else {
+          state.mouse.dx = 0; state.mouse.dy = 0;
+          state.mouse.x = worldPoint[0]; state.mouse.y = worldPoint[1];
+        }
+        if (state.mode === 'physics') {
+          if (state.pointerToAttractor.has(XR_ATTRACTOR_POINTER_ID)) {
+            moveAttractor(XR_ATTRACTOR_POINTER_ID, worldPoint);
+          } else {
+            createAttractor(XR_ATTRACTOR_POINTER_ID, worldPoint);
+          }
+        }
+        ix.hasSample = true;
+        break;
       }
-    } else {
-      xrUiState.lastHitActive = false;
     }
-    return;
   }
 
-  // Even without a UI press, show the reticle whenever an active pinch
-  // is aimed at the panel — this is the visual feedback loop the Vision Pro
-  // interaction model relies on (the ray only exists during a pinch).
-  if (xrInteractionSource) {
-    const ray = getXrInputRay(frame, xrInteractionSource);
-    if (ray) {
-      const hit = hitTestXrUi(ray.origin, ray.dir);
-      applyHitToUiState(hit);
-    } else {
-      xrUiState.lastHitActive = false;
-    }
-  } else {
-    xrUiState.lastHitActive = false;
+  // If no sim drag is active, ensure sim interaction state is clean.
+  if (!anySimDrag) {
+    // Only deactivate if we were previously active (avoid clobbering desktop mouse).
+    if (state.xrEnabled && state.mouse.down) setSimulationInteractionInactive();
   }
 
-  xrUiState.hover = 'none';
+  // Passive UI reticle: show reticle when any active pinch aims at the panel
+  // but the interaction is not a UI interaction.
+  for (const hand of ['left', 'right'] as XrHand[]) {
+    const ix = xrInteractions[hand];
+    if (ix.kind === 'dragging' && (ix.dragType === 'slider' || ix.dragType === 'panel-grab')) continue;
+    if (ix.kind === 'pressing') continue;
+    const hf = xrHandFrames[hand];
+    if (hf.pinch.active && hf.currentRay) {
+      const hit = hitTestXrUi(hf.currentRay.origin, hf.currentRay.dir);
+      if (hit) { applyHitToUiState(hit); break; }
+    }
+  }
 }
 
-// Synthetic pointer id for the single XR interaction channel — keeps the attractor
-// system's per-pointer-id contract uniform across desktop/mobile/XR.
-const XR_ATTRACTOR_POINTER_ID = -1;
+// ═══════════════════════════════════════════════════════════════════════════════
+// PIPELINE ENTRY POINT
+// ═══════════════════════════════════════════════════════════════════════════════
+// Called once per XR frame. Runs all four stages in order.
 
-function setXRInteractionSource(inputSource: XRInputSource | null) {
-  xrInteractionSource = inputSource;
-  xrInteractionHasSample = false;
+function xrInputStep(frame: XRFrame): void {
+  xrUpdateHandFrames(frame);
+  const gestures = xrDetectGestures();
+  xrTransitionInteractions(gestures, frame);
+  xrApplyInteractions(frame);
+}
+
+// Called by selectend to release a hand's pinch state.
+function xrOnSelectEnd(source: XRInputSource): void {
+  const hand = sourceToHand(source);
+  const hf = xrHandFrames[hand];
+  // Only clear if this source matches (avoids clearing the wrong hand if
+  // two sources map to the same hand due to 'none' handedness).
+  if (hf.source === source) {
+    hf.pinch.active = false;
+    hf.source = null;
+    hf.gazeRay = null;
+    hf.currentRay = null;
+    hf.tracked = false;
+  }
+  // Also remove from pending if it never resolved.
+  const pendingIdx = xrPendingSources.indexOf(source);
+  if (pendingIdx >= 0) xrPendingSources.splice(pendingIdx, 1);
+}
+
+// Reset all gesture state (called on session end).
+function xrResetInputState(): void {
+  xrPendingSources.length = 0;
+  xrHandFrames.left = makeIdleHandFrame('left');
+  xrHandFrames.right = makeIdleHandFrame('right');
+  xrInteractions.left = { kind: 'idle' };
+  xrInteractions.right = { kind: 'idle' };
+  xrPrevPinch.left = false;
+  xrPrevPinch.right = false;
+  xrTuning.gainMultiplier = 1.0;
   setSimulationInteractionInactive();
-  releaseAttractor(XR_ATTRACTOR_POINTER_ID); // harmless if none held
-}
-
-function getXRTargetRayDirection(transform: XRRigidTransform) {
-  const m = transform.matrix;
-  return normalize3([-m[8], -m[9], -m[10]]);
-}
-
-function updateXRSimulationInteraction(frame: XRFrame) {
-  // [LAW:single-enforcer] UI press owns the pinch exclusively — sim interaction
-  // must stay inactive so the two can't both respond to the same gesture.
-  if (xrUiState.pressed !== 'none') {
-    setSimulationInteractionInactive();
-    return;
-  }
-  const source = xrInteractionSource;
-  if (!source || !xrRefSpace) {
-    setSimulationInteractionInactive();
-    return;
-  }
-
-  const pose = frame.getPose(source.targetRaySpace, xrRefSpace);
-  if (!pose) {
-    setSimulationInteractionInactive();
-    xrInteractionHasSample = false;
-    return;
-  }
-
-  const origin = [
-    pose.transform.position.x,
-    pose.transform.position.y,
-    pose.transform.position.z,
-  ];
-  const dir = getXRTargetRayDirection(pose.transform);
-  const worldPoint = state.mode === 'fluid'
-    ? intersectRayWithPlane(origin, dir, 0)
-    : closestPointOnRayToOrigin(origin, dir);
-
-  if (!worldPoint) {
-    setSimulationInteractionInactive();
-    xrInteractionHasSample = false;
-    return;
-  }
-
-  // [LAW:one-source-of-truth] Vision Pro pinch reuses the existing state.mouse interaction channel so simulations read one canonical input representation.
-  state.mouse.down = true;
-  state.mouse.worldX = worldPoint[0];
-  state.mouse.worldY = worldPoint[1];
-  state.mouse.worldZ = worldPoint[2];
-
-  if (state.mode === 'fluid') {
-    const uv = worldToFluidUV(worldPoint);
-    if (!uv) {
-      setSimulationInteractionInactive();
-      xrInteractionHasSample = false;
-      return;
-    }
-    state.mouse.dx = xrInteractionHasSample ? (uv[0] - state.mouse.x) * 10 : 0;
-    state.mouse.dy = xrInteractionHasSample ? (uv[1] - state.mouse.y) * 10 : 0;
-    state.mouse.x = uv[0];
-    state.mouse.y = uv[1];
-  } else {
-    state.mouse.dx = 0;
-    state.mouse.dy = 0;
-    state.mouse.x = worldPoint[0];
-    state.mouse.y = worldPoint[1];
-  }
-
-  // [LAW:one-source-of-truth] pointerToAttractor is authoritative for "is there a held attractor for this pointer".
-  // Using that instead of xrInteractionHasSample means transient pose/tracking drops resume the same attractor
-  // instead of orphaning the charging one and spawning a new one.
-  if (state.mode === 'physics') {
-    if (state.pointerToAttractor.has(XR_ATTRACTOR_POINTER_ID)) {
-      moveAttractor(XR_ATTRACTOR_POINTER_ID, worldPoint);
-    } else {
-      createAttractor(XR_ATTRACTOR_POINTER_ID, worldPoint);
-    }
-  }
-
-  xrInteractionHasSample = true;
+  releaseAttractor(XR_ATTRACTOR_POINTER_ID);
 }
 
 function setupXRButton() {
@@ -4739,21 +5329,15 @@ async function toggleXR() {
       xrRefSpace = await xrSession.requestReferenceSpace('local');
     }
 
-    // The simulation geometry is centered at the world origin in a ~[-2, 2]³ cube.
-    // Without an offset, the user spawns inside it. We push the reference space back
-    // 5 units along -Z (the WebGL "forward" axis) so the simulation appears 5m ahead.
-    //
-    // With local-floor, the reference space origin is on the floor and the user's eyes
-    // are ~1.6m up. We also lift the reference space by that amount so the simulation
-    // center sits at roughly eye level rather than at the user's feet.
-    const offsetY = gotFloor ? 1.6 : 0;
-    // XRRigidTransform exists as a global constructor at runtime on visionOS but
-    // TypeScript's DOM lib only declares the interface, not the constructor value.
-    type XRRigidTransformCtor = new (position: DOMPointInit, orientation?: DOMPointInit) => XRRigidTransform;
-    const RigidTransform = (globalThis as unknown as { XRRigidTransform: XRRigidTransformCtor }).XRRigidTransform;
-    xrRefSpace = xrRefSpace!.getOffsetReferenceSpace(
-      new RigidTransform({ x: 0, y: offsetY, z: -5 })
-    );
+    // [LAW:one-source-of-truth] Store the base reference space before any offset.
+    // The gesture system rebuilds xrRefSpace from this base + xrViewOffset each frame
+    // that the two-hand scale gesture modifies the offset.
+    xrBaseRefSpace = xrRefSpace!;
+    xrViewOffsetY = gotFloor ? 1.6 : 0;
+    xrViewOffset.x = 0;
+    xrViewOffset.y = 0;
+    xrViewOffset.z = -5;
+    applyXrViewOffset();
 
     // XRGPUBinding is the WebXR–WebGPU bridge. It takes the XR session and the
     // GPUDevice (which must have been created with xrCompatible: true) and lets us
@@ -4841,45 +5425,14 @@ async function toggleXR() {
       logError('xr:updateRenderState', rsErr);
       throw rsErr;
     }
+    // [LAW:single-enforcer] All XR input enters through xrPendingSources.
+    // selectstart queues a source; xrUpdateHandFrames resolves it to a hand.
+    // selectend releases the hand via xrOnSelectEnd.
     xrSession.addEventListener('selectstart', (event) => {
-      const src = (event as XRInputSourceEvent).inputSource;
-      // Defer decision (UI vs sim interaction) until the next XRFrame when a
-      // real pose is available.
-      xrUiState.pendingPressSource = src;
+      xrPendingSources.push((event as XRInputSourceEvent).inputSource);
     });
     xrSession.addEventListener('selectend', (event) => {
-      const inputSource = (event as XRInputSourceEvent).inputSource;
-
-      // If this release matches an active UI press, trigger button action and clear state.
-      if (xrUiState.pressingSource === inputSource) {
-        const pressed = xrUiState.pressed;
-        const wasGrabbed = xrUiState.grabbed;
-        if (pressed === 'prev' && xrUiState.hover === 'prev') cycleXrUiMode(-1);
-        else if (pressed === 'next' && xrUiState.hover === 'next') cycleXrUiMode(1);
-        xrUiState.pressed = 'none';
-        xrUiState.pressingSource = null;
-        xrUiState.grabbed = false;
-        xrUiState.grabDragOriginWorld = null;
-        xrUiState.grabDragOriginCenter = null;
-        xrUiState.hover = 'none';
-        xrUiState.lastHitActive = false;
-        // Slider drag committed — persist and refresh the DOM so the value is
-        // correct when the user exits VR.
-        if (wasGrabbed) {
-          syncUIFromState();
-          saveState();
-        }
-        return;
-      }
-
-      // Pending press that never got resolved (released before first frame) — drop it.
-      if (xrUiState.pendingPressSource === inputSource) {
-        xrUiState.pendingPressSource = null;
-        return;
-      }
-
-      const sameSource = xrInteractionSource === inputSource;
-      setXRInteractionSource(sameSource ? null : xrInteractionSource);
+      xrOnSelectEnd((event as XRInputSourceEvent).inputSource);
     });
 
     btn.textContent = 'Exit VR';
@@ -4899,15 +5452,14 @@ async function toggleXR() {
       logInfo('xr', 'session ended', { finalPhase: currentGpuPhase, framesRendered: xrFrameCount });
       xrSession = null;
       xrRefSpace = null;
+      xrBaseRefSpace = null;
       xrBinding = null;
       xrLayer = null;
       state.xrEnabled = false;
-      // Reset the frame counter so the first-frame diagnostics re-emit on re-entry —
-      // critical for diagnosing intermittent XR issues where session 2 differs from 1.
       xrFrameCount = 0;
       currentGpuPhase = 'desktop';
       syncRenderConfig(canvasFormat, 1);
-      setXRInteractionSource(null);
+      xrResetInputState();
       btn.textContent = 'Enter VR';
       requestAnimationFrame(frame);
     });
@@ -4961,9 +5513,9 @@ function xrFrame(time: DOMHighResTimeStamp, xrFrameData: XRFrame) {
       return;
     }
 
-    // UI input runs first — it may claim a pinch that would otherwise drive the sim.
-    updateXrUiInput(xrFrameData);
-    updateXRSimulationInteraction(xrFrameData);
+    // [LAW:single-enforcer] Four-stage input pipeline:
+    // HandFrames → Gestures → InteractionState transitions → side effects.
+    xrInputStep(xrFrameData);
 
     currentGpuPhase = `xr:frame:${xrFrameCount}:createCommandEncoder`;
     const encoder = device.createCommandEncoder({ label: `xr-frame-${xrFrameCount}` });
@@ -5466,9 +6018,10 @@ function frame(now: DOMHighResTimeStamp) {
   try {
     const encoder = device.createCommandEncoder();
 
-    if (!state.paused) {
-      sim.compute(encoder);
-    }
+    // Debug stepping/skipping and normal play both funnel through runDebugCompute so the
+    // "when do we dispatch compute" decision is owned in one place.
+    runDebugCompute(sim, encoder);
+    updateDebugPanel();
 
     const prevIdx = postFx.sceneIdx;
     const currIdx = 1 - prevIdx;
@@ -5539,6 +6092,8 @@ function syncUIFromState() {
     t.classList.toggle('active', t.dataset.mode === state.mode));
   document.querySelectorAll<HTMLElement>('.param-group').forEach(g =>
     g.classList.toggle('active', g.dataset.mode === state.mode));
+  document.querySelectorAll<HTMLElement>('.debug-panel').forEach(g =>
+    g.classList.toggle('active', g.dataset.mode === state.mode));
 
   // Sync all sliders and dropdowns
   for (const modeStr of Object.keys(PARAM_DEFS)) {
@@ -5608,6 +6163,7 @@ async function main() {
   }
   setupShaderPanel();
   setupTimeReverseControls();
+  setupDebugControls();
   syncUIFromState();
   resizeCanvas();
   ensureSimulation();
