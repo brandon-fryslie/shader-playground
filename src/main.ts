@@ -5131,7 +5131,7 @@ function xrApplyInteractions(_frame: XRFrame): void {
     const dist = Math.sqrt(dot3(d, d));
     if (twoHandState.startDistance >= 0.01) {
       const ratio = dist / twoHandState.startDistance;
-      xrViewOffset.z = Math.max(-50, Math.min(-1, twoHandState.startOffset.z / ratio));
+      xrViewOffset.z = Math.max(-200, Math.min(-1, twoHandState.startOffset.z / ratio));
       applyXrViewOffset();
     }
     return;

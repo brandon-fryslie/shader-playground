@@ -57,7 +57,7 @@ Consumes gesture events and transitions per-hand `XrInteraction` state machines.
 
 Reads interaction state + hand frames, produces side effects:
 
-- **Two-hand scale** — ratio of current inter-hand distance to start distance scales the reference space Z offset (zoom range: 1m to 50m from simulation center)
+- **Two-hand scale** — ratio of current inter-hand distance to start distance scales the reference space Z offset (zoom range: 1m to 200m from simulation center)
 - **Slider drag** — updates simulation parameter via hit-test position on UI panel
 - **Panel grab** — translates the floating UI panel in world space
 - **Sim interaction** — drives `state.mouse` for fluid forces / N-body attractor placement
@@ -68,7 +68,7 @@ Pinch with both hands in empty space (not on the UI panel):
 
 - **Pull apart** → zoom in (viewpoint moves closer, Z offset decreases)
 - **Push together** → zoom out (viewpoint moves farther, Z offset increases)
-- **Range**: 1m to 50m from simulation center
+- **Range**: 1m to 200m from simulation center
 - **Mechanism**: modifies `xrViewOffset.z` and rebuilds the XR reference space via `getOffsetReferenceSpace()`
 
 The gesture is ratio-based (current distance / start distance), so absolute hand positions don't matter — only the relative change. Releasing either hand ends the zoom gesture; the remaining hand can start a new single-hand interaction.
