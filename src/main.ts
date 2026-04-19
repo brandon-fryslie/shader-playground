@@ -467,8 +467,11 @@ const state: AppState = {
 // This makes reverse→forward→reverse deterministic: rewinding to step K and replaying forward produces the
 // exact same force field unless the user branches (creates/moves a wand), in which case fresh journal entries
 // from step K onward overwrite the old history. No wall-clock leaks in; no cross-clock drift possible.
-// Step constants assume 60 fps nominal base dt (0.016s). Actual wall-clock duration varies with timeScale.
-const STEPS_PER_SECOND = 60;
+// Step constants derive from the canonical base dt (0.016s at timeScale=1) so "seconds" sliders convert
+// to the same step count the sim actually advances per simulated second. Actual wall-clock duration varies
+// with timeScale, but the slider is intentionally indexed to simulated time at timeScale=1.
+const PHYSICS_BASE_DT = 0.016;
+const STEPS_PER_SECOND = 1 / PHYSICS_BASE_DT; // 62.5 — matches `baseDt = 0.016 * timeScale` in physics compute
 const ATTRACTOR_CHARGE_STEPS = 90;          // ~1.5s at timeScale=1 — quadratic ramp to full strength
 const ATTRACTOR_MAX = 32;                   // hard cap; oldest evicted if exceeded
 const ATTRACTOR_MIN_DECAY_STEPS = 3;        // ~0.05s — lower bound so releases are always visible
@@ -497,9 +500,12 @@ function attractorDecaySteps(a: Attractor): number {
 }
 
 // [LAW:dataflow-not-control-flow] Strength is a pure function of (attractor, currentStep). The same quadratic
-// formula handles charging and decay; releaseStep < 0 selects which branch of the curve. No branches on wall time.
+// formula handles charging and decay; step ordering selects which branch of the curve. No branches on wall time.
+// The charging branch covers both "still held" (releaseStep < 0) and "held in the past, replaying before release"
+// (currentStep < releaseStep) — after rewinding below a release point, forward replay must see the charging curve
+// the original pass saw, otherwise the journal gets overwritten with 0 and reverse→forward→reverse diverges.
 function attractorStrength(a: Attractor, currentStep: number, ceiling: number): number {
-  if (a.releaseStep < 0) {
+  if (a.releaseStep < 0 || currentStep < a.releaseStep) {
     const stepsHeld = Math.max(0, currentStep - a.chargeStep);
     const t = Math.min(1, stepsHeld / ATTRACTOR_CHARGE_STEPS);
     return t * t * ceiling;
@@ -507,7 +513,6 @@ function attractorStrength(a: Attractor, currentStep: number, ceiling: number): 
   const peakT = Math.min(1, a.holdSteps / ATTRACTOR_CHARGE_STEPS);
   const peak = peakT * peakT * ceiling;
   const elapsedSteps = currentStep - a.releaseStep;
-  if (elapsedSteps < 0) return 0;
   const decaySteps = attractorDecaySteps(a);
   if (elapsedSteps >= decaySteps) return 0;
   const remaining = 1 - elapsedSteps / decaySteps;
@@ -2090,7 +2095,7 @@ function createPhysicsSimulation() {
       if (timeDirection < 0) simStep--;
 
       const p = state.physics;
-      const baseDt = 0.016 * state.fx.timeScale;
+      const baseDt = PHYSICS_BASE_DT * state.fx.timeScale;
       const dt = baseDt * timeDirection;
       // [LAW:one-source-of-truth] G normalized by sqrt(sourceCount) so gravity scales sub-linearly with particle count.
       f32[0] = dt;
@@ -5367,9 +5372,11 @@ function runComposite(encoder: GPUCommandEncoder, finalView: GPUTextureView, fin
   // [LAW:one-source-of-truth] Attractor strengths re-derived from the same state.attractors array the compute
   // shader reads (via the N-body param packing). Projection from world-space to screen UV happens once per
   // attractor, per frame — ~32 matrix ops max, dwarfed by the render pass itself.
-  // nowSec is only used for reticle pulsing (sin(time*5)); strength is sim-step-indexed to match the shader.
+  // nowSec is only used for reticle pulsing (sin(time*5)); strength uses the last-packed sim step so the
+  // composite overlay stays aligned with the shader params. Forward increments simStep at the end of compute,
+  // so the just-run step is simStep-1; reverse decrements at the top of compute, so the just-run step is simStep.
   const nowSec = performance.now() * 0.001;
-  const strengthStep = currentSimStep();
+  const strengthStep = Math.max(0, currentSimStep() - (currentTimeDirection() > 0 ? 1 : 0));
   const ceiling = (state.physics as { interactionStrength?: number }).interactionStrength ?? 1;
   const attractors = state.attractors;
   const attractorN = Math.min(attractors.length, ATTRACTOR_MAX);
