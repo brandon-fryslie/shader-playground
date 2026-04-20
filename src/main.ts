@@ -4540,6 +4540,9 @@ interface XrHandFrame {
   gazeRay: XrRay | null;
   // Hand-steered ray: updated each frame during pinch. Drives drag/scrub.
   currentRay: XrRay | null;
+  // Advisory hover laser ray. Synthesized from joints every frame when
+  // tracked. NEVER used for selection — that is gazeRay at pinch-start.
+  ray: XrRay | null;
   // Hand-tracking data: populated each frame when the XR runtime grants
   // hand-tracking and this handedness has an input source with `.hand`.
   // joints is null ONLY when no hand data is available at all; when non-null
@@ -4589,7 +4592,7 @@ function makeIdleHandFrame(hand: XrHand): XrHandFrame {
   return {
     hand, tracked: false, source: null,
     pinch: { active: false, startTime: 0, origin: [0, 0, 0], current: [0, 0, 0] },
-    gazeRay: null, currentRay: null,
+    gazeRay: null, currentRay: null, ray: null,
     palmNormal: null, joints: null, grip: null,
   };
 }
@@ -4834,6 +4837,7 @@ function xrUpdateHandFrames(frame: XRFrame): void {
     hf.joints = null;
     hf.palmNormal = null;
     hf.grip = null;
+    hf.ray = null;
   }
   if (xrRefSpace) {
     for (const source of frame.session.inputSources) {
@@ -4848,8 +4852,25 @@ function xrUpdateHandFrames(frame: XRFrame): void {
       hf.joints = joints;
       hf.palmNormal = computePalmNormal(joints, hand);
       hf.grip = computeGripState(joints);
+      // [LAW:one-source-of-truth] Advisory hover ray — synthesized always when
+      // the two source joints are present. NEVER drives selection (that's
+      // gazeRay) and NEVER drives drag (that's currentRay).
+      hf.ray = computeAdvisoryRay(joints);
     }
   }
+}
+
+// Advisory hand ray from joints. Origin at the index knuckle (feels natural
+// in VR — ray emanates from the pointing hand, not the wrist). Direction
+// along knuckle−wrist, so the ray points forward past the knuckle and
+// rotates with the hand independently of index-finger curl.
+function computeAdvisoryRay(joints: XrJoints): XrRay | null {
+  const wrist = joints['wrist'];
+  const knuckle = joints['index-finger-metacarpal'];
+  if (!wrist || !knuckle) return null;
+  const dir = normalize3(sub3(knuckle.position, wrist.position));
+  if (dir[0] === 0 && dir[1] === 0 && dir[2] === 0) return null;
+  return { origin: [...knuckle.position], dir };
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
