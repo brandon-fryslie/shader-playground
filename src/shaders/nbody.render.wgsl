@@ -22,8 +22,19 @@ struct Body {
   _pad2: f32,
 }
 
+// [LAW:one-source-of-truth] blurTime is sim-step-width × baseDt — the world-space time span a single
+// display frame represents. 0 for live play or manual stepping (particle renders as a circle).
+// Non-zero during skip: particle renders as a velocity-aligned capsule spanning (pos - vel*blurTime, pos).
+struct BlurParams {
+  blurTime: f32,
+  _pad0: f32,
+  _pad1: f32,
+  _pad2: f32,
+}
+
 @group(0) @binding(0) var<storage, read> bodies: array<Body>;
 @group(0) @binding(1) var<uniform> camera: Camera;
+@group(0) @binding(2) var<uniform> blurParams: BlurParams;
 
 struct VSOut {
   @builtin(position) pos: vec4f,
@@ -31,6 +42,10 @@ struct VSOut {
   @location(1) color: vec3f,
   @location(2) speed: f32,
   @location(3) interactProximity: f32,
+  // headU: fraction along the along-axis (uv.x space [-1,1]) where the particle's current position
+  // sits. At blurTime=0 this is 0 (center) and the quad shades as the original symmetric billboard.
+  // During skip this is >0 so intensity peaks at the head and fades toward the tail.
+  @location(4) headU: f32,
 }
 
 // [LAW:dataflow-not-control-flow] Per-particle hash gives deterministic visual jitter without storing extra data.
@@ -49,20 +64,42 @@ fn vs_main(@builtin(vertex_index) vid: u32, @builtin(instance_index) iid: u32) -
     vec2f(-1, 1), vec2f(1, -1), vec2f(1, 1)
   );
 
-  let viewPos = camera.view * vec4f(body.pos, 1.0);
+  let headView = camera.view * vec4f(body.pos, 1.0);
+  let tailView = camera.view * vec4f(body.pos - body.vel * blurParams.blurTime, 1.0);
+
   // [LAW:single-enforcer] Mass-to-appearance compression is owned here so physics mass stays authoritative while visuals remain legible.
   let massVisual = clamp(sqrt(max(body.mass, 0.02)) / 1.8, 0.08, 1.0);
   let speed = length(body.vel);
 
-  // Size: mass drives base size. Billboard scales with depth for constant pixel size, capped to avoid giant quads.
-  let depth = min(max(abs(viewPos.z), 0.05), 30.0);
+  // Particle radius in view space — scales with depth so on-screen pixel size stays consistent.
+  let depth = min(max(abs(headView.z), 0.05), 30.0);
   let pixelScale = 0.0055 * depth * mix(0.6, 3.0, massVisual);
-  let offset = quadPos[vid] * pixelScale;
-  let billboarded = viewPos + vec4f(offset, 0.0, 0.0);
+
+  // Capsule geometry: quad aligned from tail to head in view space, padded by pixelScale on each end
+  // (so the rounded caps show up). When tail == head (blurTime=0 or stationary), this collapses to
+  // a symmetric 2*pixelScale square — the original billboard.
+  let streakView = headView.xy - tailView.xy;
+  let streakLen = length(streakView);
+  // Small-ε guard so the normalize is stable at zero velocity; the resulting `along` only drives
+  // elongation, which is already ~0 in that case.
+  let along = select(vec2f(1.0, 0.0), streakView / max(streakLen, 0.0001), streakLen > 0.0001);
+  let across = vec2f(-along.y, along.x);
+
+  let centerView = (headView.xy + tailView.xy) * 0.5;
+  let halfLength = streakLen * 0.5 + pixelScale;
+  let halfWidth = pixelScale;
+
+  let q = quadPos[vid];
+  let offsetXY = along * (q.x * halfLength) + across * (q.y * halfWidth);
+  // Use head's z/w so depth-sorting of the capsule is consistent with a point at head position.
+  let billboarded = vec4f(centerView + offsetXY, headView.z, headView.w);
 
   var out: VSOut;
   out.pos = camera.proj * billboarded;
-  out.uv = quadPos[vid];
+  out.uv = q;
+  // Head's along-axis position within the quad's [-1,1] uv space. halfLength includes pixelScale padding,
+  // so at blurTime=0 the head is at 0 (center). At high blurTime, head approaches +1 (far end).
+  out.headU = (streakLen * 0.5) / halfLength;
 
   // Per-particle hashes for visual variety — deterministic, no extra storage.
   let hash0 = pcgHash(iid);
@@ -117,8 +154,22 @@ fn vs_main(@builtin(vertex_index) vid: u32, @builtin(instance_index) iid: u32) -
 }
 
 @fragment
-fn fs_main(@location(0) uv: vec2f, @location(1) color: vec3f, @location(2) speed: f32, @location(3) interactProximity: f32) -> @location(0) vec4f {
-  let dist = length(uv);
+fn fs_main(
+  @location(0) uv: vec2f,
+  @location(1) color: vec3f,
+  @location(2) speed: f32,
+  @location(3) interactProximity: f32,
+  @location(4) headU: f32,
+) -> @location(0) vec4f {
+  // Distance from the current particle "head" along the streak axis. For static particles (headU=0)
+  // this is just |uv.x|, so combined with |uv.y| it recovers the original radial distance and the
+  // original exp(-dist*22) core + exp(-dist*5) halo fall naturally out of the formulas below.
+  let dx = uv.x - headU;
+  // Along-axis distance: same magnitude past the head (stretch-direction) as away from it on the tail side.
+  // On the tail side, dx is negative; we compress by 0.5 so the trail extends visibly.
+  let dAlong = select(abs(dx), -dx * 0.5, dx < 0.0);
+  let dist = sqrt(dAlong * dAlong + uv.y * uv.y);
+
   if (dist > 1.0) { discard; }
   let core = exp(-dist * 22.0) * 1.8;
   let halo = exp(-dist * 5.0) * 0.45;

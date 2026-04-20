@@ -20,7 +20,6 @@ import SHADER_PARAMETRIC_RENDER from './shaders/parametric.render.wgsl?raw';
 import SHADER_REACTION_COMPUTE from './shaders/reaction.compute.wgsl?raw';
 import SHADER_REACTION_RENDER from './shaders/reaction.render.wgsl?raw';
 import SHADER_GRID from './shaders/grid.wgsl?raw';
-import SHADER_XR_UI from './shaders/xr.ui.wgsl?raw';
 import SHADER_POST_FADE from './shaders/post.fade.wgsl?raw';
 import SHADER_POST_DOWNSAMPLE from './shaders/post.downsample.wgsl?raw';
 import SHADER_POST_UPSAMPLE from './shaders/post.upsample.wgsl?raw';
@@ -1136,7 +1135,7 @@ async function initWebGPU(): Promise<boolean> {
   device.lost.then((info) => {
     logError('webgpu:device-lost', new Error(info.message), `reason=${info.reason}`);
     if (info.reason !== 'destroyed') {
-      initWebGPU().then(ok => { if (ok) { initGrid(); initXrUi(); ensureSimulation(); requestAnimationFrame(frame); } });
+      initWebGPU().then(ok => { if (ok) { initGrid(); ensureSimulation(); requestAnimationFrame(frame); } });
     }
   });
 
@@ -1221,211 +1220,6 @@ function renderGrid(pass: GPURenderPassEncoder, aspect: number, viewIndex = 0): 
   pass.setPipeline(gridPipeline);
   pass.setBindGroup(0, gridBGs[viewIndex]);
   pass.draw(30);
-}
-
-
-// ═══ XR UI PANEL RENDERER ═══
-// [LAW:one-source-of-truth] Panel layout constants live here; positions and widths
-// are mirrored in src/shaders/xr.ui.wgsl. Hit-test half-extents (e.g. GRAB_HALF_H)
-// are intentionally larger than the rendered SDF extents for easier targeting.
-const XR_UI_PANEL_CENTER: [number, number, number] = [0, -0.4, -3.5];
-const XR_UI_PANEL_SIZE: [number, number] = [1.2, 0.55];
-const XR_UI_BTN_Y = 0.16;
-const XR_UI_BTN_HALF_W = 0.18;  // wide enough for chevron + label side-by-side
-const XR_UI_BTN_HALF_H = 0.11;
-const XR_UI_PREV_X_FRAC = -0.30;  // aspect-relative
-const XR_UI_NEXT_X_FRAC =  0.30;
-const XR_UI_SLIDER_Y = -0.20;
-const XR_UI_SLIDER_HALF_H = 0.05;
-const XR_UI_SLIDER_HALF_W_FRAC = 0.42; // aspect-relative
-// Grab handle — thin pill at the bottom of the panel for repositioning.
-const XR_UI_GRAB_Y = -0.40;
-const XR_UI_GRAB_HALF_W = 0.10;
-const XR_UI_GRAB_HALF_H = 0.035;
-
-// Label atlas layout — single canvas with non-uniform sub-rects so each label's
-// aspect matches the panel rect it will be sampled into (no squishing):
-//   [0.00 .. 0.25] PREV   — sub-rect 256×128, aspect 2:1 (matches button label)
-//   [0.25 .. 0.50] NEXT   — sub-rect 256×128, aspect 2:1
-//   [0.50 .. 0.82] slider — sub-rect 328×128, aspect ~2.6:1 (matches slider label)
-//   [0.82 .. 1.00] FPS    — sub-rect 184×128, aspect ~1.4:1 (small stats readout)
-// u-ranges are mirrored in src/shaders/xr.ui.wgsl.
-const XR_UI_LABEL_CANVAS_W = 1024;
-const XR_UI_LABEL_CANVAS_H = 128;
-const XR_UI_LABEL_FONT_FAMILY = '-apple-system, BlinkMacSystemFont, "Segoe UI", "Helvetica Neue", sans-serif';
-
-let xrUiPipeline!: GPURenderPipeline;
-let xrUiBGs!: GPUBindGroup[];
-let xrUiCameraBuffer!: GPUBuffer;
-let xrUiParamsBuffer!: GPUBuffer;
-let xrUiLabelCanvas!: HTMLCanvasElement;
-let xrUiLabelCtx!: CanvasRenderingContext2D;
-let xrUiLabelTexture!: GPUTexture;
-let xrUiLabelSampler!: GPUSampler;
-let xrUiLabelCurrentMode: SimMode | null = null;
-
-function initXrUi() {
-  xrUiCameraBuffer?.destroy();
-  xrUiParamsBuffer?.destroy();
-  xrUiLabelTexture?.destroy();
-
-  xrUiCameraBuffer = device.createBuffer({ size: CAMERA_STRIDE * 2, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-  // UIParams layout (48 bytes): center.xyz, _pad, sizeX, sizeY, sliderValue, hover,
-  //                             hitX, hitY, hitActive, _pad2
-  xrUiParamsBuffer = device.createBuffer({ size: 48, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-
-  // Canvas used once per mode change to rasterize labels.
-  if (!xrUiLabelCanvas) {
-    xrUiLabelCanvas = document.createElement('canvas');
-    xrUiLabelCanvas.width = XR_UI_LABEL_CANVAS_W;
-    xrUiLabelCanvas.height = XR_UI_LABEL_CANVAS_H;
-    xrUiLabelCtx = xrUiLabelCanvas.getContext('2d')!;
-  }
-  xrUiLabelTexture = device.createTexture({
-    size: [XR_UI_LABEL_CANVAS_W, XR_UI_LABEL_CANVAS_H],
-    format: 'rgba8unorm',
-    usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.RENDER_ATTACHMENT,
-  });
-  xrUiLabelSampler = device.createSampler({
-    magFilter: 'linear',
-    minFilter: 'linear',
-  });
-  xrUiLabelCurrentMode = null; // force first render to upload
-
-  const uiModule = createShaderModuleChecked('xr.ui', SHADER_XR_UI);
-
-  const uiBGL = device.createBindGroupLayout({
-    entries: [
-      { binding: 0, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
-      { binding: 1, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
-      { binding: 2, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
-      { binding: 3, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'filtering' } },
-    ]
-  });
-
-  xrUiPipeline = device.createRenderPipeline({
-    layout: device.createPipelineLayout({ bindGroupLayouts: [uiBGL] }),
-    vertex: { module: uiModule, entryPoint: 'vs_main' },
-    fragment: {
-      module: uiModule, entryPoint: 'fs_main',
-      targets: [{
-        format: renderTargetFormat,
-        blend: {
-          color: { srcFactor: 'src-alpha', dstFactor: 'one-minus-src-alpha', operation: 'add' },
-          alpha: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha', operation: 'add' },
-        }
-      }]
-    },
-    primitive: { topology: 'triangle-list' },
-    // Depth-test disabled — the panel always renders on top of the sim.
-    depthStencil: { format: 'depth24plus', depthWriteEnabled: false, depthCompare: 'always' },
-    multisample: { count: renderSampleCount },
-  });
-
-  xrUiBGs = [0, 1].map(vi => device.createBindGroup({ layout: uiBGL, entries: [
-    { binding: 0, resource: { buffer: xrUiCameraBuffer, offset: vi * CAMERA_STRIDE, size: CAMERA_SIZE } },
-    { binding: 1, resource: { buffer: xrUiParamsBuffer } },
-    { binding: 2, resource: xrUiLabelTexture.createView() },
-    { binding: 3, resource: xrUiLabelSampler },
-  ]}));
-}
-
-// Draw a single label into a sub-rect, auto-shrinking the font until the text
-// fits with comfortable padding. Keeps long labels like "GRAVITY" from clipping.
-function drawXrUiLabel(
-  ctx: CanvasRenderingContext2D,
-  text: string,
-  rectX: number,
-  rectY: number,
-  rectW: number,
-  rectH: number,
-): void {
-  const maxTextW = rectW * 0.82;
-  const maxTextH = rectH * 0.75;
-  let fontPx = Math.floor(maxTextH);
-  ctx.font = `bold ${fontPx}px ${XR_UI_LABEL_FONT_FAMILY}`;
-  while (fontPx > 12 && ctx.measureText(text).width > maxTextW) {
-    fontPx -= 2;
-    ctx.font = `bold ${fontPx}px ${XR_UI_LABEL_FONT_FAMILY}`;
-  }
-  ctx.fillText(text, rectX + rectW / 2, rectY + rectH / 2);
-}
-
-// Rasterize label strings to the canvas and upload to the label texture.
-// Redraws when mode changes or FPS updates (once per second).
-let xrUiLastFps = -1;
-function updateXrUiLabels(mode: SimMode): void {
-  const fpsChanged = currentFps !== xrUiLastFps;
-  const modeChanged = xrUiLabelCurrentMode !== mode;
-  if (!modeChanged && !fpsChanged) return;
-  xrUiLabelCurrentMode = mode;
-  xrUiLastFps = currentFps;
-  const ctx = xrUiLabelCtx;
-  const w = XR_UI_LABEL_CANVAS_W;
-  const h = XR_UI_LABEL_CANVAS_H;
-  ctx.clearRect(0, 0, w, h);
-  ctx.fillStyle = 'white';
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'middle';
-
-  // Sub-rects (matching LABEL_*_U0/U1 in xr.ui.wgsl):
-  //   PREV:   [0.00w .. 0.25w]  → 256×128
-  //   NEXT:   [0.25w .. 0.50w]  → 256×128
-  //   SLIDER: [0.50w .. 0.82w]  → 328×128
-  //   FPS:    [0.82w .. 1.00w]  → 184×128
-  const quarter = w / 4;
-  const sliderEnd = Math.floor(w * 0.82);
-  const sliderW = sliderEnd - quarter * 2;
-  const fpsX = sliderEnd;
-  const fpsW = w - sliderEnd;
-  drawXrUiLabel(ctx, 'PREV', 0,             0, quarter,  h);
-  drawXrUiLabel(ctx, 'NEXT', quarter,       0, quarter,  h);
-  drawXrUiLabel(ctx, XR_UI_SLIDER_DEFS[mode].label.toUpperCase(),
-                      quarter * 2,   0, sliderW, h);
-  drawXrUiLabel(ctx, `${currentFps} FPS`, fpsX, 0, fpsW, h);
-
-  device.queue.copyExternalImageToTexture(
-    { source: xrUiLabelCanvas },
-    { texture: xrUiLabelTexture },
-    [w, h]
-  );
-}
-
-function xrUiHoverAsFloat(): number {
-  switch (xrUiState.hover) {
-    case 'prev':   return 1.0;
-    case 'next':   return 2.0;
-    case 'slider': return 3.0;
-    case 'grab':   return 4.0;
-    default:       return 0.0;
-  }
-}
-
-function renderXrUi(pass: GPURenderPassEncoder, aspect: number, viewIndex = 0): void {
-  // Rasterize labels on mode change (no-op otherwise).
-  updateXrUiLabels(state.mode);
-
-  device.queue.writeBuffer(xrUiCameraBuffer, viewIndex * CAMERA_STRIDE, getCameraUniformData(aspect));
-  // Only write params once per frame (both eyes see the same UI state).
-  if (viewIndex === 0) {
-    const data = new Float32Array(12);
-    data[0] = XR_UI_PANEL_CENTER[0];
-    data[1] = XR_UI_PANEL_CENTER[1];
-    data[2] = XR_UI_PANEL_CENTER[2];
-    data[3] = 0; // _pad1
-    data[4] = XR_UI_PANEL_SIZE[0];
-    data[5] = XR_UI_PANEL_SIZE[1];
-    data[6] = getXrSliderNormalized();
-    data[7] = xrUiHoverAsFloat();
-    data[8]  = xrUiState.lastHitPx;
-    data[9]  = xrUiState.lastHitPy;
-    data[10] = xrUiState.lastHitActive ? 1.0 : 0.0;
-    data[11] = 0; // _pad2
-    device.queue.writeBuffer(xrUiParamsBuffer, 0, data);
-  }
-  pass.setPipeline(xrUiPipeline);
-  pass.setBindGroup(0, xrUiBGs[viewIndex]);
-  pass.draw(6);
 }
 
 
@@ -1937,6 +1731,11 @@ function createPhysicsSimulation() {
   // 96 bytes of header + 32 × 16-byte Attractor = 608 bytes total.
   const paramsBuffer = device.createBuffer({ size: 608, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
   const cameraBuffer = device.createBuffer({ size: CAMERA_STRIDE * 2, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+  // [LAW:one-source-of-truth] Motion-blur parameter owned by the sim. Written by setBlurTime() per frame
+  // (non-zero only during skip). The shader's capsule geometry collapses to a point when blurTime=0.
+  const blurBuffer = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+  const blurScratch = new Float32Array(4);
+  device.queue.writeBuffer(blurBuffer, 0, blurScratch); // init to 0 so the first pre-skip frames render circles
   const computeModule = createShaderModuleChecked('nbody.compute', SHADER_NBODY_COMPUTE_EDIT || SHADER_NBODY_COMPUTE);
   const renderModule = createShaderModuleChecked('nbody.render', SHADER_NBODY_RENDER_EDIT || SHADER_NBODY_RENDER);
 
@@ -1987,6 +1786,7 @@ function createPhysicsSimulation() {
     entries: [
       { binding: 0, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: 'read-only-storage' } },
       { binding: 1, visibility: GPUShaderStage.VERTEX, buffer: { type: 'uniform' } },
+      { binding: 2, visibility: GPUShaderStage.VERTEX, buffer: { type: 'uniform' } },
     ]
   });
 
@@ -2028,6 +1828,7 @@ function createPhysicsSimulation() {
     [bufferA, bufferB].map(buf => device.createBindGroup({ layout: renderBGL, entries: [
       { binding: 0, resource: { buffer: buf } },
       { binding: 1, resource: { buffer: cameraBuffer, offset: vi * CAMERA_STRIDE, size: CAMERA_SIZE } },
+      { binding: 2, resource: { buffer: blurBuffer } },
     ]}))
   );
 
@@ -2077,6 +1878,13 @@ function createPhysicsSimulation() {
     setTimeDirection(dir: number) { timeDirection = dir; },
     getSimStep() { return simStep; },
     getTimeDirection() { return timeDirection; },
+    // [LAW:single-enforcer] blurTime is written here, nowhere else, so the per-frame blurBuffer state
+    // is always synchronized with whatever runDebugCompute computed for this frame.
+    setBlurTime(blurTime: number) {
+      blurScratch[0] = blurTime;
+      blurScratch[1] = 0; blurScratch[2] = 0; blurScratch[3] = 0;
+      device.queue.writeBuffer(blurBuffer, 0, blurScratch);
+    },
     getJournalCapacity() { return JOURNAL_CAPACITY; },
     getJournalHighWater() { return journalHighWater; },
 
@@ -2340,7 +2148,7 @@ function createPhysicsSimulation() {
 
     destroy() {
       bufferA.destroy(); bufferB.destroy();
-      paramsBuffer.destroy(); cameraBuffer.destroy();
+      paramsBuffer.destroy(); cameraBuffer.destroy(); blurBuffer.destroy();
       statsOutBuffer.destroy(); statsStaging.destroy(); statsParamsBuffer.destroy();
       diagStaging.destroy();
       destroyDepthRef(depthRef);
@@ -3617,32 +3425,63 @@ function setupTimeReverseControls() {
 
 interface DebugState {
   skipTarget: number | null;          // step we're seeking toward (null = not skipping)
-  skipChunk: number;                  // max compute dispatches per frame while skipping/stepping
+  targetStepsPerSec: number;          // "Target speed" selector: desired sim steps per wall-second (nominal)
+  adaptiveChunk: number;              // current budget-adapted per-frame chunk, updated from rAF-delta feedback
   breakAtStep: number | null;         // auto-pause when simStep reaches this (null = no breakpoint)
   manualStepsRemaining: number;       // discrete-step requests pending (from ±1 / ±10 / ±60 buttons)
   manualDirection: number;            // +1 or -1 for the manual-step queue
+  lastSkipDispatches: number;         // dispatches run in the most recent skip frame (for the feedback loop)
 }
 
+// Base dt nominal = 0.016s (matches nbody compute). At timeScale=1 → 60 sim-steps per second of live play.
+// targetStepsPerSec labels in UI: 60=1x, 600=10x, 6000=100x, 60000=1000x, 1e9=Max (GPU-capped).
 const debugState: DebugState = {
   skipTarget: null,
-  skipChunk: 200,
+  targetStepsPerSec: 6000,            // default 100x — visible time-lapse, smooth on typical hardware
+  adaptiveChunk: 8,                   // conservative start; rAF-delta feedback grows it quickly
   breakAtStep: null,
   manualStepsRemaining: 0,
   manualDirection: 1,
+  lastSkipDispatches: 0,
 };
+
+// rAF-delta thresholds for the adaptive-chunk feedback loop. 60fps target = 16.7ms/frame;
+// we grow the chunk below 14ms (genuine headroom) and shrink above 20ms (missed a frame).
+const DEBUG_FRAME_OVER_MS = 20.0;
+const DEBUG_FRAME_UNDER_MS = 14.0;
+const DEBUG_ADAPTIVE_GROW = 1.3;
+const DEBUG_ADAPTIVE_SHRINK = 0.7;
+const DEBUG_ADAPTIVE_MIN = 1;
+const DEBUG_ADAPTIVE_MAX = 5000;      // hard ceiling so runaway growth can't starve render
+
+// [LAW:single-enforcer] Adaptive chunk feedback is updated in exactly one place per frame so the
+// "what chunk should I use next" decision is authoritative. Call after each frame with rAF delta.
+function updateAdaptiveChunk(frameDeltaMs: number): void {
+  if (debugState.lastSkipDispatches <= 0) return; // only adapt during actual skip activity
+  const targetPerFrame = Math.max(1, Math.ceil(debugState.targetStepsPerSec / 60));
+  if (frameDeltaMs > DEBUG_FRAME_OVER_MS) {
+    debugState.adaptiveChunk = Math.max(DEBUG_ADAPTIVE_MIN, Math.floor(debugState.adaptiveChunk * DEBUG_ADAPTIVE_SHRINK));
+  } else if (frameDeltaMs < DEBUG_FRAME_UNDER_MS && debugState.adaptiveChunk < targetPerFrame) {
+    debugState.adaptiveChunk = Math.min(DEBUG_ADAPTIVE_MAX, Math.ceil(debugState.adaptiveChunk * DEBUG_ADAPTIVE_GROW));
+  }
+}
 
 // [LAW:single-enforcer] Clearing pending movement happens in exactly one place so "user pressed pause"
 // and "user pressed anything else that cancels" produce identical internal state.
 function cancelDebugMovement() {
   debugState.skipTarget = null;
   debugState.manualStepsRemaining = 0;
+  debugState.lastSkipDispatches = 0;
 }
 
 // [LAW:dataflow-not-control-flow] Same dispatch every frame — runDebugCompute always runs on physics mode.
-// What varies is (a) how many steps, (b) which direction — both pure functions of debugState + pause state.
-// Non-physics modes fall through to the simple "compute iff not paused" behavior.
+// What varies is (a) how many steps, (b) which direction, (c) whether motion blur is engaged — all pure
+// functions of debugState + pause state. Non-physics modes fall through to simple "compute iff not paused".
 function runDebugCompute(sim: Simulation, encoder: GPUCommandEncoder): void {
   if (state.mode !== 'physics' || !('getSimStep' in sim)) {
+    // Non-physics modes: no skip/step state applies; keep the adaptive-chunk feedback quiet so
+    // mode-switch-during-skip doesn't leave a stale lastSkipDispatches value driving adjustments.
+    debugState.lastSkipDispatches = 0;
     if (!state.paused) sim.compute(encoder);
     return;
   }
@@ -3650,34 +3489,57 @@ function runDebugCompute(sim: Simulation, encoder: GPUCommandEncoder): void {
     getSimStep(): number;
     getTimeDirection(): number;
     setTimeDirection(d: number): void;
+    setBlurTime(t: number): void;
   };
 
   let stepCount = 0;
   let overrideDir: number | null = null;
+  let skipActiveThisFrame = false;
 
   if (debugState.skipTarget !== null) {
     const delta = debugState.skipTarget - pSim.getSimStep();
     if (delta === 0) {
       debugState.skipTarget = null;
+      debugState.lastSkipDispatches = 0;
+      pSim.setBlurTime(0);  // clean frame at the target
       state.paused = true;
       syncPauseButtons();
       return;
     }
     overrideDir = delta > 0 ? 1 : -1;
-    stepCount = Math.min(debugState.skipChunk, Math.abs(delta));
+    // Chunk capped by: user's target-rate ceiling, GPU-budget feedback, and remaining distance.
+    const targetPerFrame = Math.max(1, Math.ceil(debugState.targetStepsPerSec / 60));
+    stepCount = Math.min(targetPerFrame, debugState.adaptiveChunk, Math.abs(delta));
+    skipActiveThisFrame = true;
   } else if (debugState.manualStepsRemaining > 0) {
     overrideDir = debugState.manualDirection;
-    stepCount = Math.min(debugState.skipChunk, debugState.manualStepsRemaining);
+    // Manual step buttons don't engage motion blur (plan: crisp frame-by-frame debugging).
+    // They still respect the adaptive chunk cap so clicking +60 doesn't stall the UI.
+    stepCount = Math.min(debugState.adaptiveChunk, debugState.manualStepsRemaining);
     debugState.manualStepsRemaining -= stepCount;
   } else if (!state.paused) {
-    stepCount = 1; // normal play respects whatever time direction the R-key has set
+    stepCount = 1;
   }
 
-  if (stepCount === 0) return;
+  if (stepCount === 0) {
+    // Not running compute this frame — ensure blurTime is 0 so a leftover skip value doesn't linger.
+    pSim.setBlurTime(0);
+    debugState.lastSkipDispatches = 0;
+    return;
+  }
 
   const savedDir = pSim.getTimeDirection();
   const needRestore = overrideDir !== null && overrideDir !== savedDir;
   if (needRestore) pSim.setTimeDirection(overrideDir!);
+
+  // Motion-blur time = world-time span of this frame's worth of steps, signed by direction.
+  // Reverse (overrideDir=-1 or savedDir=-1) produces negative blurTime; the shader's
+  // tail = pos - vel*blurTime then places the trail on the correct side.
+  const dirForBlur = overrideDir !== null ? overrideDir : savedDir;
+  const baseDt = 0.016 * state.fx.timeScale;
+  const blurTime = skipActiveThisFrame ? (stepCount * baseDt * dirForBlur) : 0;
+  pSim.setBlurTime(blurTime);
+  debugState.lastSkipDispatches = skipActiveThisFrame ? stepCount : 0;
 
   // NOTE: we do NOT check `state.paused` inside this loop. stepBy/initiateSkip deliberately
   // set state.paused=true to freeze normal play while the chunk executes, so a `paused` check
@@ -3693,6 +3555,8 @@ function runDebugCompute(sim: Simulation, encoder: GPUCommandEncoder): void {
       state.paused = true;
       syncPauseButtons();
       refreshBreakpointUI();
+      // Force clean final frame even if we hit the breakpoint mid-skip.
+      pSim.setBlurTime(0);
       break;
     }
     // Skip target: finish when we hit it.
@@ -3700,6 +3564,8 @@ function runDebugCompute(sim: Simulation, encoder: GPUCommandEncoder): void {
       debugState.skipTarget = null;
       state.paused = true;
       syncPauseButtons();
+      pSim.setBlurTime(0);
+      debugState.lastSkipDispatches = 0;
       break;
     }
   }
@@ -3740,9 +3606,12 @@ function setupDebugControls() {
 
   const chunkSelect = byId<HTMLSelectElement>('debug-skip-chunk');
   if (chunkSelect) {
+    // Initialize debugState from the rendered <select>'s selected option (keeps HTML + JS synced).
+    const initial = parseInt(chunkSelect.value, 10);
+    if (Number.isFinite(initial) && initial > 0) debugState.targetStepsPerSec = initial;
     chunkSelect.addEventListener('change', () => {
       const n = parseInt(chunkSelect.value, 10);
-      if (Number.isFinite(n) && n > 0) debugState.skipChunk = n;
+      if (Number.isFinite(n) && n > 0) debugState.targetStepsPerSec = n;
     });
   }
 
@@ -4242,10 +4111,10 @@ function setupMobileFab() {
     resetCurrentSim();
   });
 
-  // Mode stepper prev/next — reuse XR_UI_MODE_ORDER for consistent ordering
+  const modeOrder: SimMode[] = ['physics', 'boids', 'physics_classic', 'fluid', 'parametric', 'reaction'];
   const stepMode = (delta: number) => {
-    const idx = XR_UI_MODE_ORDER.indexOf(state.mode);
-    const next = XR_UI_MODE_ORDER[(idx + delta + XR_UI_MODE_ORDER.length) % XR_UI_MODE_ORDER.length];
+    const idx = modeOrder.indexOf(state.mode);
+    const next = modeOrder[(idx + delta + modeOrder.length) % modeOrder.length];
     selectMode(next);
   };
   document.getElementById('mode-prev')!.addEventListener('click', () => stepMode(-1));
@@ -4635,6 +4504,10 @@ let xrRefSpace: XRReferenceSpace | null = null;
 let xrBaseRefSpace: XRReferenceSpace | null = null; // pre-gesture reference space
 let xrBinding: XRGPUBinding | null = null;
 let xrLayer: XRProjectionLayer | null = null;
+// [LAW:one-source-of-truth] Single session-scoped flag for hand-tracking availability.
+// Set at session acquisition from xrSession.enabledFeatures; reset on session end.
+// Ticket .5 reads this to decide whether to attempt frame.getJointPose() queries.
+let xrHandTrackingAvailable = false;
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // XR INPUT PIPELINE
@@ -4667,10 +4540,49 @@ interface XrHandFrame {
   gazeRay: XrRay | null;
   // Hand-steered ray: updated each frame during pinch. Drives drag/scrub.
   currentRay: XrRay | null;
-  // Stubs for future hand-tracking features:
+  // Hand-tracking data: populated each frame when the XR runtime grants
+  // hand-tracking and this handedness has an input source with `.hand`.
+  // joints is null ONLY when no hand data is available at all; when non-null
+  // it has all 25 keys but individual entries may be null (joint occluded,
+  // off-sensor, not yet converged). palmNormal and grip are derived from
+  // joints and synchronized atomically by xrUpdateHandFrames.
   palmNormal: number[] | null;
-  joints: null;
-  grip: null;
+  joints: XrJoints | null;
+  grip: XrGripState | null;
+}
+
+// 25 hand joints per WebXR spec. Ordered canonically for readability.
+const XR_JOINT_NAMES = [
+  'wrist',
+  'thumb-metacarpal', 'thumb-phalanx-proximal', 'thumb-phalanx-distal', 'thumb-tip',
+  'index-finger-metacarpal', 'index-finger-phalanx-proximal', 'index-finger-phalanx-intermediate', 'index-finger-phalanx-distal', 'index-finger-tip',
+  'middle-finger-metacarpal', 'middle-finger-phalanx-proximal', 'middle-finger-phalanx-intermediate', 'middle-finger-phalanx-distal', 'middle-finger-tip',
+  'ring-finger-metacarpal', 'ring-finger-phalanx-proximal', 'ring-finger-phalanx-intermediate', 'ring-finger-phalanx-distal', 'ring-finger-tip',
+  'pinky-finger-metacarpal', 'pinky-finger-phalanx-proximal', 'pinky-finger-phalanx-intermediate', 'pinky-finger-phalanx-distal', 'pinky-finger-tip',
+] as const satisfies readonly XRHandJoint[];
+type XrJointName = typeof XR_JOINT_NAMES[number];
+
+interface XrJointPose {
+  position: number[];      // 3 floats, in xrRefSpace
+  orientation: number[];   // 4 floats (xyzw quaternion)
+  radius: number;          // meters
+}
+
+// [LAW:dataflow-not-control-flow] When non-null, the record always has all 25
+// keys; individual entries are null when a joint is momentarily un-tracked.
+// Consumers branch on null per-joint via data, not by skipping updates.
+type XrJoints = Record<XrJointName, XrJointPose | null>;
+
+// Thumb-tip-to-fingertip geometric contact flags. NOT authoritative for
+// selection — pinch.active (from XR selectstart/selectend) is the authoritative
+// pinch signal. grip.* exists to represent compound / geometric gestures that
+// can't be expressed by the system-recognized pinch alone. Per-flag nullability
+// so a single occluded finger-tip doesn't null unrelated flags.
+interface XrGripState {
+  thumbIndex:  boolean | null;
+  thumbMiddle: boolean | null;
+  thumbRing:   boolean | null;
+  thumbPinky:  boolean | null;
 }
 
 function makeIdleHandFrame(hand: XrHand): XrHandFrame {
@@ -4699,19 +4611,12 @@ type XrGesture =
 
 // Per-hand interaction state machine.
 // [LAW:one-source-of-truth] At most one interaction per hand.
-// Selection transitions (idle → pressing/dragging) use gazeRay at pinch-start.
-// Hover transitions (idle ↔ hovering) use currentRay (advisory).
+// [LAW:one-type-per-behavior] Single-hand dragging always means sim interaction.
+// Widget/UI interactions will add their own variants when the new panel lands.
 type XrInteraction =
   | { kind: 'idle' }
-  | { kind: 'hovering'; target: string }
-  | { kind: 'pressing'; target: string; element: XrUiElement; startedAt: number }
-  | { kind: 'dragging'; target: string;
+  | { kind: 'dragging';
       handOrigin: number[];      // hand position at drag start
-      dragType: 'slider' | 'panel-grab' | 'sim';
-      // Panel grab extras:
-      panelOriginWorld: [number, number, number] | null;
-      panelOriginCenter: [number, number, number] | null;
-      // Sim interaction extras:
       hasSample: boolean;
     }
   | { kind: 'two-hand-scale' };
@@ -4753,96 +4658,6 @@ const twoHandState = {
 
 // Previous frame's pinch state for edge detection (gesture events).
 const xrPrevPinch: Record<XrHand, boolean> = { left: false, right: false };
-
-// ─── LEGACY UI STATE (bridges to current panel renderer until binding system lands) ──
-
-type XrUiElement = 'none' | 'prev' | 'next' | 'slider' | 'grab';
-
-interface XrUiSliderDef { key: string; label: string; min: number; max: number; }
-const XR_UI_SLIDER_DEFS: Record<SimMode, XrUiSliderDef> = {
-  boids:           { key: 'maxSpeed',      label: 'Speed',   min: 0.1,  max: 10  },
-  physics:         { key: 'G',             label: 'Gravity', min: 0.05, max: 5.0 },
-  physics_classic: { key: 'G',             label: 'Gravity', min: 0.01, max: 100 },
-  fluid:           { key: 'forceStrength', label: 'Force',   min: 1,    max: 500 },
-  parametric:      { key: 'scale',         label: 'Scale',   min: 0.1,  max: 5   },
-  reaction:        { key: 'feed',          label: 'Feed',    min: 0.0,  max: 0.1 },
-};
-const XR_UI_MODE_ORDER: SimMode[] = ['physics', 'boids', 'physics_classic', 'fluid', 'parametric', 'reaction'];
-
-// Reticle/hover state consumed by the XR UI shader.
-const xrUiState = {
-  hover:              'none' as XrUiElement,
-  pressed:            'none' as XrUiElement,
-  lastHitPx:          0,
-  lastHitPy:          0,
-  lastHitActive:      false,
-};
-
-function getXrSliderNormalized(): number {
-  const def = XR_UI_SLIDER_DEFS[state.mode];
-  const modeParamsObj = state[state.mode] as unknown as Record<string, number>;
-  const v = modeParamsObj[def.key];
-  if (typeof v !== 'number') return 0;
-  return Math.max(0, Math.min(1, (v - def.min) / (def.max - def.min)));
-}
-
-// Ray-plane intersection against the panel (plane at z = center[2], normal = +Z).
-// Returns panel-local (px, py) in aspect-corrected coords and the element under the hit.
-function hitTestXrUi(origin: number[], dir: number[]): { px: number; py: number; element: XrUiElement } | null {
-  const [cx, cy, cz] = XR_UI_PANEL_CENTER;
-  const [sx, sy] = XR_UI_PANEL_SIZE;
-  if (Math.abs(dir[2]) < 1e-6) return null;
-  const t = (cz - origin[2]) / dir[2];
-  if (t < 0) return null;
-  const hitX = origin[0] + dir[0] * t;
-  const hitY = origin[1] + dir[1] * t;
-  const u = (hitX - cx) / sx + 0.5;
-  const v = (hitY - cy) / sy + 0.5;
-  if (u < 0 || u > 1 || v < 0 || v > 1) return null;
-
-  const aspect = sx / sy;
-  const px = (u - 0.5) * aspect;
-  const py = v - 0.5;
-
-  // Classify — box tests matching the shader's element placements.
-  let element: XrUiElement = 'none';
-  if (Math.abs(px - XR_UI_PREV_X_FRAC * aspect) < XR_UI_BTN_HALF_W && Math.abs(py - XR_UI_BTN_Y) < XR_UI_BTN_HALF_H) {
-    element = 'prev';
-  } else if (Math.abs(px - XR_UI_NEXT_X_FRAC * aspect) < XR_UI_BTN_HALF_W && Math.abs(py - XR_UI_BTN_Y) < XR_UI_BTN_HALF_H) {
-    element = 'next';
-  } else if (Math.abs(py - XR_UI_GRAB_Y) < XR_UI_GRAB_HALF_H && Math.abs(px) < XR_UI_GRAB_HALF_W) {
-    element = 'grab';
-  } else {
-    const trackHalfW = aspect * XR_UI_SLIDER_HALF_W_FRAC;
-    if (Math.abs(py - XR_UI_SLIDER_Y) < XR_UI_SLIDER_HALF_H && Math.abs(px) < trackHalfW + 0.04) {
-      element = 'slider';
-    }
-  }
-  return { px, py, element };
-}
-
-// Intersect a ray with a Z-plane, returning the world-space hit point.
-function xrRayPlaneHitWorld(origin: number[], dir: number[], planeZ: number): [number, number, number] | null {
-  if (Math.abs(dir[2]) < 1e-6) return null;
-  const t = (planeZ - origin[2]) / dir[2];
-  if (t < 0) return null;
-  return [origin[0] + dir[0] * t, origin[1] + dir[1] * t, planeZ];
-}
-
-function setXrSliderFromHit(px: number): void {
-  const aspect = XR_UI_PANEL_SIZE[0] / XR_UI_PANEL_SIZE[1];
-  const trackHalfW = aspect * XR_UI_SLIDER_HALF_W_FRAC;
-  const t = Math.max(0, Math.min(1, (px + trackHalfW) / (2 * trackHalfW)));
-  const def = XR_UI_SLIDER_DEFS[state.mode];
-  const modeParamsObj = state[state.mode] as unknown as Record<string, number>;
-  modeParamsObj[def.key] = def.min + (def.max - def.min) * t;
-}
-
-function cycleXrUiMode(delta: number): void {
-  const idx = XR_UI_MODE_ORDER.indexOf(state.mode);
-  const next = XR_UI_MODE_ORDER[(idx + delta + XR_UI_MODE_ORDER.length) % XR_UI_MODE_ORDER.length];
-  selectMode(next);
-}
 
 // Synthetic pointer id for the single XR interaction channel — keeps the attractor
 // system's per-pointer-id contract uniform across desktop/mobile/XR.
@@ -4891,14 +4706,70 @@ function findHandForSource(source: XRInputSource): XrHand | null {
   return null;
 }
 
-function applyHitToUiState(hit: { px: number; py: number; element: XrUiElement } | null): void {
-  if (hit) {
-    xrUiState.lastHitPx = hit.px;
-    xrUiState.lastHitPy = hit.py;
-    xrUiState.lastHitActive = true;
-  } else {
-    xrUiState.lastHitActive = false;
+// ── HAND-TRACKING HELPERS ──────────────────────────────────────────────────────
+// Thumb-tip-to-fingertip squared-distance threshold for grip.* flags. 3cm is
+// the common visionOS pinch-contact heuristic; squared so we skip the sqrt.
+const XR_GRIP_THRESHOLD_M = 0.03;
+const XR_GRIP_THRESHOLD_SQ = XR_GRIP_THRESHOLD_M * XR_GRIP_THRESHOLD_M;
+
+// Always returns a fully-populated record (all 25 keys). Entries are null when
+// `XRHand.get(name)` is missing or `frame.getJointPose` returns null for that
+// joint. [LAW:no-defensive-null-guards] The nulls here represent data state
+// ("joint not tracked right now"), not defensive guards around bugs.
+function queryHandJoints(frame: XRFrame, xrHand: XRHand, refSpace: XRReferenceSpace): XrJoints {
+  const joints = {} as XrJoints;
+  for (const name of XR_JOINT_NAMES) {
+    const space = xrHand.get(name);
+    const pose = space ? frame.getJointPose(space, refSpace) : null;
+    if (!pose) { joints[name] = null; continue; }
+    const p = pose.transform.position;
+    const o = pose.transform.orientation;
+    joints[name] = {
+      position: [p.x, p.y, p.z],
+      orientation: [o.x, o.y, o.z, o.w],
+      radius: pose.radius,
+    };
   }
+  return joints;
+}
+
+// Palm normal points OUT of the palm (away from the back of the hand).
+// Derived from wrist, index-finger-metacarpal, pinky-finger-metacarpal.
+// Sign convention differs by handedness: the same cross-product ordering
+// gives opposite normals for left vs right because the hands are mirrored.
+// Null ⟺ any of the three source joints is currently untracked OR the
+// metacarpals are collinear with the wrist (degenerate cross product).
+function computePalmNormal(joints: XrJoints, hand: XrHand): number[] | null {
+  const wrist = joints['wrist'];
+  const indexMeta = joints['index-finger-metacarpal'];
+  const pinkyMeta = joints['pinky-finger-metacarpal'];
+  if (!wrist || !indexMeta || !pinkyMeta) return null;
+  const toIndex = sub3(indexMeta.position, wrist.position);
+  const toPinky = sub3(pinkyMeta.position, wrist.position);
+  // Right hand: cross(toPinky, toIndex) points out of palm.
+  // Left  hand: cross(toIndex, toPinky) points out of palm (mirror).
+  const raw = hand === 'right' ? cross3(toPinky, toIndex) : cross3(toIndex, toPinky);
+  const n = normalize3(raw);
+  return (n[0] === 0 && n[1] === 0 && n[2] === 0) ? null : n;
+}
+
+// Thumb-tip-to-fingertip geometric grip flags. Outer null ⟺ thumb-tip is
+// untracked (no anchor for any distance). Per-flag null ⟺ that specific
+// finger-tip is untracked. A tracked finger-tip → boolean contact flag.
+function computeGripState(joints: XrJoints): XrGripState | null {
+  const thumb = joints['thumb-tip'];
+  if (!thumb) return null;
+  const flag = (tip: XrJointPose | null): boolean | null => {
+    if (!tip) return null;
+    const d = sub3(thumb.position, tip.position);
+    return dot3(d, d) < XR_GRIP_THRESHOLD_SQ;
+  };
+  return {
+    thumbIndex:  flag(joints['index-finger-tip']),
+    thumbMiddle: flag(joints['middle-finger-tip']),
+    thumbRing:   flag(joints['ring-finger-tip']),
+    thumbPinky:  flag(joints['pinky-finger-tip']),
+  };
 }
 
 // ── REFERENCE SPACE MANAGEMENT ─────────────────────────────────────────────────
@@ -4950,6 +4821,34 @@ function xrUpdateHandFrames(frame: XRFrame): void {
     if (ray) hf.currentRay = ray;
     const pos = getXrHandPosition(frame, hf.source);
     if (pos) hf.pinch.current = pos;
+  }
+
+  // Hand-tracking update. Independent of pinch state — a visible, non-pinching
+  // hand still produces joint poses. Clear-then-populate: the clear guarantees
+  // that when a hand disappears from inputSources, its joint fields become null
+  // on the next frame, so stale data can't linger. [LAW:one-source-of-truth]
+  // xrHandFrames[hand].joints is the sole store of per-frame joint data;
+  // palmNormal and grip are derived here and written atomically with joints.
+  for (const hand of ['left', 'right'] as XrHand[]) {
+    const hf = xrHandFrames[hand];
+    hf.joints = null;
+    hf.palmNormal = null;
+    hf.grip = null;
+  }
+  if (xrRefSpace) {
+    for (const source of frame.session.inputSources) {
+      // 'none' handedness (e.g. transient gaze input) has no left/right slot.
+      // !source.hand means the runtime didn't expose hand tracking for this
+      // source — the per-source data itself tells us to skip, no need to
+      // consult the session-level xrHandTrackingAvailable flag.
+      if (source.handedness === 'none' || !source.hand) continue;
+      const hand: XrHand = source.handedness;
+      const hf = xrHandFrames[hand];
+      const joints = queryHandJoints(frame, source.hand, xrRefSpace);
+      hf.joints = joints;
+      hf.palmNormal = computePalmNormal(joints, hand);
+      hf.grip = computeGripState(joints);
+    }
   }
 }
 
@@ -5056,82 +4955,24 @@ function xrTransitionInteractions(gestures: XrGesture[], frame: XRFrame): void {
 }
 
 // Resolve a single-hand pinch-start into a concrete interaction.
-// [LAW:one-source-of-truth] gazeRay (frozen at pinch-start) is the sole authority for selection.
-function xrBeginSingleHandInteraction(hand: XrHand, gazeRay: XrRay, _frame: XRFrame): void {
-  const hit = hitTestXrUi(gazeRay.origin, gazeRay.dir);
-  if (hit && hit.element !== 'none') {
-    // UI interaction — pressing or dragging depending on element type.
-    if (hit.element === 'slider') {
-      setXrSliderFromHit(hit.px);
-      xrInteractions[hand] = {
-        kind: 'dragging', target: 'ui:slider', dragType: 'slider',
-        handOrigin: xrHandFrames[hand].pinch.origin,
-        panelOriginWorld: null, panelOriginCenter: null, hasSample: false,
-      };
-    } else if (hit.element === 'grab') {
-      const source = xrHandFrames[hand].source;
-      const worldHit = source ? xrRayPlaneHitWorld(gazeRay.origin, gazeRay.dir, XR_UI_PANEL_CENTER[2]) : null;
-      xrInteractions[hand] = {
-        kind: 'dragging', target: 'ui:grab', dragType: 'panel-grab',
-        handOrigin: xrHandFrames[hand].pinch.origin,
-        panelOriginWorld: worldHit ?? [0, 0, 0],
-        panelOriginCenter: [XR_UI_PANEL_CENTER[0], XR_UI_PANEL_CENTER[1], XR_UI_PANEL_CENTER[2]],
-        hasSample: false,
-      };
-    } else {
-      // prev/next button — pressing, commit on release.
-      xrInteractions[hand] = {
-        kind: 'pressing', target: `ui:${hit.element}`, element: hit.element,
-        startedAt: performance.now(),
-      };
-    }
-    xrUiState.pressed = hit.element;
-    xrUiState.hover = hit.element;
-    applyHitToUiState(hit);
-  } else {
-    // Space interaction — sim attractor/fluid.
-    xrInteractions[hand] = {
-      kind: 'dragging', target: 'sim', dragType: 'sim',
-      handOrigin: xrHandFrames[hand].pinch.origin,
-      panelOriginWorld: null, panelOriginCenter: null, hasSample: false,
-    };
-  }
+// gazeRay is the sole authority for selection once the widget system lands.
+function xrBeginSingleHandInteraction(hand: XrHand, _gazeRay: XrRay, _frame: XRFrame): void {
+  xrInteractions[hand] = {
+    kind: 'dragging',
+    handOrigin: xrHandFrames[hand].pinch.origin,
+    hasSample: false,
+  };
 }
 
 // Clean up when a hand releases its pinch.
 function xrEndInteraction(hand: XrHand): void {
   const ix = xrInteractions[hand];
   switch (ix.kind) {
-    case 'pressing': {
-      // Commit button action if still hovering over it.
-      const hf = xrHandFrames[hand];
-      const ray = hf.currentRay;
-      const stillOnTarget = ray ? hitTestXrUi(ray.origin, ray.dir) : null;
-      if (stillOnTarget?.element === ix.element) {
-        if (ix.element === 'prev') cycleXrUiMode(-1);
-        else if (ix.element === 'next') cycleXrUiMode(1);
-      }
-      xrUiState.pressed = 'none';
-      xrUiState.hover = 'none';
-      xrUiState.lastHitActive = false;
+    case 'dragging':
+      setSimulationInteractionInactive();
+      releaseAttractor(XR_ATTRACTOR_POINTER_ID);
       break;
-    }
-    case 'dragging': {
-      if (ix.dragType === 'slider') {
-        syncUIFromState();
-        saveState();
-      }
-      if (ix.dragType === 'sim') {
-        setSimulationInteractionInactive();
-        releaseAttractor(XR_ATTRACTOR_POINTER_ID);
-      }
-      xrUiState.pressed = 'none';
-      xrUiState.hover = 'none';
-      xrUiState.lastHitActive = false;
-      break;
-    }
     case 'two-hand-scale':
-    case 'hovering':
     case 'idle':
       break;
   }
@@ -5167,7 +5008,7 @@ function xrApplyInteractions(_frame: XRFrame): void {
     return;
   }
 
-  // Per-hand effects.
+  // Per-hand sim interaction — attractor (physics) / force injection (fluid).
   let anySimDrag = false;
   for (const hand of ['left', 'right'] as XrHand[]) {
     const ix = xrInteractions[hand];
@@ -5176,90 +5017,45 @@ function xrApplyInteractions(_frame: XRFrame): void {
     const ray = hf.currentRay;
     if (!ray) continue;
 
-    switch (ix.dragType) {
-      case 'slider': {
-        const hit = hitTestXrUi(ray.origin, ray.dir);
-        applyHitToUiState(hit);
-        xrUiState.hover = hit ? hit.element : 'none';
-        if (hit) setXrSliderFromHit(hit.px);
-        break;
-      }
-      case 'panel-grab': {
-        if (ix.panelOriginWorld && ix.panelOriginCenter) {
-          const worldHit = xrRayPlaneHitWorld(ray.origin, ray.dir, ix.panelOriginCenter[2]);
-          if (worldHit) {
-            XR_UI_PANEL_CENTER[0] = ix.panelOriginCenter[0] + (worldHit[0] - ix.panelOriginWorld[0]);
-            XR_UI_PANEL_CENTER[1] = ix.panelOriginCenter[1] + (worldHit[1] - ix.panelOriginWorld[1]);
-          }
-        }
-        xrUiState.lastHitPx = 0;
-        xrUiState.lastHitPy = XR_UI_GRAB_Y;
-        xrUiState.lastHitActive = true;
-        xrUiState.hover = 'grab';
-        break;
-      }
-      case 'sim': {
-        anySimDrag = true;
-        const worldPoint = state.mode === 'fluid'
-          ? intersectRayWithPlane(ray.origin, ray.dir, 0)
-          : closestPointOnRayToOrigin(ray.origin, ray.dir);
-        if (!worldPoint) {
-          setSimulationInteractionInactive();
-          ix.hasSample = false;
-          break;
-        }
-        state.mouse.down = true;
-        state.mouse.worldX = worldPoint[0];
-        state.mouse.worldY = worldPoint[1];
-        state.mouse.worldZ = worldPoint[2];
-        if (state.mode === 'fluid') {
-          const uv = worldToFluidUV(worldPoint);
-          if (!uv) { setSimulationInteractionInactive(); ix.hasSample = false; break; }
-          state.mouse.dx = ix.hasSample ? (uv[0] - state.mouse.x) * 10 : 0;
-          state.mouse.dy = ix.hasSample ? (uv[1] - state.mouse.y) * 10 : 0;
-          state.mouse.x = uv[0];
-          state.mouse.y = uv[1];
-        } else {
-          state.mouse.dx = 0; state.mouse.dy = 0;
-          state.mouse.x = worldPoint[0]; state.mouse.y = worldPoint[1];
-        }
-        if (state.mode === 'physics') {
-          if (state.pointerToAttractor.has(XR_ATTRACTOR_POINTER_ID)) {
-            moveAttractor(XR_ATTRACTOR_POINTER_ID, worldPoint);
-          } else {
-            createAttractor(XR_ATTRACTOR_POINTER_ID, worldPoint);
-          }
-        }
-        ix.hasSample = true;
-        break;
+    anySimDrag = true;
+    const worldPoint = state.mode === 'fluid'
+      ? intersectRayWithPlane(ray.origin, ray.dir, 0)
+      : closestPointOnRayToOrigin(ray.origin, ray.dir);
+    if (!worldPoint) {
+      setSimulationInteractionInactive();
+      ix.hasSample = false;
+      continue;
+    }
+    state.mouse.down = true;
+    state.mouse.worldX = worldPoint[0];
+    state.mouse.worldY = worldPoint[1];
+    state.mouse.worldZ = worldPoint[2];
+    if (state.mode === 'fluid') {
+      const uv = worldToFluidUV(worldPoint);
+      if (!uv) { setSimulationInteractionInactive(); ix.hasSample = false; continue; }
+      state.mouse.dx = ix.hasSample ? (uv[0] - state.mouse.x) * 10 : 0;
+      state.mouse.dy = ix.hasSample ? (uv[1] - state.mouse.y) * 10 : 0;
+      state.mouse.x = uv[0];
+      state.mouse.y = uv[1];
+    } else {
+      state.mouse.dx = 0; state.mouse.dy = 0;
+      state.mouse.x = worldPoint[0]; state.mouse.y = worldPoint[1];
+    }
+    if (state.mode === 'physics') {
+      if (state.pointerToAttractor.has(XR_ATTRACTOR_POINTER_ID)) {
+        moveAttractor(XR_ATTRACTOR_POINTER_ID, worldPoint);
+      } else {
+        createAttractor(XR_ATTRACTOR_POINTER_ID, worldPoint);
       }
     }
+    ix.hasSample = true;
   }
 
-  // If no sim drag is active, ensure sim interaction state is clean.
+  // [LAW:single-enforcer] If no sim drag is active, ensure sim interaction state is clean.
   if (!anySimDrag) {
     // Only deactivate if we were previously active (avoid clobbering desktop mouse).
     if (state.xrEnabled && state.mouse.down) setSimulationInteractionInactive();
   }
-
-  // [LAW:dataflow-not-control-flow] Passive UI reticle: recompute fresh each
-  // frame so a previous hit never lingers when the pinch sweeps off-panel.
-  // uiOwns guards against stomping reticle state set by slider/panel-grab/pressing.
-  let uiOwns = false;
-  let passiveHit: { px: number; py: number; element: XrUiElement } | null = null;
-  for (const hand of ['left', 'right'] as XrHand[]) {
-    const ix = xrInteractions[hand];
-    if (ix.kind === 'pressing' ||
-        (ix.kind === 'dragging' && (ix.dragType === 'slider' || ix.dragType === 'panel-grab'))) {
-      uiOwns = true;
-      continue;
-    }
-    const hf = xrHandFrames[hand];
-    if (hf.pinch.active && hf.currentRay && !passiveHit) {
-      passiveHit = hitTestXrUi(hf.currentRay.origin, hf.currentRay.dir);
-    }
-  }
-  if (!uiOwns || passiveHit) applyHitToUiState(passiveHit);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -5345,12 +5141,19 @@ async function toggleXR() {
     currentGpuPhase = 'xr:requestSession';
     xrSession = await navigator.xr!.requestSession('immersive-vr', {
       requiredFeatures: ['webgpu'],
-      optionalFeatures: ['layers', 'local-floor'],
+      optionalFeatures: ['layers', 'local-floor', 'hand-tracking'],
     });
+    // [LAW:one-source-of-truth] enabledFeatures is the WebXR-spec synchronous report
+    // of which optional features the runtime granted. Missing/empty → false, which
+    // is the correct conservative default ([LAW:no-defensive-null-guards]).
+    const enabledFeatures = (xrSession as unknown as { enabledFeatures?: readonly string[] }).enabledFeatures;
+    xrHandTrackingAvailable = !!enabledFeatures && enabledFeatures.includes('hand-tracking');
     logInfo('xr', 'session acquired', {
       environmentBlendMode: (xrSession as unknown as { environmentBlendMode?: string }).environmentBlendMode,
       interactionMode: (xrSession as unknown as { interactionMode?: string }).interactionMode,
       visibilityState: (xrSession as unknown as { visibilityState?: string }).visibilityState,
+      handTracking: xrHandTrackingAvailable,
+      enabledFeatures,
     });
     let gotFloor = false;
     try {
@@ -5490,6 +5293,7 @@ async function toggleXR() {
       xrBaseRefSpace = null;
       xrBinding = null;
       xrLayer = null;
+      xrHandTrackingAvailable = false;
       state.xrEnabled = false;
       xrFrameCount = 0;
       currentGpuPhase = 'desktop';
@@ -5631,25 +5435,6 @@ function xrFrame(time: DOMHighResTimeStamp, xrFrameData: XRFrame) {
       currentGpuPhase = `xr:frame:${xrFrameCount}:sim.render(${state.mode},eye=${viewIndex})`;
       sim.render(encoder, postFx.scene[sceneIdx].createView(), null, viewIndex);
 
-      // Overlay the XR UI panel into the HDR scene so it picks up tonemap + bloom.
-      // Reuse the same depth view so UI z-tests against scene depth and the stored
-      // depth going to the compositor reflects the final pixel occlusion.
-      const uiPass = encoder.beginRenderPass({
-        colorAttachments: [{
-          view: postFx.scene[sceneIdx].createView(),
-          loadOp: 'load',
-          storeOp: 'store',
-        }],
-        depthStencilAttachment: {
-          view: xrDepthOverride ?? postFx.depth!.createView(),
-          depthLoadOp: 'load',
-          depthStoreOp: 'store',
-        },
-      });
-      currentGpuPhase = `xr:frame:${xrFrameCount}:xr-ui(eye=${viewIndex})`;
-      renderXrUi(uiPass, width / height, viewIndex);
-      uiPass.end();
-
       currentGpuPhase = `xr:frame:${xrFrameCount}:bloom(eye=${viewIndex})`;
       runBloomChain(encoder);
       currentGpuPhase = `xr:frame:${xrFrameCount}:composite(eye=${viewIndex})`;
@@ -5685,6 +5470,9 @@ function xrFrame(time: DOMHighResTimeStamp, xrFrameData: XRFrame) {
 let frameCount = 0;
 let fpsTime = 0;
 let currentFps = 0;
+// Last rAF timestamp — drives the adaptive-chunk feedback in debug skip. Seeded to -1 so the first
+// frame's delta isn't a garbage huge number that would shrink the chunk unnecessarily.
+let lastFrameTimestamp = -1;
 
 // --- GPU profiling ---
 // Two paths: GPU timestamp queries (Safari/Metal) give per-pass C/R/P breakdown.
@@ -6027,6 +5815,16 @@ function frame(now: DOMHighResTimeStamp) {
   if (state.xrEnabled) return; // XR has its own loop
 
   requestAnimationFrame(frame);
+
+  // Adaptive-chunk feedback: use the gap since the previous rAF as a proxy for "is the GPU keeping up?"
+  // When a heavy frame pushes delta over ~20ms, the adaptive chunk shrinks next frame; when we have
+  // headroom (delta < 14ms), it grows. This is the only place we measure frame pacing, so the feedback
+  // decision stays in one place (single-enforcer).
+  if (lastFrameTimestamp >= 0) {
+    updateAdaptiveChunk(now - lastFrameTimestamp);
+  }
+  lastFrameTimestamp = now;
+
   refreshThemeColors(now);
   resizeCanvas();
   // [LAW:single-enforcer] Attractor lifecycle is updated here, before any sim/compute/composite runs,
@@ -6181,7 +5979,6 @@ async function main() {
   });
 
   initGrid();
-  initXrUi();
   loadState();
   if (isMobile) applyMobileDefaults();
   syncThemeTransition(state.colorTheme);
