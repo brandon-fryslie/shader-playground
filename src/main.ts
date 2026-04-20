@@ -4871,8 +4871,24 @@ function getXrHandPosition(frame: XRFrame, source: XRInputSource): number[] | nu
   return [p.x, p.y, p.z];
 }
 
-function sourceToHand(source: XRInputSource): XrHand {
-  return source.handedness === 'left' ? 'left' : 'right';
+// [LAW:one-source-of-truth] Source→hand assignment is decided once at resolution
+// time (assignHandToSource) and then queried by identity (findHandForSource).
+// Deriving it from handedness on every call collapses multiple `'none'` sources
+// onto the same channel and can misroute selectend to the wrong hand.
+function assignHandToSource(source: XRInputSource): XrHand | null {
+  const leftFree = !xrHandFrames.left.source;
+  const rightFree = !xrHandFrames.right.source;
+  if (source.handedness === 'left' && leftFree) return 'left';
+  if (source.handedness === 'right' && rightFree) return 'right';
+  if (leftFree) return 'left';
+  if (rightFree) return 'right';
+  return null;
+}
+
+function findHandForSource(source: XRInputSource): XrHand | null {
+  if (xrHandFrames.left.source === source) return 'left';
+  if (xrHandFrames.right.source === source) return 'right';
+  return null;
 }
 
 function applyHitToUiState(hit: { px: number; py: number; element: XrUiElement } | null): void {
@@ -4908,7 +4924,11 @@ function xrUpdateHandFrames(frame: XRFrame): void {
     if (!ray) continue; // no pose yet — keep pending
     xrPendingSources.splice(i, 1);
 
-    const hand = sourceToHand(source);
+    // [LAW:one-source-of-truth] Identity-based channel assignment. Drops source
+    // if both channels occupied — WebXR spec permits more than two input sources
+    // but we only track left/right.
+    const hand = assignHandToSource(source);
+    if (!hand) continue;
     const pos = getXrHandPosition(frame, source) ?? ray.origin;
     const hf = xrHandFrames[hand];
     hf.tracked = true;
@@ -5116,6 +5136,16 @@ function xrEndInteraction(hand: XrHand): void {
       break;
   }
   xrInteractions[hand] = { kind: 'idle' };
+  // [LAW:one-source-of-truth] Release ray has now been consumed (if needed by
+  // the 'pressing' case above). Final hand-frame cleanup here — guarded on
+  // !pinch.active so two-hand-pinch-start (which calls xrEndInteraction with
+  // pinches still active) doesn't stomp live channels.
+  const hf = xrHandFrames[hand];
+  if (!hf.pinch.active) {
+    hf.source = null;
+    hf.gazeRay = null;
+    hf.currentRay = null;
+  }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -5212,18 +5242,24 @@ function xrApplyInteractions(_frame: XRFrame): void {
     if (state.xrEnabled && state.mouse.down) setSimulationInteractionInactive();
   }
 
-  // Passive UI reticle: show reticle when any active pinch aims at the panel
-  // but the interaction is not a UI interaction.
+  // [LAW:dataflow-not-control-flow] Passive UI reticle: recompute fresh each
+  // frame so a previous hit never lingers when the pinch sweeps off-panel.
+  // uiOwns guards against stomping reticle state set by slider/panel-grab/pressing.
+  let uiOwns = false;
+  let passiveHit: { px: number; py: number; element: XrUiElement } | null = null;
   for (const hand of ['left', 'right'] as XrHand[]) {
     const ix = xrInteractions[hand];
-    if (ix.kind === 'dragging' && (ix.dragType === 'slider' || ix.dragType === 'panel-grab')) continue;
-    if (ix.kind === 'pressing') continue;
+    if (ix.kind === 'pressing' ||
+        (ix.kind === 'dragging' && (ix.dragType === 'slider' || ix.dragType === 'panel-grab'))) {
+      uiOwns = true;
+      continue;
+    }
     const hf = xrHandFrames[hand];
-    if (hf.pinch.active && hf.currentRay) {
-      const hit = hitTestXrUi(hf.currentRay.origin, hf.currentRay.dir);
-      if (hit) { applyHitToUiState(hit); break; }
+    if (hf.pinch.active && hf.currentRay && !passiveHit) {
+      passiveHit = hitTestXrUi(hf.currentRay.origin, hf.currentRay.dir);
     }
   }
+  if (!uiOwns || passiveHit) applyHitToUiState(passiveHit);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -5239,16 +5275,15 @@ function xrInputStep(frame: XRFrame): void {
 }
 
 // Called by selectend to release a hand's pinch state.
+// [LAW:one-source-of-truth] Leaves source/gazeRay/currentRay intact so the
+// next xrFrame's gesture pipeline (pinch-end → xrEndInteraction) can use the
+// release ray for the button-press commit hit test. Final hand-frame cleanup
+// happens in xrEndInteraction once the release ray has been consumed.
 function xrOnSelectEnd(source: XRInputSource): void {
-  const hand = sourceToHand(source);
-  const hf = xrHandFrames[hand];
-  // Only clear if this source matches (avoids clearing the wrong hand if
-  // two sources map to the same hand due to 'none' handedness).
-  if (hf.source === source) {
+  const hand = findHandForSource(source);
+  if (hand) {
+    const hf = xrHandFrames[hand];
     hf.pinch.active = false;
-    hf.source = null;
-    hf.gazeRay = null;
-    hf.currentRay = null;
     hf.tracked = false;
   }
   // Also remove from pending if it never resolved.
