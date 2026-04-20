@@ -4618,6 +4618,12 @@ type XrGesture =
 // Widget/UI interactions will add their own variants when the new panel lands.
 type XrInteraction =
   | { kind: 'idle' }
+  // Pinch-start arrived but we haven't committed yet. If the other hand
+  // pinch-starts before deadline, both convert to two-hand-scale (simultaneous
+  // = zoom). If deadline passes alone, commit to single-hand dragging (sequential
+  // = independent attractor). [LAW:dataflow-not-control-flow] The variant encodes
+  // the "waiting to decide" state explicitly instead of branching on timestamps.
+  | { kind: 'pending'; deadline: number }
   | { kind: 'dragging';
       handOrigin: number[];      // hand position at drag start
       hasSample: boolean;
@@ -4662,9 +4668,16 @@ const twoHandState = {
 // Previous frame's pinch state for edge detection (gesture events).
 const xrPrevPinch: Record<XrHand, boolean> = { left: false, right: false };
 
-// Synthetic pointer id for the single XR interaction channel — keeps the attractor
-// system's per-pointer-id contract uniform across desktop/mobile/XR.
-const XR_ATTRACTOR_POINTER_ID = -1;
+// Synthetic pointer ids for XR attractors — one per hand so left and right
+// create independent concurrent attractors. [LAW:one-source-of-truth] Each hand
+// owns exactly one slot in the attractor system's pointer-id map.
+const XR_ATTRACTOR_POINTER_ID: Record<XrHand, number> = { left: -1, right: -2 };
+
+// Pinch-start simultaneity window. Two pinch-starts within this window are
+// treated as "both at once" → two-hand zoom. Outside the window, sequential
+// pinches each commit to their own attractor. First attractor carries this
+// latency — the tradeoff for disambiguating zoom from sequential-attractor.
+const XR_SIMUL_WINDOW_MS = 150;
 
 // ─── LOW-LEVEL HELPERS ───────────────────────────────────────────────────────
 
@@ -4919,51 +4932,47 @@ function xrDetectGestures(): XrGesture[] {
 // ═══════════════════════════════════════════════════════════════════════════════
 // Consumes gesture events and transitions per-hand InteractionState.
 
-function xrTransitionInteractions(gestures: XrGesture[], frame: XRFrame): void {
+function xrTransitionInteractions(gestures: XrGesture[], _frame: XRFrame): void {
   for (const g of gestures) {
     switch (g.kind) {
+      case 'pinch-start': {
+        // Enter pending window. Commit happens via two-hand-pinch-start
+        // (simultaneous → zoom) OR via the deadline pass below (sequential →
+        // single-hand attractor). No immediate dragging start.
+        xrInteractions[g.hand] = {
+          kind: 'pending',
+          deadline: performance.now() + XR_SIMUL_WINDOW_MS,
+        };
+        break;
+      }
       case 'two-hand-pinch-start': {
-        // End any single-hand interactions to enter two-hand scale.
-        xrEndInteraction('left');
-        xrEndInteraction('right');
-        const leftPos = xrHandFrames.left.pinch.current;
-        const rightPos = xrHandFrames.right.pinch.current;
-        const d = sub3(leftPos, rightPos);
-        twoHandState.startDistance = Math.max(0.01, Math.sqrt(dot3(d, d)));
-        twoHandState.startOffset = { ...xrViewOffset };
-        xrInteractions.left = { kind: 'two-hand-scale' };
-        xrInteractions.right = { kind: 'two-hand-scale' };
+        // Simultaneous pinch-start detected (both pinches within window →
+        // both hands are still 'pending'). Convert both to two-hand-scale.
+        // If either hand has already committed to 'dragging', the pinches
+        // were sequential — leave the committed hand alone and let the newly
+        // pending hand deadline-commit to its own attractor.
+        if (xrInteractions.left.kind === 'pending' && xrInteractions.right.kind === 'pending') {
+          const d = sub3(xrHandFrames.left.pinch.current, xrHandFrames.right.pinch.current);
+          twoHandState.startDistance = Math.max(0.01, Math.sqrt(dot3(d, d)));
+          twoHandState.startOffset = { ...xrViewOffset };
+          xrInteractions.left = { kind: 'two-hand-scale' };
+          xrInteractions.right = { kind: 'two-hand-scale' };
+        }
         break;
       }
       case 'two-hand-pinch-end': {
-        // End scale on both hands — remaining single hand may start a new
-        // interaction on next frame's pinch-hold.
+        // End scale on both hands. No auto-promote of the remaining pinching
+        // hand — user must release and re-pinch to create an attractor.
         if (xrInteractions.left.kind === 'two-hand-scale') xrInteractions.left = { kind: 'idle' };
         if (xrInteractions.right.kind === 'two-hand-scale') xrInteractions.right = { kind: 'idle' };
-        break;
-      }
-      case 'pinch-start': {
-        // Two-hand scale is already handled above; don't start single-hand
-        // interactions if both hands are pinching.
-        if (xrHandFrames.left.pinch.active && xrHandFrames.right.pinch.active) break;
-        xrBeginSingleHandInteraction(g.hand, g.gazeRay, frame);
-        break;
-      }
-      case 'pinch-hold': {
-        // If idle (e.g. was in two-hand-scale, partner released, we're still pinching),
-        // start a single-hand interaction now.
-        if (xrInteractions[g.hand].kind === 'idle' && xrHandFrames[g.hand].gazeRay) {
-          const otherHand: XrHand = g.hand === 'left' ? 'right' : 'left';
-          if (!xrHandFrames[otherHand].pinch.active) {
-            xrBeginSingleHandInteraction(g.hand, xrHandFrames[g.hand].gazeRay!, frame);
-          }
-        }
         break;
       }
       case 'pinch-end': {
         xrEndInteraction(g.hand);
         break;
       }
+      case 'pinch-hold':
+        break;
       // Stubs — consumed when hand-tracking features land:
       case 'fine-modifier-on':  xrTuning.gainMultiplier = 0.1; break;
       case 'fine-modifier-off': xrTuning.gainMultiplier = 1.0; break;
@@ -4973,16 +4982,22 @@ function xrTransitionInteractions(gestures: XrGesture[], frame: XRFrame): void {
         break;
     }
   }
-}
 
-// Resolve a single-hand pinch-start into a concrete interaction.
-// gazeRay is the sole authority for selection once the widget system lands.
-function xrBeginSingleHandInteraction(hand: XrHand, _gazeRay: XrRay, _frame: XRFrame): void {
-  xrInteractions[hand] = {
-    kind: 'dragging',
-    handOrigin: xrHandFrames[hand].pinch.origin,
-    hasSample: false,
-  };
+  // Deadline pass: any hand still 'pending' whose window has elapsed commits
+  // to single-hand dragging. Runs every frame — same code path whether the
+  // hand is fresh-pending (stays pending) or past-deadline (promotes).
+  // [LAW:dataflow-not-control-flow] Same work every frame; the state decides.
+  const now = performance.now();
+  for (const hand of ['left', 'right'] as XrHand[]) {
+    const ix = xrInteractions[hand];
+    if (ix.kind === 'pending' && now >= ix.deadline) {
+      xrInteractions[hand] = {
+        kind: 'dragging',
+        handOrigin: [...xrHandFrames[hand].pinch.origin],
+        hasSample: false,
+      };
+    }
+  }
 }
 
 // Clean up when a hand releases its pinch.
@@ -4991,8 +5006,9 @@ function xrEndInteraction(hand: XrHand): void {
   switch (ix.kind) {
     case 'dragging':
       setSimulationInteractionInactive();
-      releaseAttractor(XR_ATTRACTOR_POINTER_ID);
+      releaseAttractor(XR_ATTRACTOR_POINTER_ID[hand]);
       break;
+    case 'pending':
     case 'two-hand-scale':
     case 'idle':
       break;
@@ -5063,10 +5079,11 @@ function xrApplyInteractions(_frame: XRFrame): void {
       state.mouse.x = worldPoint[0]; state.mouse.y = worldPoint[1];
     }
     if (state.mode === 'physics') {
-      if (state.pointerToAttractor.has(XR_ATTRACTOR_POINTER_ID)) {
-        moveAttractor(XR_ATTRACTOR_POINTER_ID, worldPoint);
+      const pid = XR_ATTRACTOR_POINTER_ID[hand];
+      if (state.pointerToAttractor.has(pid)) {
+        moveAttractor(pid, worldPoint);
       } else {
-        createAttractor(XR_ATTRACTOR_POINTER_ID, worldPoint);
+        createAttractor(pid, worldPoint);
       }
     }
     ix.hasSample = true;
@@ -5119,7 +5136,8 @@ function xrResetInputState(): void {
   xrPrevPinch.right = false;
   xrTuning.gainMultiplier = 1.0;
   setSimulationInteractionInactive();
-  releaseAttractor(XR_ATTRACTOR_POINTER_ID);
+  releaseAttractor(XR_ATTRACTOR_POINTER_ID.left);
+  releaseAttractor(XR_ATTRACTOR_POINTER_ID.right);
 }
 
 function setupXRButton() {
