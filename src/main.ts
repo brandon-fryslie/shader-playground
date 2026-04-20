@@ -1731,6 +1731,11 @@ function createPhysicsSimulation() {
   // 96 bytes of header + 32 × 16-byte Attractor = 608 bytes total.
   const paramsBuffer = device.createBuffer({ size: 608, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
   const cameraBuffer = device.createBuffer({ size: CAMERA_STRIDE * 2, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+  // [LAW:one-source-of-truth] Motion-blur parameter owned by the sim. Written by setBlurTime() per frame
+  // (non-zero only during skip). The shader's capsule geometry collapses to a point when blurTime=0.
+  const blurBuffer = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+  const blurScratch = new Float32Array(4);
+  device.queue.writeBuffer(blurBuffer, 0, blurScratch); // init to 0 so the first pre-skip frames render circles
   const computeModule = createShaderModuleChecked('nbody.compute', SHADER_NBODY_COMPUTE_EDIT || SHADER_NBODY_COMPUTE);
   const renderModule = createShaderModuleChecked('nbody.render', SHADER_NBODY_RENDER_EDIT || SHADER_NBODY_RENDER);
 
@@ -1781,6 +1786,7 @@ function createPhysicsSimulation() {
     entries: [
       { binding: 0, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: 'read-only-storage' } },
       { binding: 1, visibility: GPUShaderStage.VERTEX, buffer: { type: 'uniform' } },
+      { binding: 2, visibility: GPUShaderStage.VERTEX, buffer: { type: 'uniform' } },
     ]
   });
 
@@ -1822,6 +1828,7 @@ function createPhysicsSimulation() {
     [bufferA, bufferB].map(buf => device.createBindGroup({ layout: renderBGL, entries: [
       { binding: 0, resource: { buffer: buf } },
       { binding: 1, resource: { buffer: cameraBuffer, offset: vi * CAMERA_STRIDE, size: CAMERA_SIZE } },
+      { binding: 2, resource: { buffer: blurBuffer } },
     ]}))
   );
 
@@ -1871,6 +1878,13 @@ function createPhysicsSimulation() {
     setTimeDirection(dir: number) { timeDirection = dir; },
     getSimStep() { return simStep; },
     getTimeDirection() { return timeDirection; },
+    // [LAW:single-enforcer] blurTime is written here, nowhere else, so the per-frame blurBuffer state
+    // is always synchronized with whatever runDebugCompute computed for this frame.
+    setBlurTime(blurTime: number) {
+      blurScratch[0] = blurTime;
+      blurScratch[1] = 0; blurScratch[2] = 0; blurScratch[3] = 0;
+      device.queue.writeBuffer(blurBuffer, 0, blurScratch);
+    },
     getJournalCapacity() { return JOURNAL_CAPACITY; },
     getJournalHighWater() { return journalHighWater; },
 
@@ -2134,7 +2148,7 @@ function createPhysicsSimulation() {
 
     destroy() {
       bufferA.destroy(); bufferB.destroy();
-      paramsBuffer.destroy(); cameraBuffer.destroy();
+      paramsBuffer.destroy(); cameraBuffer.destroy(); blurBuffer.destroy();
       statsOutBuffer.destroy(); statsStaging.destroy(); statsParamsBuffer.destroy();
       diagStaging.destroy();
       destroyDepthRef(depthRef);
@@ -3411,32 +3425,63 @@ function setupTimeReverseControls() {
 
 interface DebugState {
   skipTarget: number | null;          // step we're seeking toward (null = not skipping)
-  skipChunk: number;                  // max compute dispatches per frame while skipping/stepping
+  targetStepsPerSec: number;          // "Target speed" selector: desired sim steps per wall-second (nominal)
+  adaptiveChunk: number;              // current budget-adapted per-frame chunk, updated from rAF-delta feedback
   breakAtStep: number | null;         // auto-pause when simStep reaches this (null = no breakpoint)
   manualStepsRemaining: number;       // discrete-step requests pending (from ±1 / ±10 / ±60 buttons)
   manualDirection: number;            // +1 or -1 for the manual-step queue
+  lastSkipDispatches: number;         // dispatches run in the most recent skip frame (for the feedback loop)
 }
 
+// Base dt nominal = 0.016s (matches nbody compute). At timeScale=1 → 60 sim-steps per second of live play.
+// targetStepsPerSec labels in UI: 60=1x, 600=10x, 6000=100x, 60000=1000x, 1e9=Max (GPU-capped).
 const debugState: DebugState = {
   skipTarget: null,
-  skipChunk: 200,
+  targetStepsPerSec: 6000,            // default 100x — visible time-lapse, smooth on typical hardware
+  adaptiveChunk: 8,                   // conservative start; rAF-delta feedback grows it quickly
   breakAtStep: null,
   manualStepsRemaining: 0,
   manualDirection: 1,
+  lastSkipDispatches: 0,
 };
+
+// rAF-delta thresholds for the adaptive-chunk feedback loop. 60fps target = 16.7ms/frame;
+// we grow the chunk below 14ms (genuine headroom) and shrink above 20ms (missed a frame).
+const DEBUG_FRAME_OVER_MS = 20.0;
+const DEBUG_FRAME_UNDER_MS = 14.0;
+const DEBUG_ADAPTIVE_GROW = 1.3;
+const DEBUG_ADAPTIVE_SHRINK = 0.7;
+const DEBUG_ADAPTIVE_MIN = 1;
+const DEBUG_ADAPTIVE_MAX = 5000;      // hard ceiling so runaway growth can't starve render
+
+// [LAW:single-enforcer] Adaptive chunk feedback is updated in exactly one place per frame so the
+// "what chunk should I use next" decision is authoritative. Call after each frame with rAF delta.
+function updateAdaptiveChunk(frameDeltaMs: number): void {
+  if (debugState.lastSkipDispatches <= 0) return; // only adapt during actual skip activity
+  const targetPerFrame = Math.max(1, Math.ceil(debugState.targetStepsPerSec / 60));
+  if (frameDeltaMs > DEBUG_FRAME_OVER_MS) {
+    debugState.adaptiveChunk = Math.max(DEBUG_ADAPTIVE_MIN, Math.floor(debugState.adaptiveChunk * DEBUG_ADAPTIVE_SHRINK));
+  } else if (frameDeltaMs < DEBUG_FRAME_UNDER_MS && debugState.adaptiveChunk < targetPerFrame) {
+    debugState.adaptiveChunk = Math.min(DEBUG_ADAPTIVE_MAX, Math.ceil(debugState.adaptiveChunk * DEBUG_ADAPTIVE_GROW));
+  }
+}
 
 // [LAW:single-enforcer] Clearing pending movement happens in exactly one place so "user pressed pause"
 // and "user pressed anything else that cancels" produce identical internal state.
 function cancelDebugMovement() {
   debugState.skipTarget = null;
   debugState.manualStepsRemaining = 0;
+  debugState.lastSkipDispatches = 0;
 }
 
 // [LAW:dataflow-not-control-flow] Same dispatch every frame — runDebugCompute always runs on physics mode.
-// What varies is (a) how many steps, (b) which direction — both pure functions of debugState + pause state.
-// Non-physics modes fall through to the simple "compute iff not paused" behavior.
+// What varies is (a) how many steps, (b) which direction, (c) whether motion blur is engaged — all pure
+// functions of debugState + pause state. Non-physics modes fall through to simple "compute iff not paused".
 function runDebugCompute(sim: Simulation, encoder: GPUCommandEncoder): void {
   if (state.mode !== 'physics' || !('getSimStep' in sim)) {
+    // Non-physics modes: no skip/step state applies; keep the adaptive-chunk feedback quiet so
+    // mode-switch-during-skip doesn't leave a stale lastSkipDispatches value driving adjustments.
+    debugState.lastSkipDispatches = 0;
     if (!state.paused) sim.compute(encoder);
     return;
   }
@@ -3444,34 +3489,57 @@ function runDebugCompute(sim: Simulation, encoder: GPUCommandEncoder): void {
     getSimStep(): number;
     getTimeDirection(): number;
     setTimeDirection(d: number): void;
+    setBlurTime(t: number): void;
   };
 
   let stepCount = 0;
   let overrideDir: number | null = null;
+  let skipActiveThisFrame = false;
 
   if (debugState.skipTarget !== null) {
     const delta = debugState.skipTarget - pSim.getSimStep();
     if (delta === 0) {
       debugState.skipTarget = null;
+      debugState.lastSkipDispatches = 0;
+      pSim.setBlurTime(0);  // clean frame at the target
       state.paused = true;
       syncPauseButtons();
       return;
     }
     overrideDir = delta > 0 ? 1 : -1;
-    stepCount = Math.min(debugState.skipChunk, Math.abs(delta));
+    // Chunk capped by: user's target-rate ceiling, GPU-budget feedback, and remaining distance.
+    const targetPerFrame = Math.max(1, Math.ceil(debugState.targetStepsPerSec / 60));
+    stepCount = Math.min(targetPerFrame, debugState.adaptiveChunk, Math.abs(delta));
+    skipActiveThisFrame = true;
   } else if (debugState.manualStepsRemaining > 0) {
     overrideDir = debugState.manualDirection;
-    stepCount = Math.min(debugState.skipChunk, debugState.manualStepsRemaining);
+    // Manual step buttons don't engage motion blur (plan: crisp frame-by-frame debugging).
+    // They still respect the adaptive chunk cap so clicking +60 doesn't stall the UI.
+    stepCount = Math.min(debugState.adaptiveChunk, debugState.manualStepsRemaining);
     debugState.manualStepsRemaining -= stepCount;
   } else if (!state.paused) {
-    stepCount = 1; // normal play respects whatever time direction the R-key has set
+    stepCount = 1;
   }
 
-  if (stepCount === 0) return;
+  if (stepCount === 0) {
+    // Not running compute this frame — ensure blurTime is 0 so a leftover skip value doesn't linger.
+    pSim.setBlurTime(0);
+    debugState.lastSkipDispatches = 0;
+    return;
+  }
 
   const savedDir = pSim.getTimeDirection();
   const needRestore = overrideDir !== null && overrideDir !== savedDir;
   if (needRestore) pSim.setTimeDirection(overrideDir!);
+
+  // Motion-blur time = world-time span of this frame's worth of steps, signed by direction.
+  // Reverse (overrideDir=-1 or savedDir=-1) produces negative blurTime; the shader's
+  // tail = pos - vel*blurTime then places the trail on the correct side.
+  const dirForBlur = overrideDir !== null ? overrideDir : savedDir;
+  const baseDt = 0.016 * state.fx.timeScale;
+  const blurTime = skipActiveThisFrame ? (stepCount * baseDt * dirForBlur) : 0;
+  pSim.setBlurTime(blurTime);
+  debugState.lastSkipDispatches = skipActiveThisFrame ? stepCount : 0;
 
   // NOTE: we do NOT check `state.paused` inside this loop. stepBy/initiateSkip deliberately
   // set state.paused=true to freeze normal play while the chunk executes, so a `paused` check
@@ -3487,6 +3555,8 @@ function runDebugCompute(sim: Simulation, encoder: GPUCommandEncoder): void {
       state.paused = true;
       syncPauseButtons();
       refreshBreakpointUI();
+      // Force clean final frame even if we hit the breakpoint mid-skip.
+      pSim.setBlurTime(0);
       break;
     }
     // Skip target: finish when we hit it.
@@ -3494,6 +3564,8 @@ function runDebugCompute(sim: Simulation, encoder: GPUCommandEncoder): void {
       debugState.skipTarget = null;
       state.paused = true;
       syncPauseButtons();
+      pSim.setBlurTime(0);
+      debugState.lastSkipDispatches = 0;
       break;
     }
   }
@@ -3534,9 +3606,12 @@ function setupDebugControls() {
 
   const chunkSelect = byId<HTMLSelectElement>('debug-skip-chunk');
   if (chunkSelect) {
+    // Initialize debugState from the rendered <select>'s selected option (keeps HTML + JS synced).
+    const initial = parseInt(chunkSelect.value, 10);
+    if (Number.isFinite(initial) && initial > 0) debugState.targetStepsPerSec = initial;
     chunkSelect.addEventListener('change', () => {
       const n = parseInt(chunkSelect.value, 10);
-      if (Number.isFinite(n) && n > 0) debugState.skipChunk = n;
+      if (Number.isFinite(n) && n > 0) debugState.targetStepsPerSec = n;
     });
   }
 
@@ -4465,10 +4540,49 @@ interface XrHandFrame {
   gazeRay: XrRay | null;
   // Hand-steered ray: updated each frame during pinch. Drives drag/scrub.
   currentRay: XrRay | null;
-  // Stubs for future hand-tracking features:
+  // Hand-tracking data: populated each frame when the XR runtime grants
+  // hand-tracking and this handedness has an input source with `.hand`.
+  // joints is null ONLY when no hand data is available at all; when non-null
+  // it has all 25 keys but individual entries may be null (joint occluded,
+  // off-sensor, not yet converged). palmNormal and grip are derived from
+  // joints and synchronized atomically by xrUpdateHandFrames.
   palmNormal: number[] | null;
-  joints: null;
-  grip: null;
+  joints: XrJoints | null;
+  grip: XrGripState | null;
+}
+
+// 25 hand joints per WebXR spec. Ordered canonically for readability.
+const XR_JOINT_NAMES = [
+  'wrist',
+  'thumb-metacarpal', 'thumb-phalanx-proximal', 'thumb-phalanx-distal', 'thumb-tip',
+  'index-finger-metacarpal', 'index-finger-phalanx-proximal', 'index-finger-phalanx-intermediate', 'index-finger-phalanx-distal', 'index-finger-tip',
+  'middle-finger-metacarpal', 'middle-finger-phalanx-proximal', 'middle-finger-phalanx-intermediate', 'middle-finger-phalanx-distal', 'middle-finger-tip',
+  'ring-finger-metacarpal', 'ring-finger-phalanx-proximal', 'ring-finger-phalanx-intermediate', 'ring-finger-phalanx-distal', 'ring-finger-tip',
+  'pinky-finger-metacarpal', 'pinky-finger-phalanx-proximal', 'pinky-finger-phalanx-intermediate', 'pinky-finger-phalanx-distal', 'pinky-finger-tip',
+] as const satisfies readonly XRHandJoint[];
+type XrJointName = typeof XR_JOINT_NAMES[number];
+
+interface XrJointPose {
+  position: number[];      // 3 floats, in xrRefSpace
+  orientation: number[];   // 4 floats (xyzw quaternion)
+  radius: number;          // meters
+}
+
+// [LAW:dataflow-not-control-flow] When non-null, the record always has all 25
+// keys; individual entries are null when a joint is momentarily un-tracked.
+// Consumers branch on null per-joint via data, not by skipping updates.
+type XrJoints = Record<XrJointName, XrJointPose | null>;
+
+// Thumb-tip-to-fingertip geometric contact flags. NOT authoritative for
+// selection — pinch.active (from XR selectstart/selectend) is the authoritative
+// pinch signal. grip.* exists to represent compound / geometric gestures that
+// can't be expressed by the system-recognized pinch alone. Per-flag nullability
+// so a single occluded finger-tip doesn't null unrelated flags.
+interface XrGripState {
+  thumbIndex:  boolean | null;
+  thumbMiddle: boolean | null;
+  thumbRing:   boolean | null;
+  thumbPinky:  boolean | null;
 }
 
 function makeIdleHandFrame(hand: XrHand): XrHandFrame {
@@ -4592,6 +4706,72 @@ function findHandForSource(source: XRInputSource): XrHand | null {
   return null;
 }
 
+// ── HAND-TRACKING HELPERS ──────────────────────────────────────────────────────
+// Thumb-tip-to-fingertip squared-distance threshold for grip.* flags. 3cm is
+// the common visionOS pinch-contact heuristic; squared so we skip the sqrt.
+const XR_GRIP_THRESHOLD_M = 0.03;
+const XR_GRIP_THRESHOLD_SQ = XR_GRIP_THRESHOLD_M * XR_GRIP_THRESHOLD_M;
+
+// Always returns a fully-populated record (all 25 keys). Entries are null when
+// `XRHand.get(name)` is missing or `frame.getJointPose` returns null for that
+// joint. [LAW:no-defensive-null-guards] The nulls here represent data state
+// ("joint not tracked right now"), not defensive guards around bugs.
+function queryHandJoints(frame: XRFrame, xrHand: XRHand, refSpace: XRReferenceSpace): XrJoints {
+  const joints = {} as XrJoints;
+  for (const name of XR_JOINT_NAMES) {
+    const space = xrHand.get(name);
+    const pose = space ? frame.getJointPose(space, refSpace) : null;
+    if (!pose) { joints[name] = null; continue; }
+    const p = pose.transform.position;
+    const o = pose.transform.orientation;
+    joints[name] = {
+      position: [p.x, p.y, p.z],
+      orientation: [o.x, o.y, o.z, o.w],
+      radius: pose.radius,
+    };
+  }
+  return joints;
+}
+
+// Palm normal points OUT of the palm (away from the back of the hand).
+// Derived from wrist, index-finger-metacarpal, pinky-finger-metacarpal.
+// Sign convention differs by handedness: the same cross-product ordering
+// gives opposite normals for left vs right because the hands are mirrored.
+// Null ⟺ any of the three source joints is currently untracked OR the
+// metacarpals are collinear with the wrist (degenerate cross product).
+function computePalmNormal(joints: XrJoints, hand: XrHand): number[] | null {
+  const wrist = joints['wrist'];
+  const indexMeta = joints['index-finger-metacarpal'];
+  const pinkyMeta = joints['pinky-finger-metacarpal'];
+  if (!wrist || !indexMeta || !pinkyMeta) return null;
+  const toIndex = sub3(indexMeta.position, wrist.position);
+  const toPinky = sub3(pinkyMeta.position, wrist.position);
+  // Right hand: cross(toPinky, toIndex) points out of palm.
+  // Left  hand: cross(toIndex, toPinky) points out of palm (mirror).
+  const raw = hand === 'right' ? cross3(toPinky, toIndex) : cross3(toIndex, toPinky);
+  const n = normalize3(raw);
+  return (n[0] === 0 && n[1] === 0 && n[2] === 0) ? null : n;
+}
+
+// Thumb-tip-to-fingertip geometric grip flags. Outer null ⟺ thumb-tip is
+// untracked (no anchor for any distance). Per-flag null ⟺ that specific
+// finger-tip is untracked. A tracked finger-tip → boolean contact flag.
+function computeGripState(joints: XrJoints): XrGripState | null {
+  const thumb = joints['thumb-tip'];
+  if (!thumb) return null;
+  const flag = (tip: XrJointPose | null): boolean | null => {
+    if (!tip) return null;
+    const d = sub3(thumb.position, tip.position);
+    return dot3(d, d) < XR_GRIP_THRESHOLD_SQ;
+  };
+  return {
+    thumbIndex:  flag(joints['index-finger-tip']),
+    thumbMiddle: flag(joints['middle-finger-tip']),
+    thumbRing:   flag(joints['ring-finger-tip']),
+    thumbPinky:  flag(joints['pinky-finger-tip']),
+  };
+}
+
 // ── REFERENCE SPACE MANAGEMENT ─────────────────────────────────────────────────
 function applyXrViewOffset(): void {
   if (!xrBaseRefSpace) return;
@@ -4641,6 +4821,34 @@ function xrUpdateHandFrames(frame: XRFrame): void {
     if (ray) hf.currentRay = ray;
     const pos = getXrHandPosition(frame, hf.source);
     if (pos) hf.pinch.current = pos;
+  }
+
+  // Hand-tracking update. Independent of pinch state — a visible, non-pinching
+  // hand still produces joint poses. Clear-then-populate: the clear guarantees
+  // that when a hand disappears from inputSources, its joint fields become null
+  // on the next frame, so stale data can't linger. [LAW:one-source-of-truth]
+  // xrHandFrames[hand].joints is the sole store of per-frame joint data;
+  // palmNormal and grip are derived here and written atomically with joints.
+  for (const hand of ['left', 'right'] as XrHand[]) {
+    const hf = xrHandFrames[hand];
+    hf.joints = null;
+    hf.palmNormal = null;
+    hf.grip = null;
+  }
+  if (xrRefSpace) {
+    for (const source of frame.session.inputSources) {
+      // 'none' handedness (e.g. transient gaze input) has no left/right slot.
+      // !source.hand means the runtime didn't expose hand tracking for this
+      // source — the per-source data itself tells us to skip, no need to
+      // consult the session-level xrHandTrackingAvailable flag.
+      if (source.handedness === 'none' || !source.hand) continue;
+      const hand: XrHand = source.handedness;
+      const hf = xrHandFrames[hand];
+      const joints = queryHandJoints(frame, source.hand, xrRefSpace);
+      hf.joints = joints;
+      hf.palmNormal = computePalmNormal(joints, hand);
+      hf.grip = computeGripState(joints);
+    }
   }
 }
 
@@ -5262,6 +5470,9 @@ function xrFrame(time: DOMHighResTimeStamp, xrFrameData: XRFrame) {
 let frameCount = 0;
 let fpsTime = 0;
 let currentFps = 0;
+// Last rAF timestamp — drives the adaptive-chunk feedback in debug skip. Seeded to -1 so the first
+// frame's delta isn't a garbage huge number that would shrink the chunk unnecessarily.
+let lastFrameTimestamp = -1;
 
 // --- GPU profiling ---
 // Two paths: GPU timestamp queries (Safari/Metal) give per-pass C/R/P breakdown.
@@ -5604,6 +5815,16 @@ function frame(now: DOMHighResTimeStamp) {
   if (state.xrEnabled) return; // XR has its own loop
 
   requestAnimationFrame(frame);
+
+  // Adaptive-chunk feedback: use the gap since the previous rAF as a proxy for "is the GPU keeping up?"
+  // When a heavy frame pushes delta over ~20ms, the adaptive chunk shrinks next frame; when we have
+  // headroom (delta < 14ms), it grows. This is the only place we measure frame pacing, so the feedback
+  // decision stays in one place (single-enforcer).
+  if (lastFrameTimestamp >= 0) {
+    updateAdaptiveChunk(now - lastFrameTimestamp);
+  }
+  lastFrameTimestamp = now;
+
   refreshThemeColors(now);
   resizeCanvas();
   // [LAW:single-enforcer] Attractor lifecycle is updated here, before any sim/compute/composite runs,
