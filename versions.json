@@ -4,15 +4,22 @@
     {
       "version": "pr-11",
       "ref": "refs/pull/11/merge",
-      "sha": "8214425f5e2373bb6faf5ae24d0cfa711c05203d",
-      "timestamp": "2026-04-20T01:35:28.337Z",
+      "sha": "75bcb86b6096834cecd17392195bf7b2007de77b",
+      "timestamp": "2026-04-20T01:51:14.504Z",
       "commits": [
         {
-          "sha": "8214425f5e2373bb6faf5ae24d0cfa711c05203d",
+          "sha": "75bcb86b6096834cecd17392195bf7b2007de77b",
           "author_name": "Brandon Fryslie",
           "author_email": "530235+brandon-fryslie@users.noreply.github.com",
-          "timestamp": "2026-04-19T19:35:10-06:00",
-          "message": "Merge d794f0a5150c54f6caae6bc0d0adda9222a8c317 into dfd20103999f38d7cff8f398609a62793ea45c39\n"
+          "timestamp": "2026-04-20T01:50:59Z",
+          "message": "Merge ed83bc75e82233d3675eb70b9ae5b3f402653a88 into dfd20103999f38d7cff8f398609a62793ea45c39\n"
+        },
+        {
+          "sha": "ed83bc75e82233d3675eb70b9ae5b3f402653a88",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-19T19:50:48-06:00",
+          "message": "fix(xr): preserve release ray through pinch-end; drop stale reticle; track sources by identity\n\nThree XR input-pipeline bugs surfaced during review:\n\n1. sourceToHand collapsed 'none'-handedness sources onto the 'right'\n   channel, preventing two transient-pointer sources from cooperating\n   as independent hands. Replace with assignHandToSource (one-time,\n   free-channel aware) + findHandForSource (identity lookup).\n\n2. xrOnSelectEnd was nulling hf.currentRay immediately, but\n   xrEndInteraction runs a frame later (via pinch-end gesture) and\n   needs that ray for the button-press commit hit test. Result:\n   button presses never committed. Leave hf.source/gazeRay/currentRay\n   intact in xrOnSelectEnd; final cleanup happens inside\n   xrEndInteraction once the release ray has been consumed, guarded\n   on !pinch.active to avoid stomping live channels during\n   two-hand-pinch-start.\n\n3. Passive UI reticle scan only called applyHitToUiState on hit,\n   leaving lastHitActive true from a previous frame when the pinch\n   swept off-panel. Recompute fresh each frame: first passive hit\n   wins, null clears. uiOwns guards against stomping reticle state\n   set by slider/panel-grab/pressing handlers.\n\nGenerated with [Claude Code](https://claude.ai/code)\nvia [Happy](https://happy.engineering)\n\nCo-Authored-By: Claude <noreply@anthropic.com>\nCo-Authored-By: Happy <yesreply@happy.engineering>\n"
         },
         {
           "sha": "d794f0a5150c54f6caae6bc0d0adda9222a8c317",
