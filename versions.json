@@ -2,6 +2,49 @@
   "schema": 2,
   "versions": [
     {
+      "version": "pr-11",
+      "ref": "refs/pull/11/merge",
+      "sha": "8214425f5e2373bb6faf5ae24d0cfa711c05203d",
+      "timestamp": "2026-04-20T01:35:28.337Z",
+      "commits": [
+        {
+          "sha": "8214425f5e2373bb6faf5ae24d0cfa711c05203d",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-19T19:35:10-06:00",
+          "message": "Merge d794f0a5150c54f6caae6bc0d0adda9222a8c317 into dfd20103999f38d7cff8f398609a62793ea45c39\n"
+        },
+        {
+          "sha": "d794f0a5150c54f6caae6bc0d0adda9222a8c317",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-19T04:57:33-06:00",
+          "message": "Add debug panel and agents.md\n"
+        },
+        {
+          "sha": "f11eb30b3293f8d7cb8b79b343cf611283f4e850",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-18T22:47:45-06:00",
+          "message": "fix(xr): extend zoom-out range to 200m to match desktop\n"
+        },
+        {
+          "sha": "467b908a5cb22ecf1fa2d732e4bbe508027e0c0b",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-18T22:46:21-06:00",
+          "message": "docs: add XR.md documenting gesture pipeline and zoom behavior\n"
+        },
+        {
+          "sha": "f6b0497285b5c98de7d9ead421c48fb149e12bbd",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-18T22:44:47-06:00",
+          "message": "feat(xr): unified gesture system with two-hand pinch-to-scale zoom\n\nReplace ad-hoc XR input handling with the four-stage pipeline from\nXR-UX-PROPOSALS.md:\n\n  1. xrUpdateHandFrames — resolve XRInputSources to per-hand HandFrames,\n     freeze gazeRay at pinch-start (selection authority)\n  2. xrDetectGestures — pure edge detection producing XrGesture events\n  3. xrTransitionInteractions — per-hand InteractionState machine\n  4. xrApplyInteractions — side effects (zoom, attractors, UI mutations)\n\nNew: two-hand pinch-to-scale zooms the viewpoint (Z offset 1–50m).\nStubs for future hand-tracking gestures (fine-modifier, palm-up,\nwrist-flick) in the type system ready for implementation.\n\nAlso fixes time-reversal bug: simStep now decrements before param\npacking so tidal angle matches the original forward step.\n\nAlso extends zoom-out range from 50 to 200 on desktop/mobile.\n"
+        }
+      ]
+    },
+    {
       "version": "r83-dfd2010",
       "ref": "refs/heads/master",
       "sha": "dfd20103999f38d7cff8f398609a62793ea45c39",
