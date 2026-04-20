@@ -47,6 +47,53 @@
         <button class="ctrl-btn" id="btn-reset-all" style="font-size:10px;color:var(--text-dim);">Reset All</button>
       </div>
     </div>
+    <div class="debug-panel" data-mode="physics" id="debug-panel">
+      <div class="debug-header">Debug / Time Control</div>
+      <div class="debug-step-big">
+        Step <span id="debug-step-num">0</span> <span id="debug-step-dir">&#x25B6;</span>
+      </div>
+      <div class="debug-step-row">
+        <button class="ctrl-btn debug-step-btn" id="debug-rev60" title="Step back 60">&laquo;60</button>
+        <button class="ctrl-btn debug-step-btn" id="debug-rev10" title="Step back 10">&laquo;10</button>
+        <button class="ctrl-btn debug-step-btn" id="debug-rev1" title="Step back 1">&laquo;1</button>
+        <button class="ctrl-btn debug-step-btn" id="debug-fwd1" title="Step forward 1">1&raquo;</button>
+        <button class="ctrl-btn debug-step-btn" id="debug-fwd10" title="Step forward 10">10&raquo;</button>
+        <button class="ctrl-btn debug-step-btn" id="debug-fwd60" title="Step forward 60">60&raquo;</button>
+      </div>
+      <div class="debug-row">
+        <label class="debug-label" for="debug-skip-target">Skip to:</label>
+        <input type="number" id="debug-skip-target" min="0" class="debug-input" placeholder="step #">
+        <button class="ctrl-btn debug-action-btn" id="debug-skip-btn">Go</button>
+      </div>
+      <div class="debug-row">
+        <label class="debug-label" for="debug-skip-chunk">Speed:</label>
+        <select id="debug-skip-chunk" class="debug-input">
+          <option value="1">1x (live)</option>
+          <option value="10">10x</option>
+          <option value="60">60x</option>
+          <option value="200" selected>200x</option>
+          <option value="1000">1000x</option>
+        </select>
+      </div>
+      <div class="debug-row">
+        <label class="debug-label" for="debug-break-step">Break at:</label>
+        <input type="number" id="debug-break-step" min="0" class="debug-input" placeholder="step #">
+        <button class="ctrl-btn debug-action-btn" id="debug-break-btn">Set</button>
+      </div>
+      <div class="debug-row debug-break-status" id="debug-break-status" style="display:none">
+        &#x25CF; Break at <span id="debug-break-val"></span>
+        <button class="ctrl-btn debug-action-btn" id="debug-break-clear" title="Clear breakpoint">&times;</button>
+      </div>
+      <div class="debug-scrub-wrap">
+        <input type="range" id="debug-scrub" min="0" max="0" value="0" class="debug-scrub">
+        <div class="debug-scrub-label">
+          <span>0</span><span id="debug-scrub-high">0</span>
+        </div>
+      </div>
+      <div class="debug-row">
+        <button class="ctrl-btn" id="debug-screenshot" style="flex:1;">Screenshot &#x2192; PNG</button>
+      </div>
+    </div>
   </div>
   <div id="canvas-container">
     <canvas id="gpu-canvas"></canvas>
