@@ -2,6 +2,63 @@
   "schema": 2,
   "versions": [
     {
+      "version": "pr-12",
+      "ref": "refs/pull/12/merge",
+      "sha": "98be423d3451d344fa62fd65fa0f9847450d971f",
+      "timestamp": "2026-04-20T02:46:41.069Z",
+      "commits": [
+        {
+          "sha": "98be423d3451d344fa62fd65fa0f9847450d971f",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-19T20:46:29-06:00",
+          "message": "Merge 1bacdfabcf34d1e726856bc798006c500f57bfa2 into 806c0ac22ecb4ac0a01350d9c72de335e33649f7\n"
+        },
+        {
+          "sha": "1bacdfabcf34d1e726856bc798006c500f57bfa2",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-19T20:19:38-06:00",
+          "message": "feat(xr): populate hand joints, palmNormal, grip from XRHand\n\nAdds the WebXR hand-tracking type declarations needed by the joint-query\nhelpers already present in src/main.ts as of 020e54d. Without these types\nthe branch fails typecheck (5 TS2304/2339 errors on XRHandJoint, XRHand,\nXRFrame.getJointPose, XRInputSource.hand).\n\nDeclares:\n- XRHandJoint (25 spec joint names)\n- XRJointSpace (extends XRSpace with jointName)\n- XRJointPose (extends XRPose with radius)\n- XRHand (map-like: size, get, Symbol.iterator)\n- XRFrame.getJointPose(joint, baseSpace)\n- XRInputSource.hand (optional)\n\nThe implementation that consumes these types — XR_JOINT_NAMES table,\nXrJointPose/XrJoints/XrGripState domain types, queryHandJoints /\ncomputePalmNormal / computeGripState helpers, and the clear-then-populate\njoint-update block in xrUpdateHandFrames — was folded into 020e54d by a\nconcurrent session.\n\nRefs: shader-xrpanel-blk.5\n\nGenerated with [Claude Code](https://claude.ai/code)\nvia [Happy](https://happy.engineering)\n\nCo-Authored-By: Claude <noreply@anthropic.com>\nCo-Authored-By: Happy <yesreply@happy.engineering>\n"
+        },
+        {
+          "sha": "e7725c4edbf4654f4fa3a26d68062940e1b2e7ae",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-19T19:42:47-06:00",
+          "message": "feat(debug): time-lapse skip with frame-aware motion blur\n\nReworks the debug Skip-to-step flow so high speeds produce a smooth\ntime-lapse instead of locking up the UI:\n\n- Speed selector becomes \"Target speed\" (sim steps/sec: 1x/10x/100x/1000x/Max).\n  Defaults to 100x. Replaces the old \"dispatches per frame\" semantic that\n  conflated user intent with implementation detail.\n- Budget-adaptive chunk sizing in runDebugCompute picks\n  min(targetPerFrame, adaptiveChunk, abs(delta)) per frame. adaptiveChunk\n  grows/shrinks from rAF-delta feedback (grow below 14ms, shrink above\n  20ms), so 1000x/Max runs as fast as the GPU allows while keeping the\n  swapchain flipping at ~60fps.\n- Per-particle velocity-oriented capsule in nbody.render.wgsl gives genuine\n  motion blur during skip: vertex shader builds a streak from\n  pos - vel*blurTime to pos; fragment shader brights the head and fades\n  toward the tail. blurTime = stepsThisFrame * baseDt * direction. When\n  blurTime=0 (live play, manual step, skip complete) the geometry and\n  shading collapse to the original circular billboard.\n- New blurBuffer UBO (16 bytes) at renderBGL binding 2, written per frame\n  via sim.setBlurTime(). Zeroed on skip end/breakpoint hit for a crisp\n  final frame.\n\nReverse skip works naturally: overrideDir=-1 flips blurTime negative,\nplacing the trail on the correct side without a special case.\n\nGenerated with [Claude Code](https://claude.ai/code)\nvia [Happy](https://happy.engineering)\n\nCo-Authored-By: Claude <noreply@anthropic.com>\nCo-Authored-By: Happy <yesreply@happy.engineering>\n"
+        },
+        {
+          "sha": "b4ab52bdddd0392b976ac1d3f7af26d2e13c4da0",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-19T10:33:07-06:00",
+          "message": "feat(xr): request hand-tracking feature in session\n\nAdd 'hand-tracking' to optionalFeatures in the immersive-vr\nrequestSession call. Introduce xrHandTrackingAvailable, a single\nsession-scoped flag set from xrSession.enabledFeatures at session\nacquisition and reset on session end. Log the result (and the full\ngranted-feature list) in the existing 'session acquired' logInfo call.\n\nNo consumers yet — ticket .5 will read the flag to gate joint-pose\nqueries. Session still opens cleanly when the runtime declines the\nfeature because it is requested as optional.\n\nRefs: shader-xrpanel-blk.4\n\nGenerated with [Claude Code](https://claude.ai/code)\nvia [Happy](https://happy.engineering)\n\nCo-Authored-By: Claude <noreply@anthropic.com>\nCo-Authored-By: Happy <yesreply@happy.engineering>\n"
+        },
+        {
+          "sha": "2519d0501e86513554d911c54120d3f7592de1ea",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-19T10:18:11-06:00",
+          "message": "chore(xr): strip panel branches from input pipeline\n\nThird and final demolition chore for shader-xrpanel-blk. Removes the\npanel-specific branches inside the four-stage XR input pipeline. The\npipeline shell (xrUpdateHandFrames, xrDetectGestures,\nxrTransitionInteractions, xrApplyInteractions) is preserved — only the\ncode paths that targeted the old panel are removed. tsc is now clean.\n\nChanges:\n- XrInteraction type: dropped 'hovering' and 'pressing' variants.\n  Collapsed 'dragging' to {kind, handOrigin, hasSample} — removed\n  target, dragType, panelOriginWorld, panelOriginCenter.\n  [LAW:one-type-per-behavior] dragging now has one meaning (sim).\n  Widget interactions will add their own variant when .13 lands.\n- xrBeginSingleHandInteraction: collapsed to 5 lines. Always starts a\n  sim interaction. gazeRay parameter kept (prefixed _) for when the\n  widget system reintroduces gaze-seeded selection.\n- xrEndInteraction: removed 'pressing' case, removed dragType\n  branching. Sim drags still deactivate + release attractor.\n- xrApplyInteractions: inlined sim case (was the only non-panel\n  dragType). Removed slider/panel-grab cases and the passive UI\n  reticle loop at the bottom. `switch` became straight-line code.\n  [LAW:single-enforcer] preserved on the !anySimDrag cleanup block.\n\nIntentionally untouched:\n- xrTransitionInteractions (no panel branches; dispatches gestures to\n  begin/end only)\n- Two-hand scale (start/end + per-frame scale application)\n- Gesture stubs (fine-modifier, palm-up, wrist-flick) for ticket .7\n- Attractor wand plumbing\n- xrTuning.gainMultiplier\n\nNet 149 deletions, 45 insertions. Epic so far: 464 + 103 + 149 = 716\nlines of legacy code removed across three commits. tsc clean, vite\nbuild clean (27 modules, was 28).\n\nRefs: shader-xrpanel-blk.3\n\nGenerated with [Claude Code](https://claude.ai/code)\nvia [Happy](https://happy.engineering)\n\nCo-Authored-By: Claude <noreply@anthropic.com>\nCo-Authored-By: Happy <yesreply@happy.engineering>\n"
+        },
+        {
+          "sha": "6f9f841a4b4c169338003147a093c87aaa202196",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-19T05:04:29-06:00",
+          "message": "chore(xr): remove legacy panel hit-test and UI state\n\nSecond of three demolition chores for shader-xrpanel-blk. Removes the\npanel's hit-testing logic and per-element state. The new widget system\n(design-docs/XR-UX-PROPOSALS.md) replaces these with a generic Widget\n+ Binding + hit-rect model.\n\nDeleted:\n- XrUiElement type ('none' | 'prev' | 'next' | 'slider' | 'grab')\n- XrUiSliderDef interface\n- XR_UI_SLIDER_DEFS — mode → one-slider-per-mode dictionary\n- XR_UI_MODE_ORDER — mode-cycling array\n- xrUiState — hover/pressed/lastHit reticle state\n- getXrSliderNormalized()\n- hitTestXrUi() — ray/plane intersection + element classification\n- xrRayPlaneHitWorld() — generic Z-plane intersection helper\n- setXrSliderFromHit()\n- cycleXrUiMode()\n- applyHitToUiState()\n- The \"LEGACY UI STATE (bridges to current panel renderer until binding\n  system lands)\" section header\n\nThe mobile FAB stepper at line 4034 was the one non-XR consumer of\nXR_UI_MODE_ORDER. Inlined the 6-element SimMode list into its closure\nto keep mobile mode cycling working.\n\nIntentionally untouched (scope of .3):\n- xrInputStep, xrUpdateHandFrames, xrDetectGestures,\n  xrTransitionInteractions, xrApplyInteractions stay; their panel-\n  specific branches are removed in .3.\n- XR_ATTRACTOR_POINTER_ID — attractor wand plumbing.\n\nNet 103 deletions, 3 insertions. The 34 remaining tsc TS2304 errors\nare bounded to four sites — exactly the breadcrumb trail .3 follows:\n- XrInteraction.pressing variant (line 4496) references XrUiElement\n- xrBeginSingleHandInteraction (4729+) — pressed/dragging panel branches\n- xrEndInteraction (4771+) — pressed-state reset + cycle dispatch\n- xrApplyInteractions (4816+) — slider/grab/hover state reads + writes\n\nRefs: shader-xrpanel-blk.2\n\nGenerated with [Claude Code](https://claude.ai/code)\nvia [Happy](https://happy.engineering)\n\nCo-Authored-By: Claude <noreply@anthropic.com>\nCo-Authored-By: Happy <yesreply@happy.engineering>\n"
+        },
+        {
+          "sha": "703e4e387d5dd0fd1942720b1d89acdbc5288fb8",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-19T05:01:49-06:00",
+          "message": "chore(xr): remove legacy panel renderer + shader\n\nFirst of three demolition chores for shader-xrpanel-blk. Removes the\nGPU rendering infrastructure for the half-finished single-slider XR\npanel, clearing the way for the Binding/Anchor/Widget rewrite from\ndesign-docs/XR-UX-PROPOSALS.md.\n\nDeleted:\n- src/shaders/xr.ui.wgsl (entire SDF shader)\n- SHADER_XR_UI import\n- All XR_UI_PANEL_*, XR_UI_BTN_*, XR_UI_PREV_*, XR_UI_NEXT_*,\n  XR_UI_SLIDER_Y/HALF_*, XR_UI_GRAB_*, XR_UI_LABEL_* layout constants\n- xrUiPipeline, xrUiBGs, xrUiCameraBuffer, xrUiParamsBuffer,\n  xrUiLabelCanvas, xrUiLabelCtx, xrUiLabelTexture, xrUiLabelSampler,\n  xrUiLabelCurrentMode, xrUiLastFps GPU resource bindings\n- initXrUi, drawXrUiLabel, updateXrUiLabels, xrUiHoverAsFloat,\n  renderXrUi functions\n- Both initXrUi() callsites\n- The uiPass render pass block in xrFrame's per-eye loop\n\nIntentionally untouched (scope of .2 and .3):\n- hitTestXrUi, xrUiState, XR_UI_SLIDER_DEFS, XR_UI_MODE_ORDER,\n  getXrSliderNormalized, setXrSliderFromHit, cycleXrUiMode (.2)\n- The panel-grab branch in xrApplyInteractions that mutates\n  XR_UI_PANEL_CENTER (.3)\n\nThe 26 resulting tsc TS2304 / TS6133 errors are the deliberate\nbreadcrumb trail for tickets .2 and .3 to follow.\n\nRefs: shader-xrpanel-blk.1\n\nGenerated with [Claude Code](https://claude.ai/code)\nvia [Happy](https://happy.engineering)\n\nCo-Authored-By: Claude <noreply@anthropic.com>\nCo-Authored-By: Happy <yesreply@happy.engineering>\n"
+        }
+      ]
+    },
+    {
       "version": "r89-806c0ac",
       "ref": "refs/heads/master",
       "sha": "806c0ac22ecb4ac0a01350d9c72de335e33649f7",
