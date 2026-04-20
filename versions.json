@@ -4,15 +4,22 @@
     {
       "version": "pr-12",
       "ref": "refs/pull/12/merge",
-      "sha": "98be423d3451d344fa62fd65fa0f9847450d971f",
-      "timestamp": "2026-04-20T02:46:41.069Z",
+      "sha": "67a5c0158d28f422177843b5b9cc938222436d56",
+      "timestamp": "2026-04-20T22:16:01.734Z",
       "commits": [
         {
-          "sha": "98be423d3451d344fa62fd65fa0f9847450d971f",
+          "sha": "67a5c0158d28f422177843b5b9cc938222436d56",
           "author_name": "Brandon Fryslie",
           "author_email": "530235+brandon-fryslie@users.noreply.github.com",
-          "timestamp": "2026-04-19T20:46:29-06:00",
-          "message": "Merge 1bacdfabcf34d1e726856bc798006c500f57bfa2 into 806c0ac22ecb4ac0a01350d9c72de335e33649f7\n"
+          "timestamp": "2026-04-20T22:15:46Z",
+          "message": "Merge c7742b74c41abd2cd497abcd760cd4202b252641 into 806c0ac22ecb4ac0a01350d9c72de335e33649f7\n"
+        },
+        {
+          "sha": "c7742b74c41abd2cd497abcd760cd4202b252641",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-20T05:04:29-06:00",
+          "message": "feat(xr): synthesize advisory hand-ray from joints\n\nAdds XrHandFrame.ray — a third ray source, populated every frame the\nhand has joints. Origin = index knuckle, direction = normalize(knuckle -\nwrist). Advisory only: never drives selection (gazeRay) or drag\n(currentRay). Data-only; no consumers wired yet (lands in .11).\n\nticket: shader-xrpanel-blk.6\n\nGenerated with [Claude Code](https://claude.ai/code)\nvia [Happy](https://happy.engineering)\n\nCo-Authored-By: Claude <noreply@anthropic.com>\nCo-Authored-By: Happy <yesreply@happy.engineering>\n"
         },
         {
           "sha": "1bacdfabcf34d1e726856bc798006c500f57bfa2",
