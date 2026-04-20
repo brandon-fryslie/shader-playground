@@ -37,6 +37,7 @@ type XRFrameRequestCallback = (time: DOMHighResTimeStamp, frame: XRFrame) => voi
 interface XRFrame {
   getViewerPose(referenceSpace: XRReferenceSpace): XRViewerPose | null;
   getPose(space: XRSpace, baseSpace: XRSpace): XRPose | null;
+  getJointPose(joint: XRJointSpace, baseSpace: XRSpace): XRJointPose | null;
   readonly session: XRSession;
 }
 
@@ -55,6 +56,32 @@ interface XRInputSource {
   readonly targetRayMode: 'gaze' | 'tracked-pointer' | 'screen';
   readonly targetRaySpace: XRSpace;
   readonly gripSpace?: XRSpace;
+  readonly hand?: XRHand | null;
+}
+
+// ── Hand tracking ──
+// Standard WebXR hand joint names (25 total). Names match the spec exactly.
+type XRHandJoint =
+  | 'wrist'
+  | 'thumb-metacarpal' | 'thumb-phalanx-proximal' | 'thumb-phalanx-distal' | 'thumb-tip'
+  | 'index-finger-metacarpal' | 'index-finger-phalanx-proximal' | 'index-finger-phalanx-intermediate' | 'index-finger-phalanx-distal' | 'index-finger-tip'
+  | 'middle-finger-metacarpal' | 'middle-finger-phalanx-proximal' | 'middle-finger-phalanx-intermediate' | 'middle-finger-phalanx-distal' | 'middle-finger-tip'
+  | 'ring-finger-metacarpal' | 'ring-finger-phalanx-proximal' | 'ring-finger-phalanx-intermediate' | 'ring-finger-phalanx-distal' | 'ring-finger-tip'
+  | 'pinky-finger-metacarpal' | 'pinky-finger-phalanx-proximal' | 'pinky-finger-phalanx-intermediate' | 'pinky-finger-phalanx-distal' | 'pinky-finger-tip';
+
+interface XRJointSpace extends XRSpace {
+  readonly jointName: XRHandJoint;
+}
+
+interface XRJointPose extends XRPose {
+  readonly radius: number;
+}
+
+// XRHand is iterable like a Map<XRHandJoint, XRJointSpace>. We only need `.get` here.
+interface XRHand {
+  readonly size: number;
+  get(key: XRHandJoint): XRJointSpace | undefined;
+  [Symbol.iterator](): IterableIterator<[XRHandJoint, XRJointSpace]>;
 }
 
 interface XRInputSourceEvent extends Event {
