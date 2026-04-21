@@ -4,15 +4,22 @@
     {
       "version": "pr-12",
       "ref": "refs/pull/12/merge",
-      "sha": "c8410208c54c100b61e61397459a0fd15b4982f7",
-      "timestamp": "2026-04-21T06:56:09.292Z",
+      "sha": "5f366ff9e516759ac211ad89cf67cd2526949326",
+      "timestamp": "2026-04-21T07:06:44.174Z",
       "commits": [
         {
-          "sha": "c8410208c54c100b61e61397459a0fd15b4982f7",
+          "sha": "5f366ff9e516759ac211ad89cf67cd2526949326",
           "author_name": "Brandon Fryslie",
           "author_email": "530235+brandon-fryslie@users.noreply.github.com",
-          "timestamp": "2026-04-21T06:55:47Z",
-          "message": "Merge d69e3a7541131a2c191572d48b2d3b377b092eac into 806c0ac22ecb4ac0a01350d9c72de335e33649f7\n"
+          "timestamp": "2026-04-21T07:06:24Z",
+          "message": "Merge bce987cf2042b57f9f9425e3083871db3886a5c1 into 806c0ac22ecb4ac0a01350d9c72de335e33649f7\n"
+        },
+        {
+          "sha": "bce987cf2042b57f9f9425e3083871db3886a5c1",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-21T01:06:10-06:00",
+          "message": "feat(physics): remove source/tracer distinction; PM is the sole gravity source\n\nDeletes the O(N×S) tile-pair gravity path and its associated \"cap S to keep\nN² interactive\" machinery. With PM landed (.3/.4/.5), every particle\ncontributes mass to the density grid and feels the Poisson-solved force\nuniformly — no need for a special \"source\" subpopulation.\n\nnbody.compute.wgsl:\n- Deletes TILE_SIZE, workgroup-shared tile[], the entire tile loop, the\n  workgroupBarrier() pair, and the lid (@local_invocation_id) builtin.\n- Deletes softeningSq, G, numTiles (unused after tile loop removal).\n- Deletes the pmBlend field + blend math. PM is now authoritative:\n    var acc = pmForce[idx].xyz;\n- sourceCount field becomes _pad_sourceCount_removed (offset-preserving).\n- pmBlend field becomes _pad_pmBlend_removed.\n- @workgroup_size(TILE_SIZE) → @workgroup_size(256) (literal).\n\ncreatePhysicsSimulation:\n- Deletes BIG_BODY_COUNT, MEDIUM_BODY_COUNT, MASSIVE_BODY_COUNT\n  (and CORE_BODY_MASS, BIG_/MEDIUM_BODY_MASS_*, BIG_/MEDIUM_BODY_RADIUS_*,\n  BIG_/MEDIUM_BODY_HEIGHT, BIG_/MEDIUM_BODY_SWIRL).\n- Init loop: strips the isCoreBody / isBigBody / isMediumBody branch.\n  Every particle now follows the distribution's \"tracer\" path with\n  uniform mass = 1/count (total mass = 1.0 regardless of N).\n- Drops G /= sqrt(MASSIVE_BODY_COUNT/1000) normalization in the params\n  pack, in PM_FOUR_PI_G, and in the once-per-second stats pass.\n- Deletes pmBlendValue closure var, setBlend method, __pmSetBlend.\n- Replaces tracerFrac formulas based on MASSIVE_BODY_COUNT with i/count.\n- diagnose() samples across the whole population, not just the\n  post-MASSIVE_BODY_COUNT tail.\n\nDEFAULTS.physics.G: 1.0 → 0.3 (first-cut; old normalization divided by\n~2.86 for typical N). Proper tuning lands in .7.\n\nNo pmBlend / sourceCount symbols remain (only _pad_*_removed markers and\nhistorical comments, per the ticket's own suggested naming pattern).\n\nticket: shader-physics-brr.6\n\nGenerated with [Claude Code](https://claude.ai/code)\nvia [Happy](https://happy.engineering)\n\nCo-Authored-By: Claude <noreply@anthropic.com>\nCo-Authored-By: Happy <yesreply@happy.engineering>\n"
         },
         {
           "sha": "d69e3a7541131a2c191572d48b2d3b377b092eac",
