@@ -4,15 +4,22 @@
     {
       "version": "pr-12",
       "ref": "refs/pull/12/merge",
-      "sha": "c5f33ff20baa24406e26624f04c44daa64cff04c",
-      "timestamp": "2026-04-21T06:50:39.593Z",
+      "sha": "c8410208c54c100b61e61397459a0fd15b4982f7",
+      "timestamp": "2026-04-21T06:56:09.292Z",
       "commits": [
         {
-          "sha": "c5f33ff20baa24406e26624f04c44daa64cff04c",
+          "sha": "c8410208c54c100b61e61397459a0fd15b4982f7",
           "author_name": "Brandon Fryslie",
           "author_email": "530235+brandon-fryslie@users.noreply.github.com",
-          "timestamp": "2026-04-21T06:50:22Z",
-          "message": "Merge 0a08f7c40c296d0b660d7e5535ef1e08c6515b05 into 806c0ac22ecb4ac0a01350d9c72de335e33649f7\n"
+          "timestamp": "2026-04-21T06:55:47Z",
+          "message": "Merge d69e3a7541131a2c191572d48b2d3b377b092eac into 806c0ac22ecb4ac0a01350d9c72de335e33649f7\n"
+        },
+        {
+          "sha": "d69e3a7541131a2c191572d48b2d3b377b092eac",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-21T00:55:33-06:00",
+          "message": "feat(physics): PM force interpolation, blended alongside tile-pair gravity\n\nNew shader pm.interpolate.wgsl: for each particle, central-differences the\nPoisson potential at the 8 surrounding cell centers, then CIC-weights those\ncell forces to yield the particle's PM acceleration. The interpolation\nkernel is the transpose of the deposition kernel — Newton's 3rd law\npreserved, momentum conserved.\n\nnbody.compute.wgsl: new binding 3 reads pmForce (vec4 per particle), and\nthe existing _pad_e slot in Params is repurposed as pmBlend. After the\ntile-pair gravity loop writes to acc, the blend runs inline:\n\n    acc = acc * (1 - pmBlend) + pmForce[idx].xyz * pmBlend\n\nAll subsequent forces (attractors, halo, disk, boundary, tidal) stay\nfull-strength at every blend value — only the pair gravity is blended.\n\ncreatePhysicsSimulation: pmInterpolatePipeline + per-ping-pong bind\ngroups; dispatched each frame AFTER the V-cycle (reads pmPotential[0])\nand BEFORE the main compute (reads pmForce). Main compute BGL extended\nwith binding 3. f32[19] now packs pmBlend into the nbody Params struct.\n\nDev runtime knob:\n    window.__pmSetBlend(0)    → legacy tile-pair gravity only (default)\n    window.__pmSetBlend(0.5)  → half-and-half for side-by-side testing\n    window.__pmSetBlend(1)    → PM gravity only\n\nticket: shader-physics-brr.5\n\nGenerated with [Claude Code](https://claude.ai/code)\nvia [Happy](https://happy.engineering)\n\nCo-Authored-By: Claude <noreply@anthropic.com>\nCo-Authored-By: Happy <yesreply@happy.engineering>\n"
         },
         {
           "sha": "0a08f7c40c296d0b660d7e5535ef1e08c6515b05",
