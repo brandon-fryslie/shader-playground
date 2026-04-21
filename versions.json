@@ -4,15 +4,22 @@
     {
       "version": "pr-12",
       "ref": "refs/pull/12/merge",
-      "sha": "24872455e4f2989951eed3dc9228e4825a9c14f5",
-      "timestamp": "2026-04-21T06:32:39.985Z",
+      "sha": "54fab0301e87fc5599f93b7f222329ebe0636a16",
+      "timestamp": "2026-04-21T06:34:16.472Z",
       "commits": [
         {
-          "sha": "24872455e4f2989951eed3dc9228e4825a9c14f5",
+          "sha": "54fab0301e87fc5599f93b7f222329ebe0636a16",
           "author_name": "Brandon Fryslie",
           "author_email": "530235+brandon-fryslie@users.noreply.github.com",
-          "timestamp": "2026-04-21T06:32:18Z",
-          "message": "Merge 858281bba9abe5056962bf3e3aecfc2e57bcf7be into 806c0ac22ecb4ac0a01350d9c72de335e33649f7\n"
+          "timestamp": "2026-04-21T06:34:00Z",
+          "message": "Merge d298ef505b716b4c5180b729f7c702ff30e4edd6 into 806c0ac22ecb4ac0a01350d9c72de335e33649f7\n"
+        },
+        {
+          "sha": "d298ef505b716b4c5180b729f7c702ff30e4edd6",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-21T00:33:13-06:00",
+          "message": "chore: ignore .tmp-* scratch files\n\nVerification harnesses and throwaway scripts that use the .tmp- prefix\n(e.g. .tmp-xrui-verify.ts) were showing up in git status every time\nsomeone ran them. Ignoring the prefix keeps the working tree clean\nwithout deleting the files.\n\nGenerated with [Claude Code](https://claude.ai/code)\nvia [Happy](https://happy.engineering)\n\nCo-Authored-By: Claude <noreply@anthropic.com>\nCo-Authored-By: Happy <yesreply@happy.engineering>\n"
         },
         {
           "sha": "858281bba9abe5056962bf3e3aecfc2e57bcf7be",
