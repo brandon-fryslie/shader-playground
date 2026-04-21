@@ -4,15 +4,29 @@
     {
       "version": "pr-12",
       "ref": "refs/pull/12/merge",
-      "sha": "d2598f2ce5572ce2f08e27f72f2f5d097fa57674",
-      "timestamp": "2026-04-21T07:10:37.524Z",
+      "sha": "2121695359946b46332d4cbd0b36e0921407c0b0",
+      "timestamp": "2026-04-21T23:18:42.680Z",
       "commits": [
         {
-          "sha": "d2598f2ce5572ce2f08e27f72f2f5d097fa57674",
+          "sha": "2121695359946b46332d4cbd0b36e0921407c0b0",
           "author_name": "Brandon Fryslie",
           "author_email": "530235+brandon-fryslie@users.noreply.github.com",
-          "timestamp": "2026-04-21T07:10:23Z",
-          "message": "Merge 82111d8057f144789961f0609447875796f0f688 into 806c0ac22ecb4ac0a01350d9c72de335e33649f7\n"
+          "timestamp": "2026-04-21T23:18:29Z",
+          "message": "Merge c4027811026ce5d0150857d1bd80575e8aecbe62 into 806c0ac22ecb4ac0a01350d9c72de335e33649f7\n"
+        },
+        {
+          "sha": "c4027811026ce5d0150857d1bd80575e8aecbe62",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-21T16:04:02-06:00",
+          "message": "feat(physics): stronger interactions — log slider 0.1–100, Decay Time w/ Permanent\n\n- Interaction Pull: max 3.0 → 100, log-scale so low end stays navigable\n- Decay Ratio slider removed; Decay Cap renamed to Decay Time (s)\n- Decay Time at max (30s) reads \"Permanent\" — attractor never decays\n  (attractorDecaySteps returns Infinity; pruning leaves it alone)\n- ParamDef gains logScale + maxLabel; XR binding passes scale: 'log'\n  so clipboard slider ticks logarithmically too\n"
+        },
+        {
+          "sha": "ca1beafd70814df89b71700c34d8d1175a107011",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-21T15:40:31-06:00",
+          "message": "feat(physics): scale periodic domain to visual room (16→64)\n\nDOMAIN_HALF 16→64 and N_BODY_OUTER_RADIUS 15→60 so the wrap cube is no\nlonger a tiny box in the middle of the 144-wide room. PM_DOMAIN_HALF\nstays coincident per the one-source-of-truth invariant; PM_CELL_SIZE\ngrows from 0.25 to 1.0 as a consequence.\n"
         },
         {
           "sha": "82111d8057f144789961f0609447875796f0f688",
