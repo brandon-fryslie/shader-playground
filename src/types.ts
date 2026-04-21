@@ -30,8 +30,7 @@ export interface PhysicsParams {
   distribution: Distribution;
   interactionStrength: number;
   tidalStrength: number;
-  attractorDecayRatio: number;  // decay duration (in steps) = this × holdSteps, capped by attractorDecayCap
-  attractorDecayCap: number;    // seconds — upper bound on decay duration (converted via STEPS_PER_SECOND)
+  attractorDecayTime: number;   // seconds. Slider max is treated as "Permanent" (never decays).
   // Dark matter potential — conservative forces replacing dissipative disk recovery.
   haloMass: number;       // Plummer halo gravitational mass
   haloScale: number;      // Plummer halo softening radius
@@ -177,6 +176,14 @@ export interface ParamDef {
   type?: string;
   options?: (string | number)[];
   requiresReset?: boolean;
+  // Logarithmic-ticking slider — large dynamic ranges (e.g., 0.1..100) need this
+  // so the low end stays navigable. HTML <input type=range> is linear, so the
+  // DOM layer maps position in tick-space back to real value on every change.
+  logScale?: boolean;
+  // Label shown in the slider value readout when the slider is at param.max.
+  // Used by "Decay Time" to render the top-of-range as "Permanent" rather
+  // than a number, signalling that the attractor never decays.
+  maxLabel?: string;
 }
 
 export interface ParamSection {

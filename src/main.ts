@@ -166,7 +166,7 @@ const DEFAULTS: ModeParamsMap = {
     // tuning.
     count: 80000, G: 0.3, softening: 1.5, distribution: 'disk',
     interactionStrength: 1.0, tidalStrength: 0.008,
-    attractorDecayRatio: 0.5, attractorDecayCap: 2.0,
+    attractorDecayTime: 2.0,
     haloMass: 5.0, haloScale: 2.0, diskMass: 3.0, diskScaleA: 1.5, diskScaleB: 0.3,
   },
   physics_classic: {
@@ -271,9 +271,8 @@ const PARAM_DEFS: Record<SimMode, ParamSection[]> = {
       { key: 'count', label: 'Bodies', min: 10, max: 150000, step: 10, requiresReset: true },
       { key: 'G', label: 'Gravity (G)', min: 0.05, max: 5.0, step: 0.01 },
       { key: 'softening', label: 'Softening', min: 0.2, max: 4.0, step: 0.05 },
-      { key: 'interactionStrength', label: 'Interaction Pull', min: 0.1, max: 3.0, step: 0.05 },
-      { key: 'attractorDecayRatio', label: 'Decay Ratio', min: 0.1, max: 4.0, step: 0.05 },
-      { key: 'attractorDecayCap', label: 'Decay Cap (s)', min: 0.5, max: 10.0, step: 0.1 },
+      { key: 'interactionStrength', label: 'Interaction Pull', min: 0.1, max: 100, step: 0.01, logScale: true },
+      { key: 'attractorDecayTime', label: 'Decay Time (s)', min: 0.1, max: 30.0, step: 0.1, maxLabel: 'Permanent' },
       { key: 'tidalStrength', label: 'Tidal Field', min: 0.0, max: 0.05, step: 0.0005 },
     ]},
     { section: 'Initial State', params: [
@@ -496,6 +495,9 @@ const STEPS_PER_SECOND = 1 / PHYSICS_BASE_DT; // 62.5 — matches `baseDt = 0.01
 const ATTRACTOR_CHARGE_STEPS = 90;          // ~1.5s at timeScale=1 — quadratic ramp to full strength
 const ATTRACTOR_MAX = 32;                   // hard cap; oldest evicted if exceeded
 const ATTRACTOR_MIN_DECAY_STEPS = 3;        // ~0.05s — lower bound so releases are always visible
+// Slider values at or above this threshold treat the attractor as permanent
+// (decaySteps = Infinity). Matches the PARAM_DEFS attractorDecayTime max of 30.
+const ATTRACTOR_PERMANENT_THRESHOLD = 30.0;
 
 // [LAW:single-enforcer] Sim step + time direction accessed through these helpers so attractor lifecycle
 // always agrees with the physics sim's canonical clock. Returns safe defaults when physics is inactive.
@@ -511,13 +513,15 @@ function currentTimeDirection(): number {
   return 1;
 }
 
-// [LAW:single-enforcer] Decay window in steps is computed in exactly one place, here, from user-tunable ratio/cap.
-// Slider stays in seconds for UI intuition; converted at comparison time using STEPS_PER_SECOND.
+// [LAW:single-enforcer] Decay window in steps is computed here, from the
+// attractorDecayTime slider (seconds, converted via STEPS_PER_SECOND).
+// Slider at max → Infinity (attractor never decays — "Permanent" mode).
 // Minimum floor prevents zero-duration decay on instant-release taps.
-function attractorDecaySteps(a: Attractor): number {
-  const ratio = state.physics.attractorDecayRatio ?? 0.5;
-  const capSteps = (state.physics.attractorDecayCap ?? 2.0) * STEPS_PER_SECOND;
-  return Math.max(ATTRACTOR_MIN_DECAY_STEPS, Math.min(capSteps, ratio * a.holdSteps));
+// Unused `a` kept in signature for future per-attractor decay overrides.
+function attractorDecaySteps(_a: Attractor): number {
+  const decayTime = state.physics.attractorDecayTime ?? 2.0;
+  if (decayTime >= ATTRACTOR_PERMANENT_THRESHOLD) return Number.POSITIVE_INFINITY;
+  return Math.max(ATTRACTOR_MIN_DECAY_STEPS, decayTime * STEPS_PER_SECOND);
 }
 
 // [LAW:dataflow-not-control-flow] Strength is a pure function of (attractor, currentStep). The same quadratic
@@ -1680,10 +1684,16 @@ function createPhysicsSimulation() {
   // span the same volume.
   //
   // Tuning (shader-physics-brr.7):
-  //   PM_V_CYCLE_COUNT = 4
-  //     Each cycle knocks residual down ~1 order of magnitude; 4 cycles give
-  //     ~4 orders, well under the 1% target. Dropping to 3 is viable if GPU
-  //     time becomes tight — verify with __pmMaxResidual().
+  //   PM_V_CYCLE_COUNT = 1
+  //     The V=4 figure assumed a cold solve (residual entering = 100%). This
+  //     simulation warm-starts: pmPotential[0] is preserved across frames
+  //     (see V-cycle loop, where only levels 1+ are zeroed each cycle), so
+  //     residual entering each frame is just the perturbation from one frame's
+  //     density change — typically ~10% since particles move <1 cell/frame at
+  //     dt≈0.016. One V-cycle then drops to ~1%, equivalent to the cold V=4
+  //     target. Vision Pro at 90 Hz has an 11 ms budget; V=4 was consuming
+  //     >50 ms by itself (~10 FPS in headset). Verify residual stays bounded
+  //     with __pmMaxResidual() and reversibility with __pmReversibilityTest().
   //   PM_SMOOTH_PRE = PM_SMOOTH_POST = 2
   //     Red-black GS converges ~2× faster per pass than Jacobi; 2 sweeps each
   //     side of the V gives good damping of high-frequency error. 1 sweep is
@@ -1706,7 +1716,7 @@ function createPhysicsSimulation() {
   const PM_CELL_SIZE = PM_DOMAIN_SIZE / PM_GRID_RES; // = 1.0 world units per cell
   const PM_FIXED_POINT_SCALE = 65536;               // 2^16 — u32 atomic mass accumulation
   const PM_MULTIGRID_LEVELS = 6;                    // 128³, 64³, 32³, 16³, 8³, 4³
-  const PM_V_CYCLE_COUNT = 4;                       // V-cycles per Poisson solve
+  const PM_V_CYCLE_COUNT = 1;                       // V-cycles per Poisson solve (warm-started; see header)
   const PM_SMOOTH_PRE = 2;                          // red-black GS passes before restriction
   const PM_SMOOTH_POST = 2;                         // red-black GS passes after prolongation
   // Silence noUnusedLocals until downstream tickets (.3 deposition, .4
@@ -3705,21 +3715,34 @@ function buildParamRow(container: HTMLElement, mode: SimMode, param: ParamDef) {
   } else {
     const input = document.createElement('input');
     input.type = 'range';
-    input.min = String(param.min);
-    input.max = String(param.max);
-    input.step = String(param.step);
-    input.value = String(modeParams(mode)[param.key]);
+    // [LAW:dataflow-not-control-flow] logScale shapes the slider's tick-space
+    // vs. real-value-space mapping. Dataset flags let sync code (applyPreset,
+    // syncUIFromState) do the same mapping without re-reading PARAM_DEFS.
+    if (param.logScale && param.min !== undefined && param.max !== undefined) {
+      input.min = '0';
+      input.max = String(LOG_SLIDER_TICKS);
+      input.step = '1';
+      input.value = String(realToLogTick(Number(modeParams(mode)[param.key]), param.min, param.max));
+      input.dataset.logScale = '1';
+    } else {
+      input.min = String(param.min);
+      input.max = String(param.max);
+      input.step = String(param.step);
+      input.value = String(modeParams(mode)[param.key]);
+    }
     input.dataset.mode = mode;
     input.dataset.key = param.key;
 
     const valueSpan = document.createElement('span');
     valueSpan.className = 'control-value';
-    valueSpan.textContent = formatValue(Number(modeParams(mode)[param.key]), param.step ?? 1);
+    valueSpan.textContent = formatValueWithMax(Number(modeParams(mode)[param.key]), param);
 
     input.addEventListener('input', () => {
-      const val = Number(input.value);
+      const val = (param.logScale && param.min !== undefined && param.max !== undefined)
+        ? logTickToReal(Number(input.value), param.min, param.max)
+        : Number(input.value);
       modeParams(mode)[param.key] = val;
-      valueSpan.textContent = formatValue(val, param.step ?? 1);
+      valueSpan.textContent = formatValueWithMax(val, param);
       if (param.requiresReset) {
         input.dataset.needsReset = '1';
       }
@@ -3779,6 +3802,30 @@ function formatValue(val: number, step: number) {
   return val.toFixed(decimals);
 }
 
+// [LAW:single-enforcer] All slider value readouts flow through this so the
+// "Permanent"-at-max behavior (and any future label overrides) never drifts
+// between buildParamRow, applyPreset, and syncUIFromState.
+function formatValueWithMax(val: number, def: ParamDef | null): string {
+  const step = def?.step ?? 0.01;
+  if (def?.maxLabel !== undefined && def.max !== undefined && val >= def.max - step / 2) {
+    return def.maxLabel;
+  }
+  return formatValue(val, step);
+}
+
+// Linear-to-log tick mapping: slider position lives in [0, 1000] tick space,
+// real values span [min, max] logarithmically. Kept here (not inlined) so the
+// three slider touchpoints (build, preset apply, load sync) agree exactly.
+const LOG_SLIDER_TICKS = 1000;
+function realToLogTick(real: number, min: number, max: number): number {
+  const t = (Math.log(real) - Math.log(min)) / (Math.log(max) - Math.log(min));
+  return Math.round(LOG_SLIDER_TICKS * Math.max(0, Math.min(1, t)));
+}
+function logTickToReal(tick: number, min: number, max: number): number {
+  const t = tick / LOG_SLIDER_TICKS;
+  return Math.exp(Math.log(min) + t * (Math.log(max) - Math.log(min)));
+}
+
 function applyPreset(mode: SimMode, presetName: string) {
   const preset = PRESETS[mode][presetName];
   Object.assign(modeParams(mode), preset);
@@ -3788,12 +3835,13 @@ function applyPreset(mode: SimMode, presetName: string) {
   container.querySelectorAll<HTMLInputElement>('input[type="range"]').forEach(input => {
     const key = input.dataset.key!;
     if (key in preset) {
-      input.value = String(preset[key]);
+      const paramDef = findParamDef(mode, key);
+      const realVal = Number(preset[key]);
+      input.value = (paramDef?.logScale && paramDef.min !== undefined && paramDef.max !== undefined)
+        ? String(realToLogTick(realVal, paramDef.min, paramDef.max))
+        : String(preset[key]);
       const valueSpan = input.parentElement?.querySelector('.control-value');
-      if (valueSpan) {
-        const paramDef = findParamDef(mode, key);
-        valueSpan.textContent = formatValue(Number(preset[key]), paramDef ? paramDef.step ?? 1 : 1);
-      }
+      if (valueSpan) valueSpan.textContent = formatValueWithMax(realVal, paramDef);
     }
   });
   container.querySelectorAll<HTMLSelectElement>('select').forEach(sel => {
@@ -7102,12 +7150,13 @@ function syncUIFromState() {
     container.querySelectorAll<HTMLInputElement>('input[type="range"]').forEach(input => {
       const key = input.dataset.key!;
       if (key && key in params) {
-        input.value = String(params[key]);
+        const paramDef = findParamDef(mode, key);
+        const realVal = Number(params[key]);
+        input.value = (paramDef?.logScale && paramDef.min !== undefined && paramDef.max !== undefined)
+          ? String(realToLogTick(realVal, paramDef.min, paramDef.max))
+          : String(params[key]);
         const valueSpan = input.parentElement?.querySelector('.control-value');
-        if (valueSpan) {
-          const paramDef = findParamDef(mode, key);
-          valueSpan.textContent = formatValue(Number(params[key]), paramDef ? paramDef.step ?? 0.01 : 0.01);
-        }
+        if (valueSpan) valueSpan.textContent = formatValueWithMax(realVal, paramDef);
       }
     });
     container.querySelectorAll<HTMLSelectElement>('select').forEach(sel => {
@@ -7170,6 +7219,7 @@ function initBindings(): void {
             set: (v) => { modeParams(mode)[param.key] = v; },
             range: { min: param.min, max: param.max },
             step: param.step,
+            scale: param.logScale ? 'log' : 'linear',
           });
         }
       }
