@@ -4,15 +4,22 @@
     {
       "version": "pr-12",
       "ref": "refs/pull/12/merge",
-      "sha": "1a3be876baad0b45114d3647869292ac02a973b5",
-      "timestamp": "2026-04-21T04:41:07.049Z",
+      "sha": "84dc86d4090247aed5a598ac5a2816ee2d47fba3",
+      "timestamp": "2026-04-21T04:45:57.201Z",
       "commits": [
         {
-          "sha": "1a3be876baad0b45114d3647869292ac02a973b5",
+          "sha": "84dc86d4090247aed5a598ac5a2816ee2d47fba3",
           "author_name": "Brandon Fryslie",
           "author_email": "530235+brandon-fryslie@users.noreply.github.com",
-          "timestamp": "2026-04-21T04:40:54Z",
-          "message": "Merge a51bfea2e13c0866ed44be6d49986ffcd9a45754 into 806c0ac22ecb4ac0a01350d9c72de335e33649f7\n"
+          "timestamp": "2026-04-21T04:45:37Z",
+          "message": "Merge e6748250252b579435270c640f4fdc13ba688ea4 into 806c0ac22ecb4ac0a01350d9c72de335e33649f7\n"
+        },
+        {
+          "sha": "e6748250252b579435270c640f4fdc13ba688ea4",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-20T22:45:28-06:00",
+          "message": "fix(xr): also drop pinch-hold from console dump\n\npinch-hold fires every frame during a pinch (~90 Hz), adding the same\nkind of spam as xr.snap. Still emitted on the bus (future consumers\nmay want the hold stream for timing analysis); just filtered from the\nconsole dump. Channel counts in the summary still reflect every\nsample, so the volume is visible.\n\nGenerated with [Claude Code](https://claude.ai/code)\nvia [Happy](https://happy.engineering)\n\nCo-Authored-By: Claude <noreply@anthropic.com>\nCo-Authored-By: Happy <yesreply@happy.engineering>\n"
         },
         {
           "sha": "a51bfea2e13c0866ed44be6d49986ffcd9a45754",
