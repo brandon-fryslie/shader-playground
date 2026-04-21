@@ -4,15 +4,50 @@
     {
       "version": "pr-12",
       "ref": "refs/pull/12/merge",
-      "sha": "8106bd44a54d9f28864aa3614ba42b4584c26a2c",
-      "timestamp": "2026-04-21T00:01:00.118Z",
+      "sha": "4b7be22862695ddff980468a1bf1ffcddc50e305",
+      "timestamp": "2026-04-21T03:58:19.024Z",
       "commits": [
         {
-          "sha": "8106bd44a54d9f28864aa3614ba42b4584c26a2c",
+          "sha": "4b7be22862695ddff980468a1bf1ffcddc50e305",
           "author_name": "Brandon Fryslie",
           "author_email": "530235+brandon-fryslie@users.noreply.github.com",
-          "timestamp": "2026-04-21T00:00:44Z",
-          "message": "Merge 711729434433c24eb38a1cd5864ca7779e6a7721 into 806c0ac22ecb4ac0a01350d9c72de335e33649f7\n"
+          "timestamp": "2026-04-21T03:58:02Z",
+          "message": "Merge 33298a141a68b4fef45ebfae59a55ddfc3c5c12a into 806c0ac22ecb4ac0a01350d9c72de335e33649f7\n"
+        },
+        {
+          "sha": "33298a141a68b4fef45ebfae59a55ddfc3c5c12a",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-20T21:57:46-06:00",
+          "message": "feat(metrics): typed pub/sub bus with first-class burst-capture recorder\n\nIntroduces a generic metrics bus and wires XR gesture/state/snapshot\nproducers through it. The bus is designed around subscriber-gated\nemission — producers check `chan.subscribers.size > 0` before building\nany payload, so when nobody is listening the cost is a single O(1)\nproperty read per potential emit. When a consumer (the recorder, a\nfuture HUD, a chart) subscribes, producers start emitting; when they\nunsubscribe, emissions stop.\n\nBurst capture lives on the bus itself as `metrics.record({preDelayMs,\ndurationMs, channels?})`. The recorder is just another subscriber whose\nlifetime is bounded by the record window; no special integration\nneeded. Samples carry `{t, channel, payload}` with `t` measured from\nthe recording-window start (pre-delay is invisible in the data).\n\nXR producers:\n- xr.gesture — every emitted XrGesture, hand-tagged\n- xr.state   — every xrInteractions[hand] kind-change, routed through\n               new xrSetInteraction helper (kind-identical writes skip)\n- xr.snap    — per-hand per-frame snapshot (palmDot, palmUp,\n               fineModifier, flickSpeed, grip, tracked) — only emits\n               while someone is subscribed\n\nUI: an unobtrusive \"Record XR Gestures (1s + 2s)\" button at the bottom\nof the controls panel. 1s pre-delay, 2s capture, publish:\n- `console.group` with per-sample structured log\n- `window.__xrLastRecording` for DevTools inspection\nButton is disabled during recording, polled via rAF only while active.\n\n[LAW:one-source-of-truth] Single registry and single recorder state.\n[LAW:dataflow-not-control-flow] Producer code path is the same every\nframe; the subscriber count is the data that decides whether work\nhappens.\n\nGenerated with [Claude Code](https://claude.ai/code)\nvia [Happy](https://happy.engineering)\n\nCo-Authored-By: Claude <noreply@anthropic.com>\nCo-Authored-By: Happy <yesreply@happy.engineering>\n"
+        },
+        {
+          "sha": "68ec81d545cf106ba4d087aa87616f4d224ced63",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-20T21:24:09-06:00",
+          "message": "feat(xr-ui): xrUiStep — selection, cancel, hover pipelines\n\nAdds the integration layer connecting hand-tracking input, layout, and\nbindings — ticket shader-xrpanel-blk.11. xrUiStep runs once per XR\nframe and produces (next state, side effects, render commands) without\nmutating the binding registry; the caller applies effects.\n\nThree rays, never crossing (cited at every read site):\n- SELECTION reads gazeRay (frozen at pinch-start) — pinch-start hit-test\n- CANCEL    reads currentRay (hand-steered)        — slide-off-to-cancel\n- HOVER     reads hf.ray (advisory laser)          — pre-pinch hover\n\nCoordination with sim input via a single per-hand claim flag:\nxrUiStep writes uiHandClaimed; xrTransitionInteractions's pending→\ndragging promotion reads it and stays idle when UI owns the pinch.\nOne small surgical edit, three lines — the existing 4-stage sim\npipeline is otherwise untouched.\n\n- src/xr-ui/step.ts: InteractionState (idle/hovering/pressing/dragging),\n  XrUiSideEffect (binding-set/invoke/tab-switch), RenderCommand,\n  XrUiRegistry, xrUiStep, applySideEffects, uiHandClaimed.\n- src/main.ts: import + xrUiRegistry/xrUiPrev/xrUiClaimed module state,\n  extractXrHeadPose helper, xrUiStep call inserted between\n  xrUpdateHandFrames and xrDetectGestures, claim check in\n  xrTransitionInteractions deadline pass, reset in xrResetInputState,\n  exposure on window.__xrUi.\n\nVerified in headless Chrome with synthetic hand frames against a\nsingle-slider and single-button fixture: hover sets state correctly,\npinch-start at slider transitions to dragging with valueAtOrigin\ncaptured, 5cm hand displacement emits binding-set with the correct\nclamped value, slide-off sets cancelPending and suppresses invoke on\nrelease, hold-and-commit emits the expected binding-invoke. Tickets\n.8/.9/.10 unaffected (82 bindings, layout/anchor smoke still pass).\n\nGenerated with [Claude Code](https://claude.ai/code)\nvia [Happy](https://happy.engineering)\n\nCo-Authored-By: Claude <noreply@anthropic.com>\nCo-Authored-By: Happy <yesreply@happy.engineering>\n"
+        },
+        {
+          "sha": "8372acda3425644b6ddd0a79f53c59e037a3d3a5",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-20T21:10:26-06:00",
+          "message": "feat(xr-ui): widget + container types with HIG-padded layout\n\nImplements the panel tree (widgets.ts) and the layout pass (layout.ts)\nfor the XR UI rewrite — ticket shader-xrpanel-blk.10. Layout returns a\nflat Map<id, LaidOut> of world-space widget poses + visual/hit rects;\nhitTestWidgets walks it for ray→widget id selection.\n\n- widgets.ts: 9 Widget kinds (slider/dial/toggle/stepper/enum-chips/\n  button/preset-tile/category-tile/readout) and 4 Container kinds\n  (panel/group/tabs/focus-view). HIG_DEFAULTS (frozen) carries the\n  12cm min hit half-extent and 2cm neighbor gap.\n- layout.ts: recursive measure + place pass. Layout containers are pure\n  transformations and do NOT appear in the output map; only the panel\n  + widget leaves do, keeping hit-test simple. Pack-by-hit-rect\n  enforces neighbor gap on hitboxes (not visuals) per HIG.\n- anchors.ts: export composePose, quatMul, quatRotateVec, quatConj so\n  layout.ts reuses the same math without copy-pasting.\n- main.ts: import for tree-shaking and expose layout/hitTestWidgets on\n  window.__xrUi for headless smoke testing. No call sites yet —\n  ticket .11 wires layout into xrUiStep.\n\nVerified in headless Chrome with the acceptance fixture (panel + row of\n3 sliders): 4 entries returned, every slider hitRect ≥ visualRect, HIG\nmin-half-extent floor lifts a 5cm-tall slider to 12cm hit, neighbor gaps\nland at the HIG 2cm floor, ray-at-center returns slider id, ray-in-gap\nreturns null. Tickets .8 + .9 still pass (82 bindings, anchors live).\n\nGenerated with [Claude Code](https://claude.ai/code)\nvia [Happy](https://happy.engineering)\n\nCo-Authored-By: Claude <noreply@anthropic.com>\nCo-Authored-By: Happy <yesreply@happy.engineering>\n"
+        },
+        {
+          "sha": "308c1b12a38fde20966dc6dad5d5b28bd6f9691e",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-20T19:36:38-06:00",
+          "message": "feat(xr-ui): add Anchor abstraction and evaluation\n\nIntroduces Anchor / evaluateAnchor as the single translator from\n(hands + head) to a world-space Pose for XR widget containers\n(ticket shader-xrpanel-blk.9). Five anchor kinds — world, wrist, palm,\nheld, head-hud — make panel placement a data choice, not a code branch.\n\n- src/xr-ui/anchors.ts: types (Pose, Anchor, AnchorContext, HandFrame),\n  evaluateAnchor switch, and small quat helpers (mul, fromVectors,\n  rotateVec). HandFrame is a minimal structural shape; main.ts's\n  XrHandFrame satisfies it without conversion — preserves one-way deps.\n- src/main.ts: import for tree-shaking and expose evaluateAnchor on\n  window.__anchors for headless smoke testing. No call sites yet —\n  widgets consume anchors in ticket .10.\n\nVerified in headless Chrome: world returns pose verbatim, wrist/palm\nreturn null when sources untracked, palm rotates with palmNormal,\nheld === wrist (semantic divergence lives outside anchor math),\nhead-hud places pose distance meters along view -Z. Ticket .8 bindings\nstill register cleanly (82) — no regression.\n\nGenerated with [Claude Code](https://claude.ai/code)\nvia [Happy](https://happy.engineering)\n\nCo-Authored-By: Claude <noreply@anthropic.com>\nCo-Authored-By: Happy <yesreply@happy.engineering>\n"
+        },
+        {
+          "sha": "c03889ff8f2776c9164eef5fefc363bdb384cd40",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-20T19:30:49-06:00",
+          "message": "feat(xr-ui): add Binding abstraction + registry + app-state bindings\n\nIntroduces Binding/BindingRegistry as the foundation for the new XR\nwidget system (ticket shader-xrpanel-blk.8). A Binding wraps one piece\nof app state with a uniform get/set/range interface; widgets reference\nbindings by id so the same Widget type can drive any state field.\n\n- src/xr-ui/bindings.ts: types (Continuous/Toggle/Enum/Action) and\n  BindingRegistry singleton. Pure module — no project deps, only types.\n- src/main.ts: initBindings() registers from PARAM_DEFS, PRESETS, mode,\n  theme. 82 bindings registered at startup (44 continuous, 8 enum,\n  30 action). DOM controls untouched — bindings are a parallel data\n  source until widgets land in ticket .10.\n\nGenerated with [Claude Code](https://claude.ai/code)\nvia [Happy](https://happy.engineering)\n\nCo-Authored-By: Claude <noreply@anthropic.com>\nCo-Authored-By: Happy <yesreply@happy.engineering>\n"
         },
         {
           "sha": "711729434433c24eb38a1cd5864ca7779e6a7721",
