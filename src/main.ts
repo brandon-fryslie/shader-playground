@@ -465,6 +465,7 @@ const state: AppState = {
     grading: 0.5,
     timeScale: 1.0,
   },
+  debug: { xrLog: false },
 };
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -3388,6 +3389,16 @@ function setupGlobalControls() {
 
   setupRecordButton();
 
+  // XR debug-log toggle: subscribes/unsubscribes the live console consumer.
+  // [LAW:single-enforcer] Single site that flips state.debug.xrLog + the
+  // metrics subscription in lockstep so the two cannot disagree.
+  const xrLogToggle = document.getElementById('toggle-xr-log') as HTMLInputElement;
+  xrLogToggle.addEventListener('change', () => {
+    state.debug.xrLog = xrLogToggle.checked;
+    setXrDebugLogging(state.debug.xrLog);
+    saveState();
+  });
+
   // XR button setup
   setupXRButton();
 }
@@ -4965,6 +4976,44 @@ const chanXrGesture = metrics.channel<XrGestureEvent>('xr.gesture');
 const chanXrState   = metrics.channel<XrStateEvent>('xr.state');
 const chanXrSnap    = metrics.channel<XrSnapEvent>('xr.snap');
 
+// Live console logger — a consumer of the three XR channels. Toggled on/off
+// from the UI + persisted via state.debug.xrLog. [LAW:single-enforcer] This is
+// the sole wiring for console output; the XR recording feature (one-shot dump at
+// session end) keeps its own independent subscription lifecycle. Snap events
+// are rate-limited here so the 180 Hz raw stream doesn't flood the console —
+// the producer still emits every frame, each consumer samples at its cadence.
+const xrLogState = {
+  unsubs: [] as Array<() => void>,
+  lastSnapMs: { left: 0, right: 0 } as Record<XrHand, number>,
+};
+const XR_LOG_SNAP_INTERVAL_MS = 200;  // 5 Hz console cadence for snap stream
+
+function setXrDebugLogging(on: boolean): void {
+  for (const u of xrLogState.unsubs) u();
+  xrLogState.unsubs.length = 0;
+  xrLogState.lastSnapMs.left = 0;
+  xrLogState.lastSnapMs.right = 0;
+  if (!on) return;
+  xrLogState.unsubs.push(metrics.subscribe(chanXrGesture, (p) => {
+    if (p.gesture.kind === 'pinch-hold') return;  // per-frame noise
+    const h = p.hand ? `(${p.hand})` : '';
+    // eslint-disable-next-line no-console
+    console.log(`[xr] gesture:${p.gesture.kind}${h}`, p.gesture);
+  }));
+  xrLogState.unsubs.push(metrics.subscribe(chanXrState, (p) => {
+    // eslint-disable-next-line no-console
+    console.log(`[xr] state:${p.hand} ${p.from}→${p.to}`);
+  }));
+  xrLogState.unsubs.push(metrics.subscribe(chanXrSnap, (p) => {
+    const now = performance.now();
+    if (now - xrLogState.lastSnapMs[p.hand] < XR_LOG_SNAP_INTERVAL_MS) return;
+    xrLogState.lastSnapMs[p.hand] = now;
+    const palm = p.palmDot !== null ? p.palmDot.toFixed(2) : '—';
+    // eslint-disable-next-line no-console
+    console.log(`[xr] snap:${p.hand} tracked=${p.handTracked} pinch=${p.pinching} palm=${palm} palmUp=${p.palmUp} fine=${p.fineModifier} flick=${p.flickSpeed.toFixed(2)}`);
+  }));
+}
+
 // State-transition helper: routes every xrInteractions[hand] assignment so the
 // change emits on xr.state exactly once per kind-change. Kind-identical writes
 // (e.g. re-entering pending with a fresh deadline) do not emit.
@@ -6501,7 +6550,7 @@ function saveState() {
     for (const mode of Object.keys(DEFAULTS) as SimMode[]) {
       modeSnapshot[mode] = modeParams(mode);
     }
-    const toSave = { mode: state.mode, colorTheme: state.colorTheme, camera: state.camera, fx: state.fx, ...modeSnapshot };
+    const toSave = { mode: state.mode, colorTheme: state.colorTheme, camera: state.camera, fx: state.fx, debug: state.debug, ...modeSnapshot };
     localStorage.setItem(STORAGE_KEY, JSON.stringify(toSave));
   } catch (e) { /* ignore quota errors */ }
 }
@@ -6519,6 +6568,7 @@ function loadState() {
     }
     if (parsed.camera) Object.assign(state.camera, parsed.camera);
     if (parsed.fx) Object.assign(state.fx, parsed.fx);
+    if (parsed.debug) Object.assign(state.debug, parsed.debug);
     syncThemeTransition(state.colorTheme);
   } catch (e) { /* ignore parse errors — start fresh */ }
 }
@@ -6557,6 +6607,11 @@ function syncUIFromState() {
   // Sync theme buttons
   document.querySelectorAll<HTMLButtonElement>('#theme-presets .preset-btn').forEach(btn =>
     btn.classList.toggle('active', btn.dataset.theme === state.colorTheme));
+
+  // Sync XR debug-log checkbox + subscription to loaded state.
+  const xrLogToggle = document.getElementById('toggle-xr-log') as HTMLInputElement | null;
+  if (xrLogToggle) xrLogToggle.checked = state.debug.xrLog;
+  setXrDebugLogging(state.debug.xrLog);
 
   // Rebuild shape params for current parametric shape
   rebuildShapeParams();

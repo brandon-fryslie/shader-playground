@@ -144,6 +144,11 @@ export interface AppState {
   attractors: Attractor[];
   pointerToAttractor: Map<number, number>;
   fx: FxParams;
+  debug: DebugSettings;
+}
+
+export interface DebugSettings {
+  xrLog: boolean;   // console-log XR gesture / state / snapshot metrics
 }
 
 export interface ThemeColors {
