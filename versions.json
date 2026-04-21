@@ -4,15 +4,29 @@
     {
       "version": "pr-12",
       "ref": "refs/pull/12/merge",
-      "sha": "969382aaa865e18e8928a4864688c5ab5dab88ce",
-      "timestamp": "2026-04-21T04:27:09.431Z",
+      "sha": "d4de8d829c5280ea5597f617e2196c737dc9cfa1",
+      "timestamp": "2026-04-21T04:30:37.192Z",
       "commits": [
         {
-          "sha": "969382aaa865e18e8928a4864688c5ab5dab88ce",
+          "sha": "d4de8d829c5280ea5597f617e2196c737dc9cfa1",
           "author_name": "Brandon Fryslie",
           "author_email": "530235+brandon-fryslie@users.noreply.github.com",
-          "timestamp": "2026-04-21T04:26:52Z",
-          "message": "Merge 70a5c3ced0ab464cffbf7ce1c32db4cdc90303b8 into 806c0ac22ecb4ac0a01350d9c72de335e33649f7\n"
+          "timestamp": "2026-04-21T04:30:18Z",
+          "message": "Merge cd40ebad1b14ce0d3002257cc202ebabd04bc2ae into 806c0ac22ecb4ac0a01350d9c72de335e33649f7\n"
+        },
+        {
+          "sha": "cd40ebad1b14ce0d3002257cc202ebabd04bc2ae",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-20T22:30:10-06:00",
+          "message": "fix(xr-ui): normalize slider/dial value to 0..1 by binding range\n\nRenderer's instance buffer carries 'value' as 0..1; the shader's slider\nfill + thumb position math assumes that. Step.ts was passing the raw\nbinding value (e.g. physics.G=1.0 in range [0.05, 5.0]) which the\nshader clamped to 1.0 — sliders rendered fully filled, indistinguishable\nfrom buttons. Normalizing in readWidgetValue.\n\nGenerated with [Claude Code](https://claude.ai/code)\nvia [Happy](https://happy.engineering)\n\nCo-Authored-By: Claude <noreply@anthropic.com>\nCo-Authored-By: Happy <yesreply@happy.engineering>\n"
+        },
+        {
+          "sha": "aff6225317dd656f59a0f8b9f04b46b981ee38ff",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-20T22:28:49-06:00",
+          "message": "docs(claude): document GH Pages PR-preview deployment URLs\n\nGenerated with [Claude Code](https://claude.ai/code)\nvia [Happy](https://happy.engineering)\n\nCo-Authored-By: Claude <noreply@anthropic.com>\nCo-Authored-By: Happy <yesreply@happy.engineering>\n"
         },
         {
           "sha": "70a5c3ced0ab464cffbf7ce1c32db4cdc90303b8",
