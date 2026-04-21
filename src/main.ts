@@ -5769,9 +5769,15 @@ async function toggleXR() {
     const widgetPad  = { x: 0.02, y: 0.02 };
     xrUiRegistry.layouts.set('debug', {
       id: 'debug-panel', kind: 'panel',
-      // Lifted from y=1.4 → y=1.55 so the bottom row sits at gaze level for
-      // a typical standing user (~1.6m eye height) instead of below the chest.
-      anchor: { kind: 'world', pose: { position: [0, 1.55, -0.6], orientation: idQuat } },
+      // head-hud anchor pins the debug fixture ~70cm in front of the user's
+      // face so it stays interactive regardless of xrViewOffset (the
+      // simulation pan/zoom). World-anchored at z=-0.6 it appeared 4.4m
+      // away because the default xrViewOffset.z = -5 puts the camera 5m
+      // back from world origin — widgets shrunk to pixel-sized squares
+      // (per first XR session screenshots). Offset y=-0.15 drops the panel
+      // below eye-line so it doesn't block the simulation.
+      anchor: { kind: 'head-hud', distance: 0.7,
+                offset: { position: [0, -0.15, 0], orientation: idQuat } },
       size: { x: 1.1, y: 0.5 },
       children: [
         {
