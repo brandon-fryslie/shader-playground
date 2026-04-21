@@ -72,15 +72,19 @@ struct Params {
 // No velocity-dependent terms exist in this shader. Time-reversibility follows directly.
 
 // Soft outer boundary — conservative containment (quadratic potential for r > R_outer).
-const N_BODY_OUTER_RADIUS = 15.0;   // raised from 8; dark matter handles normal confinement
+// [LAW:one-source-of-truth] Sized to the visual room (grid.wgsl ROOM_HALF_WIDTH=72)
+// so containment happens near the walls the user sees, not in a tiny central box.
+const N_BODY_OUTER_RADIUS = 60.0;
 const N_BODY_BOUNDARY_PULL = 0.01;
 
 // Periodic domain (3-torus). Particles leaving any face reappear on the
 // opposite face with the same velocity. Authoritative extent for downstream
 // PM-grid work. [LAW:one-source-of-truth] Single constant shared by the
-// integrator's wrap and (in later tickets) the PM grid allocation.
-const DOMAIN_SIZE = 32.0;     // cube edge length
-const DOMAIN_HALF = 16.0;     // = DOMAIN_SIZE / 2
+// integrator's wrap and the PM grid allocation. Sized to the visual room
+// (grid.wgsl ROOM_HALF_WIDTH=72) so the periodic cube fills the space, not a
+// 32³ box floating in the middle of a 144-wide room.
+const DOMAIN_SIZE = 128.0;    // cube edge length
+const DOMAIN_HALF = 64.0;     // = DOMAIN_SIZE / 2
 
 // Per-attractor conservative force constants.
 const INTERACTION_WELL_STRENGTH = 12.0;

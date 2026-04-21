@@ -95,7 +95,7 @@ The integration scheme per step (single GPU dispatch):
 | Miyamoto-Nagai disk | Axisymmetric vertical confinement | `params.diskMass`, `params.diskScaleA`, `params.diskScaleB` |
 | Attractor wells | Per-attractor 1/r² well + repulsive core (up to 32) | `INTERACTION_WELL_STRENGTH`, `INTERACTION_CORE_*` |
 | Tidal quadrupole | Rotating quadrupole seeds spiral arms | `params.tidalStrength`, rate 0.15 rad/s |
-| Soft boundary | Containment at r > 15 | `N_BODY_OUTER_RADIUS = 15`, `N_BODY_BOUNDARY_PULL` |
+| Soft boundary | Containment at r > 60 | `N_BODY_OUTER_RADIUS = 60`, `N_BODY_BOUNDARY_PULL` |
 
 **No velocity-dependent forces exist.** All dissipative forces (damping, friction, disk recovery) were removed and replaced with the dark matter potentials. The virial controller is removed — dark matter provides structural stability.
 

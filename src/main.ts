@@ -1701,9 +1701,9 @@ function createPhysicsSimulation() {
   // Values much larger indicate a sampling mismatch (pos vs posHalf) or a
   // non-reversible operation slipped in somewhere.
   const PM_GRID_RES = 128;                          // 128³ cells at level 0
-  const PM_DOMAIN_HALF = 16.0;                      // matches DOMAIN_HALF in nbody.compute.wgsl
-  const PM_DOMAIN_SIZE = PM_DOMAIN_HALF * 2;        // = 32.0
-  const PM_CELL_SIZE = PM_DOMAIN_SIZE / PM_GRID_RES; // = 0.25 world units per cell
+  const PM_DOMAIN_HALF = 64.0;                      // matches DOMAIN_HALF in nbody.compute.wgsl (sized to visual room)
+  const PM_DOMAIN_SIZE = PM_DOMAIN_HALF * 2;        // = 128.0
+  const PM_CELL_SIZE = PM_DOMAIN_SIZE / PM_GRID_RES; // = 1.0 world units per cell
   const PM_FIXED_POINT_SCALE = 65536;               // 2^16 — u32 atomic mass accumulation
   const PM_MULTIGRID_LEVELS = 6;                    // 128³, 64³, 32³, 16³, 8³, 4³
   const PM_V_CYCLE_COUNT = 4;                       // V-cycles per Poisson solve
