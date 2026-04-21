@@ -4,15 +4,22 @@
     {
       "version": "pr-12",
       "ref": "refs/pull/12/merge",
-      "sha": "e848ae1160014c4902fe6ebba0b99dcdb9fe15eb",
-      "timestamp": "2026-04-21T05:20:01.844Z",
+      "sha": "09c7119a3866426977709c1eb673243f0cea8d01",
+      "timestamp": "2026-04-21T05:43:05.390Z",
       "commits": [
         {
-          "sha": "e848ae1160014c4902fe6ebba0b99dcdb9fe15eb",
+          "sha": "09c7119a3866426977709c1eb673243f0cea8d01",
           "author_name": "Brandon Fryslie",
           "author_email": "530235+brandon-fryslie@users.noreply.github.com",
-          "timestamp": "2026-04-21T05:19:43Z",
-          "message": "Merge 45becc87049068e0b8b3abee8a4620c13309e0f2 into 806c0ac22ecb4ac0a01350d9c72de335e33649f7\n"
+          "timestamp": "2026-04-21T05:42:50Z",
+          "message": "Merge f2aa88227724e8375b610bbdf365224e62889e49 into 806c0ac22ecb4ac0a01350d9c72de335e33649f7\n"
+        },
+        {
+          "sha": "f2aa88227724e8375b610bbdf365224e62889e49",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-20T23:42:32-06:00",
+          "message": "feat(xr): live console logger + UI toggle for XR debug metrics\n\nAdds a pluggable consumer on the existing metrics bus: the XR Debug Log\ncheckbox in the Controls panel subscribes/unsubscribes a console logger\nto xr.gesture / xr.state / xr.snap. Toggle state persists via saveState.\n\nWhen off, the metrics producers see zero subscribers on these channels\nand skip payload construction — no runtime cost. When on, gesture and\nstate edge events log every emission; snap stream (180 Hz) is\nrate-limited per-hand to 5 Hz in the consumer to keep the console\nreadable while leaving the raw stream available for any future consumer\n(HUD, diagnostic panel, ring buffer) at whatever cadence it prefers.\n\n[LAW:single-enforcer] The toggle is the sole site that mutates\nstate.debug.xrLog and calls setXrDebugLogging in lockstep.\n[LAW:dataflow-not-control-flow] Producers don't branch on \"is debug\nmode on\" — they check chan.subscribers.size, which is pure data.\n\nGenerated with [Claude Code](https://claude.ai/code)\nvia [Happy](https://happy.engineering)\n\nCo-Authored-By: Claude <noreply@anthropic.com>\nCo-Authored-By: Happy <yesreply@happy.engineering>\n"
         },
         {
           "sha": "45becc87049068e0b8b3abee8a4620c13309e0f2",
