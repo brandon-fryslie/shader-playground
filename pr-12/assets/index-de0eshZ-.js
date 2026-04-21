@@ -1024,6 +1024,13 @@ struct Params {
 const N_BODY_OUTER_RADIUS = 15.0;   // raised from 8; dark matter handles normal confinement
 const N_BODY_BOUNDARY_PULL = 0.01;
 
+// Periodic domain (3-torus). Particles leaving any face reappear on the
+// opposite face with the same velocity. Authoritative extent for downstream
+// PM-grid work. [LAW:one-source-of-truth] Single constant shared by the
+// integrator's wrap and (in later tickets) the PM grid allocation.
+const DOMAIN_SIZE = 32.0;     // cube edge length
+const DOMAIN_HALF = 16.0;     // = DOMAIN_SIZE / 2
+
 // Per-attractor conservative force constants.
 const INTERACTION_WELL_STRENGTH = 12.0;
 const INTERACTION_WELL_SOFTENING = 0.25;
@@ -1034,6 +1041,17 @@ const INTERACTION_CORE_PRESSURE = 16.0;
 // [LAW:one-source-of-truth] TILE_SIZE matches @workgroup_size so every thread loads exactly one body per tile.
 const TILE_SIZE = 256u;
 var<workgroup> tile: array<vec4f, TILE_SIZE>;
+
+// Maps each component into [-DOMAIN_HALF, +DOMAIN_HALF) via a reversible mod.
+// The + DOMAIN_HALF shift handles negative values cleanly (WGSL's % can return
+// negative results for negative operands, so we use floor() instead).
+// [LAW:dataflow-not-control-flow] Pure function of position — no history, no
+// velocity, no branching. Commutes with dt-reversal so DKD stays exactly
+// reversible across wraps.
+fn wrapPeriodic(p: vec3f) -> vec3f {
+  let shifted = p + vec3f(DOMAIN_HALF);
+  return shifted - floor(shifted / DOMAIN_SIZE) * DOMAIN_SIZE - vec3f(DOMAIN_HALF);
+}
 
 @compute @workgroup_size(TILE_SIZE)
 fn main(@builtin(global_invocation_id) gid: vec3u, @builtin(local_invocation_id) lid: vec3u) {
@@ -1142,8 +1160,12 @@ fn main(@builtin(global_invocation_id) gid: vec3u, @builtin(local_invocation_id)
   // ── DKD STEP 2: Kick (full step) ───────────────────────────────────────────
   let velNew = me.vel + acc * params.dt;
 
-  // ── DKD STEP 3: Second half-drift ──────────────────────────────────────────
-  let posNew = posHalf + velNew * halfDt;
+  // ── DKD STEP 3: Second half-drift + periodic wrap ──────────────────────────
+  // Wrap only the FINAL position. Wrapping posHalf mid-integrator would break
+  // DKD symmetry because the force evaluation assumes posHalf is the midpoint
+  // between in/out positions; a wrap jump there would desynchronize pairs.
+  let posNewRaw = posHalf + velNew * halfDt;
+  let posNew = wrapPeriodic(posNewRaw);
 
   bodiesOut[idx] = Body(posNew, me.mass, velNew, 0.0, vec3f(0.0), 0.0);
 }
@@ -2849,6 +2871,13 @@ struct Params {
 const N_BODY_OUTER_RADIUS = 15.0;   // raised from 8; dark matter handles normal confinement
 const N_BODY_BOUNDARY_PULL = 0.01;
 
+// Periodic domain (3-torus). Particles leaving any face reappear on the
+// opposite face with the same velocity. Authoritative extent for downstream
+// PM-grid work. [LAW:one-source-of-truth] Single constant shared by the
+// integrator's wrap and (in later tickets) the PM grid allocation.
+const DOMAIN_SIZE = 32.0;     // cube edge length
+const DOMAIN_HALF = 16.0;     // = DOMAIN_SIZE / 2
+
 // Per-attractor conservative force constants.
 const INTERACTION_WELL_STRENGTH = 12.0;
 const INTERACTION_WELL_SOFTENING = 0.25;
@@ -2859,6 +2888,17 @@ const INTERACTION_CORE_PRESSURE = 16.0;
 // [LAW:one-source-of-truth] TILE_SIZE matches @workgroup_size so every thread loads exactly one body per tile.
 const TILE_SIZE = 256u;
 var<workgroup> tile: array<vec4f, TILE_SIZE>;
+
+// Maps each component into [-DOMAIN_HALF, +DOMAIN_HALF) via a reversible mod.
+// The + DOMAIN_HALF shift handles negative values cleanly (WGSL's % can return
+// negative results for negative operands, so we use floor() instead).
+// [LAW:dataflow-not-control-flow] Pure function of position — no history, no
+// velocity, no branching. Commutes with dt-reversal so DKD stays exactly
+// reversible across wraps.
+fn wrapPeriodic(p: vec3f) -> vec3f {
+  let shifted = p + vec3f(DOMAIN_HALF);
+  return shifted - floor(shifted / DOMAIN_SIZE) * DOMAIN_SIZE - vec3f(DOMAIN_HALF);
+}
 
 @compute @workgroup_size(TILE_SIZE)
 fn main(@builtin(global_invocation_id) gid: vec3u, @builtin(local_invocation_id) lid: vec3u) {
@@ -2967,8 +3007,12 @@ fn main(@builtin(global_invocation_id) gid: vec3u, @builtin(local_invocation_id)
   // ── DKD STEP 2: Kick (full step) ───────────────────────────────────────────
   let velNew = me.vel + acc * params.dt;
 
-  // ── DKD STEP 3: Second half-drift ──────────────────────────────────────────
-  let posNew = posHalf + velNew * halfDt;
+  // ── DKD STEP 3: Second half-drift + periodic wrap ──────────────────────────
+  // Wrap only the FINAL position. Wrapping posHalf mid-integrator would break
+  // DKD symmetry because the force evaluation assumes posHalf is the midpoint
+  // between in/out positions; a wrap jump there would desynchronize pairs.
+  let posNewRaw = posHalf + velNew * halfDt;
+  let posNew = wrapPeriodic(posNewRaw);
 
   bodiesOut[idx] = Body(posNew, me.mass, velNew, 0.0, vec3f(0.0), 0.0);
 }

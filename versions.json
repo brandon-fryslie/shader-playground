@@ -4,15 +4,22 @@
     {
       "version": "pr-12",
       "ref": "refs/pull/12/merge",
-      "sha": "09c7119a3866426977709c1eb673243f0cea8d01",
-      "timestamp": "2026-04-21T05:43:05.390Z",
+      "sha": "2595f1ac51c766a9cf008d2a8f308829f42f6fdb",
+      "timestamp": "2026-04-21T06:27:25.396Z",
       "commits": [
         {
-          "sha": "09c7119a3866426977709c1eb673243f0cea8d01",
+          "sha": "2595f1ac51c766a9cf008d2a8f308829f42f6fdb",
           "author_name": "Brandon Fryslie",
           "author_email": "530235+brandon-fryslie@users.noreply.github.com",
-          "timestamp": "2026-04-21T05:42:50Z",
-          "message": "Merge f2aa88227724e8375b610bbdf365224e62889e49 into 806c0ac22ecb4ac0a01350d9c72de335e33649f7\n"
+          "timestamp": "2026-04-21T06:27:08Z",
+          "message": "Merge 9f456beb8351ea149c6f502f30483ae1b6754d50 into 806c0ac22ecb4ac0a01350d9c72de335e33649f7\n"
+        },
+        {
+          "sha": "9f456beb8351ea149c6f502f30483ae1b6754d50",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-21T00:26:53-06:00",
+          "message": "feat(physics): periodic torus domain — wrap particle positions at cube faces\n\nReplaces the \"escape into the void\" failure mode with a 3-torus: particles\nleaving any face reappear on the opposite face with the same velocity.\nDOMAIN_SIZE / DOMAIN_HALF become the authoritative domain extent for all\ndownstream PM-grid work.\n\nwrapPeriodic is pure position-only — commutes with dt-reversal, so DKD\nreversibility is preserved across wraps without any journal entry. The\nwrap is applied ONLY to the final position of each step; wrapping posHalf\nmid-integrator would desynchronize the tile-loaded srcHalf forces and\nbreak pair consistency.\n\nticket: shader-physics-brr.1\n\nGenerated with [Claude Code](https://claude.ai/code)\nvia [Happy](https://happy.engineering)\n\nCo-Authored-By: Claude <noreply@anthropic.com>\nCo-Authored-By: Happy <yesreply@happy.engineering>\n"
         },
         {
           "sha": "f2aa88227724e8375b610bbdf365224e62889e49",
