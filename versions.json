@@ -4,15 +4,22 @@
     {
       "version": "pr-12",
       "ref": "refs/pull/12/merge",
-      "sha": "15a25460727df41f97a41a0a41f559b6108ec976",
-      "timestamp": "2026-04-21T06:40:43.558Z",
+      "sha": "c5f33ff20baa24406e26624f04c44daa64cff04c",
+      "timestamp": "2026-04-21T06:50:39.593Z",
       "commits": [
         {
-          "sha": "15a25460727df41f97a41a0a41f559b6108ec976",
+          "sha": "c5f33ff20baa24406e26624f04c44daa64cff04c",
           "author_name": "Brandon Fryslie",
           "author_email": "530235+brandon-fryslie@users.noreply.github.com",
-          "timestamp": "2026-04-21T06:40:25Z",
-          "message": "Merge 60fdc4cdf9d9a95d00f775f61d53a9ae00a8234f into 806c0ac22ecb4ac0a01350d9c72de335e33649f7\n"
+          "timestamp": "2026-04-21T06:50:22Z",
+          "message": "Merge 0a08f7c40c296d0b660d7e5535ef1e08c6515b05 into 806c0ac22ecb4ac0a01350d9c72de335e33649f7\n"
+        },
+        {
+          "sha": "0a08f7c40c296d0b660d7e5535ef1e08c6515b05",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-21T00:50:07-06:00",
+          "message": "feat(physics): PM multigrid V-cycle Poisson solver (periodic BC)\n\nFour new compute shaders + five pipelines wired into createPhysicsSimulation\nto solve ∇²φ = 4πGρ on a 128³ periodic grid via standard full-approximation\nmultigrid V-cycle (6 levels: 128³ → 4³).\n\nShaders:\n\n  pm.smooth    Red-black Gauss-Seidel. Dispatched per (level, parity); cells\n               whose (x+y+z) parity mismatches return early. In-place updates\n               are safe because neighbors are always opposite-color within\n               one dispatch.\n  pm.residual  r = 4πGρ - ∇²φ with the 7-point periodic-wrap stencil. Run\n               once per level between pre-smoothing and restriction.\n  pm.restrict  Straight average of 8 fine cells per coarse cell. No wrap\n               needed (source block always in-domain).\n  pm.prolong   Trilinear interpolation from coarse to fine, ADDED to the\n               fine buffer (it's a correction, not a replacement). Periodic\n               wrap on coarse indices.\n\nDriver (compute(encoder)):\n\n  for v in 4 V-cycles:\n    clearBuffer coarse potentials (warm-start level 0 across V-cycles)\n    descent l=0..4:\n      pre-smooth (red, black) × 2\n      residual; restrict to l+1\n    coarsest l=5: smooth × 16 sweeps\n    ascent l=4..0: prolong; post-smooth (red, black) × 2\n\nAdditional allocations — pmRho[1..5] for coarse-level RHS buffers (pmRho[0]\naliases pmDensityF32). 28 tiny per-level uniform buffers pre-populated at\nfactory init: (gridRes, parity, hSquared, fourPiG) for smooth+residual;\ncoarseGridRes for restrict; fineGridRes for prolong.\n\nNo force coupling yet — pmPotential[0] is solved but not read by any other\nstage. Ticket .5 will sample force from the potential field and blend with\ntile-pair gravity.\n\nDiagnostics: window.__pmDumpPotential() and window.__pmMaxResidual() mirror\nthe existing __pmDumpDensity pattern for verification of the point-mass\n1/r potential shape and V-cycle convergence.\n\nticket: shader-physics-brr.4\n\nGenerated with [Claude Code](https://claude.ai/code)\nvia [Happy](https://happy.engineering)\n\nCo-Authored-By: Claude <noreply@anthropic.com>\nCo-Authored-By: Happy <yesreply@happy.engineering>\n"
         },
         {
           "sha": "60fdc4cdf9d9a95d00f775f61d53a9ae00a8234f",
