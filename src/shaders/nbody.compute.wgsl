@@ -45,7 +45,7 @@ struct Params {
   diskMass: f32,      // Miyamoto-Nagai disk mass (was `diskVertDamp`)
   diskScaleA: f32,    // MN radial scale length (was `diskRadDamp`)
   diskScaleB: f32,    // MN vertical scale height (was `diskTangGain`)
-  _pad_e: f32,        // (was `diskVertSpring`)
+  pmBlend: f32,       // 0 = tile-pair gravity only; 1 = PM gravity only (was `_pad_e`)
   _pad_f: f32,        // (was `diskAlignGain`)
   _pad_d: f32,
   _pad_g: f32,        // (was `diskTangSpeed`)
@@ -57,6 +57,11 @@ struct Params {
 @group(0) @binding(0) var<storage, read> bodiesIn: array<Body>;
 @group(0) @binding(1) var<storage, read_write> bodiesOut: array<Body>;
 @group(0) @binding(2) var<uniform> params: Params;
+// Per-particle PM force (CIC-interpolated gradient of the Poisson potential).
+// Populated each frame by pm.interpolate.wgsl before this shader runs. At
+// params.pmBlend = 0 the buffer is read but ignored; at pmBlend = 1 it
+// replaces the tile-pair gravity entirely.
+@group(0) @binding(3) var<storage, read> pmForce: array<vec4f>;
 
 // [LAW:one-source-of-truth] All forces are conservative (position-only, derivable from a potential).
 // No velocity-dependent terms exist in this shader. Time-reversibility follows directly.
@@ -136,6 +141,12 @@ fn main(@builtin(global_invocation_id) gid: vec3u, @builtin(local_invocation_id)
   }
 
   if (!alive) { return; }
+
+  // PM force blend. Only tile-pair gravity is blended here; analytic forces
+  // (attractors, halo, disk, boundary, tidal) stay full-strength at any
+  // blend value. [LAW:dataflow-not-control-flow] Same math every frame;
+  // pmBlend varies the value, never the execution path.
+  acc = acc * (1.0 - params.pmBlend) + pmForce[idx].xyz * params.pmBlend;
 
   let countScale = sqrt(f32(params.count) / 1000.0);
 

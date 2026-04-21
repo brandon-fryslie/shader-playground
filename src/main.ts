@@ -24,6 +24,7 @@ import SHADER_PM_SMOOTH from './shaders/pm.smooth.wgsl?raw';
 import SHADER_PM_RESIDUAL from './shaders/pm.residual.wgsl?raw';
 import SHADER_PM_RESTRICT from './shaders/pm.restrict.wgsl?raw';
 import SHADER_PM_PROLONG from './shaders/pm.prolong.wgsl?raw';
+import SHADER_PM_INTERPOLATE from './shaders/pm.interpolate.wgsl?raw';
 import SHADER_NBODY_CLASSIC_RENDER from './shaders/nbody.classic.render.wgsl?raw';
 import SHADER_FLUID_FORCES_ADVECT from './shaders/fluid.forces.wgsl?raw';
 import SHADER_FLUID_DIFFUSE from './shaders/fluid.diffuse.wgsl?raw';
@@ -1931,6 +1932,41 @@ function createPhysicsSimulation() {
   const pmRestrictPipeline = device.createComputePipeline({ layout: device.createPipelineLayout({ bindGroupLayouts: [pmRestrictBGL] }), compute: { module: pmRestrictModule, entryPoint: 'main' } });
   const pmProlongPipeline  = device.createComputePipeline({ layout: device.createPipelineLayout({ bindGroupLayouts: [pmProlongBGL] }),  compute: { module: pmProlongModule,  entryPoint: 'main' } });
 
+  // PM force interpolation — reads pmPotential[0] + current bodies, writes pmForce.
+  const pmInterpolateModule = createShaderModuleChecked('pm.interpolate', SHADER_PM_INTERPOLATE);
+  const pmInterpolateBGL = device.createBindGroupLayout({
+    entries: [
+      { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
+      { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
+      { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
+      { binding: 3, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
+    ]
+  });
+  const pmInterpolatePipeline = device.createComputePipeline({
+    layout: device.createPipelineLayout({ bindGroupLayouts: [pmInterpolateBGL] }),
+    compute: { module: pmInterpolateModule, entryPoint: 'main' }
+  });
+  // Per-ping-pong interpolate bind groups — read from whichever body buffer
+  // is the current frame's input (matches pmDepositBG indexing).
+  const pmInterpolateBG = [
+    device.createBindGroup({ layout: pmInterpolateBGL, entries: [
+      { binding: 0, resource: { buffer: bufferA } },
+      { binding: 1, resource: { buffer: pmPotential[0] } },
+      { binding: 2, resource: { buffer: pmForce } },
+      { binding: 3, resource: { buffer: pmParamsBuffer } },
+    ]}),
+    device.createBindGroup({ layout: pmInterpolateBGL, entries: [
+      { binding: 0, resource: { buffer: bufferB } },
+      { binding: 1, resource: { buffer: pmPotential[0] } },
+      { binding: 2, resource: { buffer: pmForce } },
+      { binding: 3, resource: { buffer: pmParamsBuffer } },
+    ]}),
+  ];
+
+  // Runtime blend knob. 0 = pure tile-pair gravity (legacy); 1 = pure PM.
+  // Flipped via window.__pmSetBlend at runtime for side-by-side testing.
+  let pmBlendValue = 0.0;
+
   // Per-level uniform buffers, pre-populated at factory init. Each holds a
   // tiny struct (16 bytes) specific to its shader:
   //   smoothUniform[l][parity]  → { gridRes, parity, hSquared, fourPiG }
@@ -2034,6 +2070,7 @@ function createPhysicsSimulation() {
       { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
       { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
       { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
+      { binding: 3, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } }, // pmForce
     ]
   });
 
@@ -2105,11 +2142,13 @@ function createPhysicsSimulation() {
       { binding: 0, resource: { buffer: bufferA } },
       { binding: 1, resource: { buffer: bufferB } },
       { binding: 2, resource: { buffer: paramsBuffer } },
+      { binding: 3, resource: { buffer: pmForce } },
     ]}),
     device.createBindGroup({ layout: computeBGL, entries: [
       { binding: 0, resource: { buffer: bufferB } },
       { binding: 1, resource: { buffer: bufferA } },
       { binding: 2, resource: { buffer: paramsBuffer } },
+      { binding: 3, resource: { buffer: pmForce } },
     ]}),
   ];
 
@@ -2210,7 +2249,8 @@ function createPhysicsSimulation() {
       f32[16] = p.diskMass ?? 3.0;
       f32[17] = p.diskScaleA ?? 1.5;
       f32[18] = p.diskScaleB ?? 0.3;
-      f32[19] = 0; f32[20] = 0; f32[21] = 0; f32[22] = 0;
+      f32[19] = pmBlendValue;  // was _pad_e, now params.pmBlend (see nbody.compute.wgsl)
+      f32[20] = 0; f32[21] = 0; f32[22] = 0;
       f32[23] = p.tidalStrength ?? 0.005;
 
       // ── ATTRACTOR DATA: forward computes + journals; reverse reads from journal ──
@@ -2330,6 +2370,16 @@ function createPhysicsSimulation() {
 
         vPass.end();
       }
+
+      // ── PM force interpolation ─────────────────────────────────────────
+      // Sample the freshly-solved pmPotential[0] at each particle via the CIC
+      // transpose kernel; write vec4 force to pmForce. Dispatched AFTER the
+      // V-cycle (reads phi) and BEFORE the main n-body compute (reads pmForce).
+      const iPass = encoder.beginComputePass();
+      iPass.setPipeline(pmInterpolatePipeline);
+      iPass.setBindGroup(0, pmInterpolateBG[pingPong]);
+      iPass.dispatchWorkgroups(Math.ceil(count / 256));
+      iPass.end();
 
       const cTsw = tsWrites(0);
       const pass = encoder.beginComputePass(cTsw ? { timestampWrites: cTsw } : undefined);
@@ -2547,6 +2597,12 @@ function createPhysicsSimulation() {
       pmDensityStaging.unmap();
       pmDiagPending = false;
       return out;
+    },
+
+    // Runtime PM-vs-pair blend setter. Clamped [0,1]. Takes effect on the
+    // next frame's params pack. Intended for dev use via window.__pmSetBlend.
+    setBlend(x: number): void {
+      pmBlendValue = Math.max(0, Math.min(1, x));
     },
 
     // Max |residual| at level 0 — the convergence metric for the V-cycle.
@@ -7220,6 +7276,11 @@ async function main() {
     dumpDensity?: () => Promise<Float32Array | null>,
     dumpPotential?: () => Promise<Float32Array | null>,
     maxResidual?: () => Promise<number | null>,
+    setBlend?: (x: number) => void,
+  };
+  (window as any).__pmSetBlend = (x: number) => {
+    const sim = simulations[state.mode] as unknown as PmDiag;
+    sim?.setBlend?.(x);
   };
   (window as any).__pmDumpDensity = () => {
     const sim = simulations[state.mode] as unknown as PmDiag;
