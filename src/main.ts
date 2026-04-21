@@ -18,6 +18,8 @@ import SHADER_NBODY_COMPUTE from './shaders/nbody.compute.wgsl?raw';
 import SHADER_NBODY_STATS from './shaders/nbody.stats.wgsl?raw';
 import SHADER_NBODY_RENDER from './shaders/nbody.render.wgsl?raw';
 import SHADER_NBODY_CLASSIC_COMPUTE from './shaders/nbody.classic.compute.wgsl?raw';
+import SHADER_PM_DEPOSIT from './shaders/pm.deposit.wgsl?raw';
+import SHADER_PM_DENSITY_CONVERT from './shaders/pm.density_convert.wgsl?raw';
 import SHADER_NBODY_CLASSIC_RENDER from './shaders/nbody.classic.render.wgsl?raw';
 import SHADER_FLUID_FORCES_ADVECT from './shaders/fluid.forces.wgsl?raw';
 import SHADER_FLUID_DIFFUSE from './shaders/fluid.diffuse.wgsl?raw';
@@ -1791,6 +1793,87 @@ function createPhysicsSimulation() {
   // Mean density scratch (single f32 + padding to 16 bytes).
   const pmMeanScratch = device.createBuffer({ size: 16, usage: PM_BUF_USAGE });
 
+  // PM uniform params — 32 bytes, shared by deposit + reduce + convert pipelines.
+  // [LAW:one-source-of-truth] Single host-side uniform; both shader structs
+  // (pm.deposit.wgsl and pm.density_convert.wgsl) declare the identical layout.
+  const pmParamsBuffer = device.createBuffer({ size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+  const pmParamsData = new ArrayBuffer(32);
+  const pmParamsF32 = new Float32Array(pmParamsData);
+  const pmParamsU32 = new Uint32Array(pmParamsData);
+  // Pack fields that don't change frame-to-frame once; dt is rewritten each frame.
+  pmParamsU32[1] = count;                  // particle count
+  pmParamsU32[2] = PM_GRID_RES;            // gridRes
+  pmParamsF32[3] = PM_DOMAIN_HALF;         // domainHalf
+  pmParamsF32[4] = PM_CELL_SIZE;           // cellSize
+  pmParamsF32[5] = PM_FIXED_POINT_SCALE;   // fixedPointScale
+  pmParamsU32[6] = pmLevel0Cells;          // cellCount = gridRes³
+
+  // PM deposit pipeline: 1 read-only particle buffer + 1 atomic-u32 density + params.
+  const pmDepositModule = createShaderModuleChecked('pm.deposit', SHADER_PM_DEPOSIT);
+  const pmDepositBGL = device.createBindGroupLayout({
+    entries: [
+      { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
+      { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
+      { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
+    ]
+  });
+  const pmDepositPipeline = device.createComputePipeline({
+    layout: device.createPipelineLayout({ bindGroupLayouts: [pmDepositBGL] }),
+    compute: { module: pmDepositModule, entryPoint: 'main' }
+  });
+
+  // PM density convert pipelines (share one BGL + module; two entry points).
+  const pmConvertModule = createShaderModuleChecked('pm.density_convert', SHADER_PM_DENSITY_CONVERT);
+  const pmConvertBGL = device.createBindGroupLayout({
+    entries: [
+      { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
+      { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
+      { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
+      { binding: 3, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
+    ]
+  });
+  const pmConvertLayout = device.createPipelineLayout({ bindGroupLayouts: [pmConvertBGL] });
+  const pmReducePipeline = device.createComputePipeline({
+    layout: pmConvertLayout,
+    compute: { module: pmConvertModule, entryPoint: 'reduce' }
+  });
+  const pmConvertPipeline = device.createComputePipeline({
+    layout: pmConvertLayout,
+    compute: { module: pmConvertModule, entryPoint: 'convert' }
+  });
+  const pmConvertBG = device.createBindGroup({
+    layout: pmConvertBGL, entries: [
+      { binding: 0, resource: { buffer: pmDensityU32 } },
+      { binding: 1, resource: { buffer: pmDensityF32 } },
+      { binding: 2, resource: { buffer: pmMeanScratch } },
+      { binding: 3, resource: { buffer: pmParamsBuffer } },
+    ]
+  });
+
+  // Per-ping-pong deposit bind group: reads whichever body buffer is the
+  // current frame's input. Index matches the main compute's pingPong value —
+  // pmDepositBG[0] reads bufferA (pingPong=0 input), pmDepositBG[1] reads bufferB.
+  const pmDepositBG = [
+    device.createBindGroup({ layout: pmDepositBGL, entries: [
+      { binding: 0, resource: { buffer: bufferA } },
+      { binding: 1, resource: { buffer: pmDensityU32 } },
+      { binding: 2, resource: { buffer: pmParamsBuffer } },
+    ]}),
+    device.createBindGroup({ layout: pmDepositBGL, entries: [
+      { binding: 0, resource: { buffer: bufferB } },
+      { binding: 1, resource: { buffer: pmDensityU32 } },
+      { binding: 2, resource: { buffer: pmParamsBuffer } },
+    ]}),
+  ];
+
+  // Dev-only staging for window.__pmDumpDensity. 128³ × 4 = 8 MB. Persistent
+  // allocation mirrors the existing diagStaging pattern.
+  const pmDensityStaging = device.createBuffer({
+    size: pmLevel0Cells * 4,
+    usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+  });
+  let pmDiagPending = false;
+
   const computeModule = createShaderModuleChecked('nbody.compute', SHADER_NBODY_COMPUTE_EDIT || SHADER_NBODY_COMPUTE);
   const renderModule = createShaderModuleChecked('nbody.render', SHADER_NBODY_RENDER_EDIT || SHADER_NBODY_RENDER);
 
@@ -2017,6 +2100,27 @@ function createPhysicsSimulation() {
       }
       device.queue.writeBuffer(paramsBuffer, 0, paramsBytes);
 
+      // ── PM density field (CIC deposition → mean reduction → subtract/convert) ──
+      // Produces pmDensityF32 (mean-zero density) for the Poisson solver in .4.
+      // No force yet — this shader's output is not read by any other stage in
+      // this ticket. Once .5 lands, PM force adds alongside tile-pair gravity.
+      // [LAW:dataflow-not-control-flow] Runs every frame; same code path whether
+      // or not the density is consumed downstream.
+      pmParamsF32[0] = dt;  // only field that varies per-frame
+      device.queue.writeBuffer(pmParamsBuffer, 0, pmParamsData);
+      encoder.clearBuffer(pmDensityU32);
+      encoder.clearBuffer(pmMeanScratch);
+      const pmPass = encoder.beginComputePass();
+      pmPass.setPipeline(pmDepositPipeline);
+      pmPass.setBindGroup(0, pmDepositBG[pingPong]);
+      pmPass.dispatchWorkgroups(Math.ceil(count / 256));
+      pmPass.setPipeline(pmReducePipeline);
+      pmPass.setBindGroup(0, pmConvertBG);
+      pmPass.dispatchWorkgroups(Math.ceil(pmLevel0Cells / 256));
+      pmPass.setPipeline(pmConvertPipeline);
+      pmPass.dispatchWorkgroups(Math.ceil(pmLevel0Cells / 256));
+      pmPass.end();
+
       const cTsw = tsWrites(0);
       const pass = encoder.beginComputePass(cTsw ? { timestampWrites: cTsw } : undefined);
       pass.setPipeline(computePipeline);
@@ -2201,6 +2305,24 @@ function createPhysicsSimulation() {
       };
     },
 
+    // Dev diagnostic: copy pmDensityF32 → staging → host, return as Float32Array.
+    // Mirrors the diagnose() pattern: gated by a pending flag so overlapping
+    // calls return null rather than tangle the staging buffer. 128³ ≈ 2.1M
+    // floats returned per call.
+    async dumpDensity(): Promise<Float32Array | null> {
+      if (pmDiagPending) return null;
+      pmDiagPending = true;
+      const enc = device.createCommandEncoder();
+      enc.copyBufferToBuffer(pmDensityF32, 0, pmDensityStaging, 0, pmLevel0Cells * 4);
+      device.queue.submit([enc.finish()]);
+      await device.queue.onSubmittedWorkDone();
+      await pmDensityStaging.mapAsync(GPUMapMode.READ);
+      const out = new Float32Array(pmDensityStaging.getMappedRange().slice(0));
+      pmDensityStaging.unmap();
+      pmDiagPending = false;
+      return out;
+    },
+
     destroy() {
       bufferA.destroy(); bufferB.destroy();
       paramsBuffer.destroy(); cameraBuffer.destroy(); blurBuffer.destroy();
@@ -2212,6 +2334,7 @@ function createPhysicsSimulation() {
       for (const b of pmPotential) b.destroy();
       for (const b of pmResidual) b.destroy();
       pmForce.destroy(); pmMeanScratch.destroy();
+      pmParamsBuffer.destroy(); pmDensityStaging.destroy();
       destroyDepthRef(depthRef);
     },
     // PM internal state — not read by external callers today. Future tickets
@@ -6836,6 +6959,13 @@ async function main() {
     return 'preset not found';
   };
   (window as any).__simState = () => ({ mode: state.mode, ...state[state.mode] as any, fps: currentFps, gpuMs: gpuFrameMs, gpuDetail: gpuTimingDetail });
+  // PM density field dump — only wired for the physics sim (other modes don't
+  // have the PM pipeline). Returns a Float32Array of length PM_GRID_RES³ or
+  // null if a prior dump is still in flight.
+  (window as any).__pmDumpDensity = () => {
+    const sim = simulations[state.mode] as unknown as { dumpDensity?: () => Promise<Float32Array | null> };
+    return sim?.dumpDensity ? sim.dumpDensity() : Promise.resolve(null);
+  };
   (window as any).__bindings = bindingRegistry;
   (window as any).__anchors = { evaluateAnchor, handFrames: xrHandFrames };
   (window as any).__xrUi = {
