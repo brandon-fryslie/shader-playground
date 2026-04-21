@@ -1,5 +1,5 @@
 import '../styles/main.css';
-import type { SimMode, Simulation, AppState, Attractor, ThemeColors, RGBThemeColors, ParamDef, ParamSection, ShapeParamDef, XRCameraOverride, DepthRef, ModeParamsMap, ShapeName } from './types';
+import type { SimMode, Simulation, AppState, Attractor, Marker, ThemeColors, RGBThemeColors, ParamDef, ParamSection, ShapeParamDef, XRCameraOverride, DepthRef, ModeParamsMap, ShapeName } from './types';
 import { maybeInitXrBridge } from './xr-bridge';
 import { bindingRegistry } from './xr-ui/bindings';
 import { evaluateAnchor, type Anchor } from './xr-ui/anchors';
@@ -17,6 +17,7 @@ import SHADER_BOIDS_RENDER from './shaders/boids.render.wgsl?raw';
 import SHADER_NBODY_COMPUTE from './shaders/nbody.compute.wgsl?raw';
 import SHADER_NBODY_STATS from './shaders/nbody.stats.wgsl?raw';
 import SHADER_NBODY_RENDER from './shaders/nbody.render.wgsl?raw';
+import SHADER_MARKERS_RENDER from './shaders/markers.render.wgsl?raw';
 import SHADER_NBODY_CLASSIC_COMPUTE from './shaders/nbody.classic.compute.wgsl?raw';
 import SHADER_PM_DEPOSIT from './shaders/pm.deposit.wgsl?raw';
 import SHADER_PM_DENSITY_CONVERT from './shaders/pm.density_convert.wgsl?raw';
@@ -464,6 +465,7 @@ const state: AppState = {
   // Released attractors decay over attractorDecaySteps(a) sim steps, then get pruned from the array.
   // Max cap of 32 is a safety rail — in practice users hit 5-10 concurrent at most.
   attractors: [] as Attractor[],
+  markers: [] as Marker[],
   pointerToAttractor: new Map<number, number>() as Map<number, number>,
   fx: {
     bloomIntensity: 0.7,
@@ -571,6 +573,7 @@ function pruneAttractors(currentStep: number) {
     if (newIdx !== undefined) newMap.set(pointerId, newIdx);
   });
   state.pointerToAttractor = newMap;
+  reindexMarkers(oldToNew);
 }
 
 function createAttractor(pointerId: number, pos: number[]): void {
@@ -586,13 +589,21 @@ function createAttractor(pointerId: number, pos: number[]): void {
       if (idx > 0) rebuilt.set(pid, idx - 1);
     });
     state.pointerToAttractor = rebuilt;
+    // Marker pool mirrors the shift — markers of the evicted attractor (idx 0) drop, rest shift down.
+    const survivors: Marker[] = [];
+    for (const m of state.markers) {
+      if (m.attractorIdx > 0) { m.attractorIdx -= 1; survivors.push(m); }
+    }
+    state.markers = survivors;
   }
   const step = currentSimStep();
   state.attractors.push({
     x: pos[0], y: pos[1], z: pos[2],
     chargeStep: step, releaseStep: -1, holdSteps: -1,
   });
-  state.pointerToAttractor.set(pointerId, state.attractors.length - 1);
+  const idx = state.attractors.length - 1;
+  state.pointerToAttractor.set(pointerId, idx);
+  spawnMarkersFor(idx, pos[0], pos[1], pos[2]);
 }
 
 function moveAttractor(pointerId: number, pos: number[]): void {
@@ -612,6 +623,74 @@ function releaseAttractor(pointerId: number): void {
   const step = currentSimStep();
   a.releaseStep = step;
   a.holdSteps = Math.max(1, step - a.chargeStep); // min 1 step to avoid zero-duration divide
+}
+
+// ─── MARKER PARTICLES (diegetic attractor indicator) ────────────────────────────
+// [LAW:one-source-of-truth] Markers are a flat pool keyed by parent attractor index. Lifecycle mirrors
+// the attractor's: spawnMarkersFor on createAttractor, reindexed on pruneAttractors, integrated each
+// frame via tickMarkers. They render into the HDR scene so bloom carries them — no overlay pass.
+const MARKERS_PER_ATTRACTOR = 36;
+const MARKER_SPAWN_RADIUS = 0.22;
+const MARKER_ORBIT_SPEED = 1.1;
+
+function spawnMarkersFor(attractorIdx: number, x: number, y: number, z: number): void {
+  const tc = getThemeColors();
+  for (let i = 0; i < MARKERS_PER_ATTRACTOR; i++) {
+    // Uniform point on sphere via inverse-CDF of cos(theta).
+    const u = Math.random() * 2 - 1;
+    const phi = Math.random() * Math.PI * 2;
+    const s = Math.sqrt(1 - u * u);
+    const dx = s * Math.cos(phi), dy = u, dz = s * Math.sin(phi);
+    const r = MARKER_SPAWN_RADIUS * (0.6 + Math.random() * 0.8);
+    // Tangent vector: cross(radial, arbitrary up) then normalize. Yields orbital velocity.
+    let tx = -dz, ty = 0, tz = dx;
+    const tLen = Math.hypot(tx, ty, tz) || 1;
+    tx /= tLen; ty /= tLen; tz /= tLen;
+    const orbitSign = Math.random() < 0.5 ? -1 : 1;
+    const orbitSpeed = MARKER_ORBIT_SPEED * (0.7 + Math.random() * 0.6) * orbitSign;
+    state.markers.push({
+      x: x + dx * r, y: y + dy * r, z: z + dz * r,
+      vx: tx * orbitSpeed, vy: ty * orbitSpeed, vz: tz * orbitSpeed,
+      tintR: tc.accent[0], tintG: tc.accent[1], tintB: tc.accent[2],
+      seed: Math.random(),
+      attractorIdx,
+    });
+  }
+}
+
+function reindexMarkers(oldToNew: Map<number, number>): void {
+  const kept: Marker[] = [];
+  for (const m of state.markers) {
+    const newIdx = oldToNew.get(m.attractorIdx);
+    if (newIdx !== undefined) {
+      m.attractorIdx = newIdx;
+      kept.push(m);
+    }
+  }
+  state.markers = kept;
+}
+
+// [LAW:dataflow-not-control-flow] Marker integration is a straight-line pass: every marker gets a pull
+// from its parent attractor and a light global drag so orbits stay bounded. No branches skip work.
+function tickMarkers(dt: number): void {
+  if (state.markers.length === 0) return;
+  const attractors = state.attractors;
+  const softSq = 0.04; // softening squared — matches the visual scale of the well
+  // Drag always dissipates regardless of sign(dt) — otherwise reverse play amplifies velocity.
+  const drag = Math.exp(-0.6 * Math.abs(dt));
+  for (const m of state.markers) {
+    const a = attractors[m.attractorIdx];
+    if (!a) continue; // safety; prune should keep these in sync
+    const rx = a.x - m.x, ry = a.y - m.y, rz = a.z - m.z;
+    const r2 = rx * rx + ry * ry + rz * rz + softSq;
+    const inv = 1 / Math.sqrt(r2);
+    const pull = 3.0 * inv * inv; // ~1/r² — mild spring-ish
+    m.vx += rx * inv * pull * dt;
+    m.vy += ry * inv * pull * dt;
+    m.vz += rz * inv * pull * dt;
+    m.vx *= drag; m.vy *= drag; m.vz *= drag;
+    m.x += m.vx * dt; m.y += m.vy * dt; m.z += m.vz * dt;
+  }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -842,7 +921,7 @@ const postFx: PostFxState = {
   downsampleParams: [],
   upsampleParams: [],
   compositeBGs: [],
-  compositeParams: new Float32Array(148), // 20 header + 32 × 4 attractor slots; matches 592-byte UBO
+  compositeParams: new Float32Array(16), // 64-byte UBO: 5 fx scalars + pads + primary vec3 + accent vec3
 };
 const HDR_FORMAT: GPUTextureFormat = 'rgba16float';
 const BLOOM_LEVELS = 3; // 5 mips made the largest blur radius half-screen, fusing dense clusters into a giant white blob.
@@ -920,12 +999,12 @@ function initPostFx(): void {
     postFx.upsampleUBO.push(device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST }));
   }
   // [LAW:one-source-of-truth] Composite UBO size must match post.composite.wgsl CompositeParams:
-  // 80 bytes of header + 32 × 16-byte ReticleAttractor = 592 bytes.
-  postFx.compositeUBO = device.createBuffer({ size: 592, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+  // 5 fx scalars + 3 pads = 32 bytes, + vec3 primary + pad + vec3 accent + pad = 64 bytes total.
+  postFx.compositeUBO = device.createBuffer({ size: 64, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
 
   // Pre-allocate staging arrays — reused every frame instead of allocating new Float32Arrays.
   postFx.fadeParams = new Float32Array(4);
-  postFx.compositeParams = new Float32Array(148); // 20 header + 32 × 4 attractor slots
+  postFx.compositeParams = new Float32Array(16); // 64-byte composite UBO
   postFx.downsampleParams = [];
   postFx.upsampleParams = [];
   for (let i = 0; i < BLOOM_LEVELS; i++) {
@@ -2075,6 +2154,7 @@ function createPhysicsSimulation() {
       { binding: 0, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: 'read-only-storage' } },
       { binding: 1, visibility: GPUShaderStage.VERTEX, buffer: { type: 'uniform' } },
       { binding: 2, visibility: GPUShaderStage.VERTEX, buffer: { type: 'uniform' } },
+      { binding: 3, visibility: GPUShaderStage.VERTEX, buffer: { type: 'uniform' } },
     ]
   });
 
@@ -2113,14 +2193,93 @@ function createPhysicsSimulation() {
     ]}),
   ];
 
+  // [LAW:one-source-of-truth] Render-side attractor field for particle HDR boost + marker rendering.
+  // 16-byte header (count u32 + pad) + 32 × 16-byte FieldAttractor = 528 bytes. Packed each render
+  // with log-normalized strength so the shader just does a linear gaussian sum.
+  const attractorFieldBuffer = device.createBuffer({ size: 528, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+  const attractorFieldData = new ArrayBuffer(528);
+  const attractorFieldF32 = new Float32Array(attractorFieldData);
+  const attractorFieldU32 = new Uint32Array(attractorFieldData);
+
   // renderBGs[viewIndex][pingPong]
   const renderBGs: GPUBindGroup[][] = [0, 1].map(vi =>
     [bufferA, bufferB].map(buf => device.createBindGroup({ layout: renderBGL, entries: [
       { binding: 0, resource: { buffer: buf } },
       { binding: 1, resource: { buffer: cameraBuffer, offset: vi * CAMERA_STRIDE, size: CAMERA_SIZE } },
       { binding: 2, resource: { buffer: blurBuffer } },
+      { binding: 3, resource: { buffer: attractorFieldBuffer } },
     ]}))
   );
+
+  // ── MARKER PARTICLES: rendered into the HDR scene so bloom carries them ──
+  // [LAW:one-source-of-truth] Per-marker payload is 32 bytes: pos(12) + strength(4) + tint(12) + seed(4).
+  // Pool is sized to the hard cap (32 attractors × 36 markers) and re-uploaded each frame from state.markers.
+  const MARKER_POOL = ATTRACTOR_MAX * MARKERS_PER_ATTRACTOR;
+  const MARKER_STRIDE = 32;
+  const markerBuffer = device.createBuffer({ size: MARKER_POOL * MARKER_STRIDE, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+  const markerData = new Float32Array(MARKER_POOL * 8);
+
+  const markerModule = createShaderModuleChecked('markers.render', SHADER_MARKERS_RENDER);
+  const markerBGL = device.createBindGroupLayout({
+    entries: [
+      { binding: 0, visibility: GPUShaderStage.VERTEX, buffer: { type: 'read-only-storage' } },
+      { binding: 1, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
+    ]
+  });
+  const markerPipeline = device.createRenderPipeline({
+    layout: device.createPipelineLayout({ bindGroupLayouts: [markerBGL] }),
+    vertex: { module: markerModule, entryPoint: 'vs_main' },
+    fragment: {
+      module: markerModule, entryPoint: 'fs_main',
+      targets: [{
+        format: renderTargetFormat,
+        blend: {
+          color: { srcFactor: 'src-alpha', dstFactor: 'one', operation: 'add' },
+          alpha: { srcFactor: 'one', dstFactor: 'one', operation: 'add' },
+        }
+      }]
+    },
+    primitive: { topology: 'triangle-list' },
+    depthStencil: { format: 'depth24plus', depthWriteEnabled: false, depthCompare: 'always' },
+    multisample: { count: renderSampleCount },
+  });
+  const markerBGs: GPUBindGroup[] = [0, 1].map(vi => device.createBindGroup({
+    layout: markerBGL, entries: [
+      { binding: 0, resource: { buffer: markerBuffer } },
+      { binding: 1, resource: { buffer: cameraBuffer, offset: vi * CAMERA_STRIDE, size: CAMERA_SIZE } },
+    ]
+  }));
+
+  function renderMarkers(pass: GPURenderPassEncoder, viewIndex: number) {
+    const markers = state.markers;
+    const n = Math.min(markers.length, MARKER_POOL);
+    if (n === 0) return;
+    // [LAW:one-source-of-truth] Parent strength drives marker brightness/size. Log-normalize against the
+    // current interaction ceiling so the visual curve matches the log slider.
+    const p = state.physics as { interactionStrength?: number };
+    const ceiling = p.interactionStrength ?? 1;
+    const step = simStep;
+    const invLogMax = 1 / Math.log(1 + Math.max(ceiling, 1));
+    for (let i = 0; i < n; i++) {
+      const m = markers[i];
+      const a = state.attractors[m.attractorIdx];
+      const s = a ? attractorStrength(a, step, ceiling) : 0;
+      const strengthNorm = Math.max(0, Math.min(1, Math.log(1 + s) * invLogMax));
+      const o = i * 8;
+      markerData[o] = m.x;
+      markerData[o + 1] = m.y;
+      markerData[o + 2] = m.z;
+      markerData[o + 3] = strengthNorm;
+      markerData[o + 4] = m.tintR;
+      markerData[o + 5] = m.tintG;
+      markerData[o + 6] = m.tintB;
+      markerData[o + 7] = m.seed;
+    }
+    device.queue.writeBuffer(markerBuffer, 0, markerData.buffer, 0, n * MARKER_STRIDE);
+    pass.setPipeline(markerPipeline);
+    pass.setBindGroup(0, markerBGs[viewIndex]);
+    pass.draw(6, n);
+  }
 
   // Diagnostic readback: sample particles from the GPU for analysis.
   const DIAG_SAMPLE = 2048;
@@ -2398,6 +2557,37 @@ function createPhysicsSimulation() {
       const aspect = viewport ? (viewport[2] / viewport[3]) : (canvas.width / canvas.height);
       device.queue.writeBuffer(cameraBuffer, viewIndex * CAMERA_STRIDE, getCameraUniformData(aspect));
 
+      // [LAW:one-source-of-truth] Pack render-side attractor field from the same lifecycle state the
+      // compute pass reads. Strength is log-normalized to [0,1] so the shader's gaussian sum is stable
+      // across the 0.1..100 interaction slider range.
+      {
+        const p = state.physics as { interactionStrength?: number };
+        const ceiling = p.interactionStrength ?? 1;
+        const step = simStep;
+        const attractors = state.attractors;
+        const n = Math.min(attractors.length, ATTRACTOR_MAX);
+        const invLogMax = 1 / Math.log(1 + Math.max(ceiling, 1));
+        attractorFieldU32[0] = n;
+        attractorFieldU32[1] = 0; attractorFieldU32[2] = 0; attractorFieldU32[3] = 0;
+        for (let i = 0; i < n; i++) {
+          const a = attractors[i];
+          const s = attractorStrength(a, step, ceiling);
+          const base = 4 + i * 4;
+          attractorFieldF32[base] = a.x;
+          attractorFieldF32[base + 1] = a.y;
+          attractorFieldF32[base + 2] = a.z;
+          attractorFieldF32[base + 3] = Math.max(0, Math.min(1, Math.log(1 + s) * invLogMax));
+        }
+        for (let i = n; i < ATTRACTOR_MAX; i++) {
+          const base = 4 + i * 4;
+          attractorFieldF32[base] = 0;
+          attractorFieldF32[base + 1] = 0;
+          attractorFieldF32[base + 2] = 0;
+          attractorFieldF32[base + 3] = 0;
+        }
+        device.queue.writeBuffer(attractorFieldBuffer, 0, attractorFieldData);
+      }
+
       const rTsw = tsWrites(1);
       const pass = encoder.beginRenderPass({
         colorAttachments: [getColorAttachment(depthRef, textureView, viewport)],
@@ -2415,6 +2605,8 @@ function createPhysicsSimulation() {
       pass.setPipeline(renderPipeline);
       pass.setBindGroup(0, renderBGs[viewIndex][pingPong]);
       pass.draw(6, count);
+
+      renderMarkers(pass, viewIndex);
       pass.end();
     },
 
@@ -2658,6 +2850,7 @@ function createPhysicsSimulation() {
     destroy() {
       bufferA.destroy(); bufferB.destroy();
       paramsBuffer.destroy(); cameraBuffer.destroy(); blurBuffer.destroy();
+      attractorFieldBuffer.destroy(); markerBuffer.destroy();
       statsOutBuffer.destroy(); statsStaging.destroy(); statsParamsBuffer.destroy();
       diagStaging.destroy();
       // PM scaffolding cleanup. Every buffer allocated in the PM block above
@@ -6516,8 +6709,11 @@ function xrFrame(time: DOMHighResTimeStamp, xrFrameData: XRFrame) {
   refreshThemeColors(time);
   const isEarlyFrame = xrFrameCount < XR_FIRST_FRAMES_TO_LOG;
   if (isEarlyFrame) logInfo('xr:frame', `xrFrame #${xrFrameCount} entered`, { mode: state.mode });
-  // [LAW:single-enforcer] Same prune call as desktop frame loop — keeps the attractor array clean in XR too.
+  // [LAW:single-enforcer] Same prune + marker tick as the desktop loop — XR must see the same visual state.
   pruneAttractors(currentSimStep());
+  const xrFrameDeltaMs = lastFrameTimestamp >= 0 ? time - lastFrameTimestamp : 16.7;
+  lastFrameTimestamp = time;
+  tickMarkers(Math.min(0.05, xrFrameDeltaMs * 0.001) * state.fx.timeScale * currentTimeDirection());
 
   // FPS counter for XR — same logic as desktop frame loop
   frameCount++;
@@ -6943,65 +7139,16 @@ function runComposite(encoder: GPUCommandEncoder, finalView: GPUTextureView, fin
   const fx = state.fx;
   const tc = getThemeColors();
   const buf = postFx.compositeParams;
-  const u32buf = new Uint32Array(buf.buffer);
   buf[0] = fx.bloomIntensity;
   buf[1] = fx.exposure;
   buf[2] = fx.vignette;
   buf[3] = fx.chromaticAberration;
   buf[4] = fx.grading;
-
-  // [LAW:single-enforcer] One matrix setup, reused for every attractor projection below.
-  const aspect = viewport ? (viewport[2] / viewport[3]) : (canvas.width / canvas.height);
-  const fovRad = state.camera.fov * Math.PI / 180;
-  const orbitCam = getOrbitCamera();
-  const viewMat = xrCameraOverride ? xrCameraOverride.viewMatrix : orbitCam.view;
-  const projMat = xrCameraOverride ? xrCameraOverride.projMatrix : mat4.perspective(fovRad, aspect, 0.01, DESKTOP_CAMERA_FAR);
-
-  // [LAW:one-source-of-truth] Attractor strengths re-derived from the same state.attractors array the compute
-  // shader reads (via the N-body param packing). Projection from world-space to screen UV happens once per
-  // attractor, per frame — ~32 matrix ops max, dwarfed by the render pass itself.
-  // nowSec is only used for reticle pulsing (sin(time*5)); strength uses the last-packed sim step so the
-  // composite overlay stays aligned with the shader params. Forward increments simStep at the end of compute,
-  // so the just-run step is simStep-1; reverse decrements at the top of compute, so the just-run step is simStep.
-  const nowSec = performance.now() * 0.001;
-  const strengthStep = Math.max(0, currentSimStep() - (currentTimeDirection() > 0 ? 1 : 0));
-  const ceiling = (state.physics as { interactionStrength?: number }).interactionStrength ?? 1;
-  const attractors = state.attractors;
-  const attractorN = Math.min(attractors.length, ATTRACTOR_MAX);
-  u32buf[5] = attractorN; // attractorCount as u32
-  buf[6] = 0; buf[7] = 0; // pad slots
-
+  // f32 5..7 are padding.
   buf[8] = tc.primary[0]; buf[9] = tc.primary[1]; buf[10] = tc.primary[2];
   // pad 11
   buf[12] = tc.accent[0]; buf[13] = tc.accent[1]; buf[14] = tc.accent[2];
   // pad 15
-  buf[16] = nowSec;
-  // pad 17..19
-
-  // Attractor array at byte offset 80 = f32 index 20. Each entry: (screenX, screenY, strength, pad) = 4 floats.
-  for (let i = 0; i < attractorN; i++) {
-    const a = attractors[i];
-    const wx = a.x, wy = a.y, wz = a.z;
-    const vx = viewMat[0]*wx + viewMat[4]*wy + viewMat[8]*wz + viewMat[12];
-    const vy = viewMat[1]*wx + viewMat[5]*wy + viewMat[9]*wz + viewMat[13];
-    const vz = viewMat[2]*wx + viewMat[6]*wy + viewMat[10]*wz + viewMat[14];
-    const vw = viewMat[3]*wx + viewMat[7]*wy + viewMat[11]*wz + viewMat[15];
-    const cx = projMat[0]*vx + projMat[4]*vy + projMat[8]*vz + projMat[12]*vw;
-    const cy = projMat[1]*vx + projMat[5]*vy + projMat[9]*vz + projMat[13]*vw;
-    const cw = projMat[3]*vx + projMat[7]*vy + projMat[11]*vz + projMat[15]*vw;
-    const ndcX = cw !== 0 ? cx / cw : 0;
-    const ndcY = cw !== 0 ? cy / cw : 0;
-    const base = 20 + i * 4;
-    buf[base] = ndcX * 0.5 + 0.5;
-    buf[base + 1] = 1.0 - (ndcY * 0.5 + 0.5);
-    buf[base + 2] = attractorStrength(a, strengthStep, ceiling);
-    buf[base + 3] = 0;
-  }
-  // Zero any trailing slots beyond active count (strength=0 is inert anyway, but keeps the buffer clean).
-  for (let i = attractorN; i < ATTRACTOR_MAX; i++) {
-    const base = 20 + i * 4;
-    buf[base] = 0; buf[base + 1] = 0; buf[base + 2] = 0; buf[base + 3] = 0;
-  }
   device.queue.writeBuffer(postFx.compositeUBO!, 0, buf);
 
   const pipeline = ensureCompositePipeline(finalFormat);
@@ -7033,8 +7180,9 @@ function frame(now: DOMHighResTimeStamp) {
   // When a heavy frame pushes delta over ~20ms, the adaptive chunk shrinks next frame; when we have
   // headroom (delta < 14ms), it grows. This is the only place we measure frame pacing, so the feedback
   // decision stays in one place (single-enforcer).
+  const frameDeltaMs = lastFrameTimestamp >= 0 ? now - lastFrameTimestamp : 16.7;
   if (lastFrameTimestamp >= 0) {
-    updateAdaptiveChunk(now - lastFrameTimestamp);
+    updateAdaptiveChunk(frameDeltaMs);
   }
   lastFrameTimestamp = now;
 
@@ -7043,6 +7191,10 @@ function frame(now: DOMHighResTimeStamp) {
   // [LAW:single-enforcer] Attractor lifecycle is updated here, before any sim/compute/composite runs,
   // so mode switches can't leak dead attractors into the array or render loop.
   pruneAttractors(currentSimStep());
+
+  // [LAW:single-enforcer] Markers tick once per visual frame, with dt bounded to kill lag-spike
+  // teleports. timeScale + timeDirection make the swarm track the simulation's sense of time.
+  tickMarkers(Math.min(0.05, frameDeltaMs * 0.001) * state.fx.timeScale * currentTimeDirection());
 
   // FPS calculation
   frameCount++;

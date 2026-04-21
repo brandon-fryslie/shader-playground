@@ -32,9 +32,25 @@ struct BlurParams {
   _pad2: f32,
 }
 
+// [LAW:one-source-of-truth] World-space attractor field for render-time HDR boost and color tint.
+// Packed CPU-side each frame; count u32 in the header, 32 attractor slots, strength already log-normalized
+// to [0,1] so the shader just does a linear gaussian sum.
+struct FieldAttractor {
+  pos: vec3f,
+  strengthNorm: f32,
+}
+struct AttractorField {
+  count: u32,
+  _pad0: u32,
+  _pad1: u32,
+  _pad2: u32,
+  attractors: array<FieldAttractor, 32>,
+}
+
 @group(0) @binding(0) var<storage, read> bodies: array<Body>;
 @group(0) @binding(1) var<uniform> camera: Camera;
 @group(0) @binding(2) var<uniform> blurParams: BlurParams;
+@group(0) @binding(3) var<uniform> field: AttractorField;
 
 struct VSOut {
   @builtin(position) pos: vec4f,
@@ -141,11 +157,20 @@ fn vs_main(@builtin(vertex_index) vid: u32, @builtin(instance_index) iid: u32) -
   let speedTint = smoothstep(0.5, 2.5, speed) * 0.2;
   col = mix(col, col * vec3f(1.0, 0.75, 0.4), speedTint);
 
-  // Interaction glow: particles near the interaction point pick up accent tint and brighten.
-  let toInteract = body.pos - camera.interactPos;
-  let interactDist = length(toInteract);
-  let proximity = camera.interactActive * (1.0 - smoothstep(0.0, 2.0, interactDist));
-  col = mix(col, camera.accent * 1.4, proximity * 0.3);
+  // [LAW:dataflow-not-control-flow] Attractor-field glow: sum a gaussian contribution from every active
+  // attractor. Replaces the legacy single-point interactPos path. Zero-strength attractors naturally
+  // contribute zero — no branching. Gaussian radius r0 is in world units.
+  let r0 = 1.8;
+  let invR2 = 1.0 / (r0 * r0);
+  var fieldBoost = 0.0;
+  for (var i = 0u; i < field.count; i++) {
+    let a = field.attractors[i];
+    let d = body.pos - a.pos;
+    let g = a.strengthNorm * exp(-dot(d, d) * invR2);
+    fieldBoost = fieldBoost + g;
+  }
+  let proximity = clamp(fieldBoost, 0.0, 1.5);
+  col = mix(col, camera.accent * 1.6, clamp(proximity * 0.55, 0.0, 0.8));
 
   out.color = col;
   out.speed = speed;
@@ -177,9 +202,11 @@ fn fs_main(
   let whiteShift = clamp(core * 0.06, 0.0, 0.3);
   let tinted = mix(color, vec3f(1.0), whiteShift);
 
-  // Velocity-dependent interaction flare: fast particles near the interaction well glow bright in accent,
-  // creating visible energy tendrils of infalling material.
-  let speedGlow = smoothstep(0.5, 2.5, speed) * interactProximity * 0.35;
+  // Velocity-dependent interaction flare: fast particles near any attractor glow brighter in accent,
+  // producing visible tendrils of infalling material. Adds HDR brightness that feeds the bloom pass
+  // naturally — no composite overlay required.
+  let speedGlow = smoothstep(0.5, 2.5, speed) * interactProximity * 0.45;
+  let fieldBrightness = 1.0 + interactProximity * 1.1;
 
-  return vec4f(tinted * (intensity + speedGlow), 1.0);
+  return vec4f(tinted * (intensity * fieldBrightness + speedGlow), 1.0);
 }

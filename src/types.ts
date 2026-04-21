@@ -127,6 +127,16 @@ export interface Attractor {
   holdSteps: number;     // releaseStep - chargeStep (at release); -1 while still held
 }
 
+// CPU-animated tracer particle tied to an attractor. Feeds a dedicated render pipeline so the swarm
+// lives in the HDR scene and blooms naturally — the "cursor is a comet swarm" approach.
+export interface Marker {
+  x: number; y: number; z: number;
+  vx: number; vy: number; vz: number;
+  tintR: number; tintG: number; tintB: number;
+  seed: number;          // per-marker phase for subtle visual variety
+  attractorIdx: number;  // index into state.attractors; re-synced on prune
+}
+
 export interface AppState {
   mode: SimMode;
   colorTheme: string;
@@ -141,6 +151,7 @@ export interface AppState {
   camera: CameraState;
   mouse: MouseState;
   attractors: Attractor[];
+  markers: Marker[];
   pointerToAttractor: Map<number, number>;
   fx: FxParams;
   debug: DebugSettings;
