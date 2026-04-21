@@ -4,15 +4,22 @@
     {
       "version": "pr-12",
       "ref": "refs/pull/12/merge",
-      "sha": "d4de8d829c5280ea5597f617e2196c737dc9cfa1",
-      "timestamp": "2026-04-21T04:30:37.192Z",
+      "sha": "909b0c707d61741c792cc827997a9b2f986af723",
+      "timestamp": "2026-04-21T04:31:28.041Z",
       "commits": [
         {
-          "sha": "d4de8d829c5280ea5597f617e2196c737dc9cfa1",
+          "sha": "909b0c707d61741c792cc827997a9b2f986af723",
           "author_name": "Brandon Fryslie",
           "author_email": "530235+brandon-fryslie@users.noreply.github.com",
-          "timestamp": "2026-04-21T04:30:18Z",
-          "message": "Merge cd40ebad1b14ce0d3002257cc202ebabd04bc2ae into 806c0ac22ecb4ac0a01350d9c72de335e33649f7\n"
+          "timestamp": "2026-04-21T04:31:14Z",
+          "message": "Merge 25a583bd6686a5a11e80f298daa505b77292f999 into 806c0ac22ecb4ac0a01350d9c72de335e33649f7\n"
+        },
+        {
+          "sha": "25a583bd6686a5a11e80f298daa505b77292f999",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-20T22:31:05-06:00",
+          "message": "feat(metrics): record button enters XR + captures full session\n\nReplaces the bounded 1s+2s window with a single-click XR session\nrecorder: click button → start unbounded recording → auto-enter XR →\nuser exits XR → publish.\n\nAPI changes to metrics.record():\n- preDelayMs now optional (default 0)\n- durationMs now optional (omit = unbounded; caller drives stop)\n- new metrics.stop() terminates the current recording cleanly and is\n  the single cleanup path for both bounded and unbounded flows\n- RecordStatus grows a `bounded` flag so UI can know whether to\n  show a countdown\n\nThe button owns the orchestration: kicks off the recording, awaits\ntoggleXR, and registers a session 'end' listener that calls\nmetrics.stop(). toggleXR's existing session-end handler still owns XR\ncleanup — our listener only terminates the recording.\n\nGenerated with [Claude Code](https://claude.ai/code)\nvia [Happy](https://happy.engineering)\n\nCo-Authored-By: Claude <noreply@anthropic.com>\nCo-Authored-By: Happy <yesreply@happy.engineering>\n"
         },
         {
           "sha": "cd40ebad1b14ce0d3002257cc202ebabd04bc2ae",
