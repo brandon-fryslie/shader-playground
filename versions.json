@@ -4,15 +4,22 @@
     {
       "version": "pr-12",
       "ref": "refs/pull/12/merge",
-      "sha": "909b0c707d61741c792cc827997a9b2f986af723",
-      "timestamp": "2026-04-21T04:31:28.041Z",
+      "sha": "6207683fd6159a9f9247bc25b1a44a2d10f62b87",
+      "timestamp": "2026-04-21T04:36:02.817Z",
       "commits": [
         {
-          "sha": "909b0c707d61741c792cc827997a9b2f986af723",
+          "sha": "6207683fd6159a9f9247bc25b1a44a2d10f62b87",
           "author_name": "Brandon Fryslie",
           "author_email": "530235+brandon-fryslie@users.noreply.github.com",
-          "timestamp": "2026-04-21T04:31:14Z",
-          "message": "Merge 25a583bd6686a5a11e80f298daa505b77292f999 into 806c0ac22ecb4ac0a01350d9c72de335e33649f7\n"
+          "timestamp": "2026-04-21T04:35:51Z",
+          "message": "Merge 12dd0f1f63d5d94885339032a40b6009e0948d86 into 806c0ac22ecb4ac0a01350d9c72de335e33649f7\n"
+        },
+        {
+          "sha": "12dd0f1f63d5d94885339032a40b6009e0948d86",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-20T22:35:43-06:00",
+          "message": "fix(xr): snap payload tracked field reflected pinch-source, not hand-tracking\n\nThe xr.snap event's `tracked` field was computed from hf.tracked, which\nis set true only during an active pinch source and false otherwise —\nnot whether the hand-tracking system is producing joints. Recordings\nshowed tracked:false through entire sessions even while palmDot had\nlive values, because hands were being sensed but not pinching.\n\nSplit into two orthogonal signals:\n- handTracked: hf.joints !== null (hand-tracking is live this frame)\n- pinching: hf.pinch.active (system-recognized pinch gesture active)\n\nBoth are useful for debugging and should never collapse into one flag.\n\nGenerated with [Claude Code](https://claude.ai/code)\nvia [Happy](https://happy.engineering)\n\nCo-Authored-By: Claude <noreply@anthropic.com>\nCo-Authored-By: Happy <yesreply@happy.engineering>\n"
         },
         {
           "sha": "25a583bd6686a5a11e80f298daa505b77292f999",
