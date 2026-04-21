@@ -4,15 +4,22 @@
     {
       "version": "pr-12",
       "ref": "refs/pull/12/merge",
-      "sha": "5f366ff9e516759ac211ad89cf67cd2526949326",
-      "timestamp": "2026-04-21T07:06:44.174Z",
+      "sha": "d2598f2ce5572ce2f08e27f72f2f5d097fa57674",
+      "timestamp": "2026-04-21T07:10:37.524Z",
       "commits": [
         {
-          "sha": "5f366ff9e516759ac211ad89cf67cd2526949326",
+          "sha": "d2598f2ce5572ce2f08e27f72f2f5d097fa57674",
           "author_name": "Brandon Fryslie",
           "author_email": "530235+brandon-fryslie@users.noreply.github.com",
-          "timestamp": "2026-04-21T07:06:24Z",
-          "message": "Merge bce987cf2042b57f9f9425e3083871db3886a5c1 into 806c0ac22ecb4ac0a01350d9c72de335e33649f7\n"
+          "timestamp": "2026-04-21T07:10:23Z",
+          "message": "Merge 82111d8057f144789961f0609447875796f0f688 into 806c0ac22ecb4ac0a01350d9c72de335e33649f7\n"
+        },
+        {
+          "sha": "82111d8057f144789961f0609447875796f0f688",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-21T01:10:08-06:00",
+          "message": "feat(physics): PM tuning — lock V-cycle/smooth counts; reversibility verified\n\nAdds the reversibility harness the ticket specifies: snapshot particle\npositions → run N forward compute() calls → N reverse → snapshot again →\nreturn max and mean per-particle position error.\n\nThe test pauses state.paused during execution and restores on exit, so it\ndoesn't race with the main render loop. It shares pmDiagPending with the\ndensity/potential dumps so overlapping calls return null gracefully. Uses\npmDensityStaging (8 MB, sized for 128³ density) for the particle readback\n— fits comfortably for N up to ~175k × 48 bytes.\n\nWiring: window.__pmReversibilityTest(1000) returns { maxErr, meanErr,\ncount }. Expected maxErr < 0.01 world units; any larger indicates a\nsampling or state-dependent-iteration bug in the PM path.\n\nTuning rationale is now documented inline at the top of the PM section:\n  V_CYCLE_COUNT = 4       — ~4 orders of residual decay, under 1% target\n  SMOOTH_PRE/POST = 2     — 2 red-black GS sweeps per level per side\n  FIXED_POINT_SCALE = 2¹⁶ — 5 orders below u32 overflow at N=80k\n  G = 0.3                 — first-cut; see ticket .6 commentary\n\nActual empirical sweeps (finding minimum V_CYCLE_COUNT that still meets\nthe residual target, etc.) require on-device observation — the harness\nis the tool that enables those sweeps. Values above are initial settings;\ntune via the __pm* diagnostics while watching the UI.\n\nticket: shader-physics-brr.7\n\nGenerated with [Claude Code](https://claude.ai/code)\nvia [Happy](https://happy.engineering)\n\nCo-Authored-By: Claude <noreply@anthropic.com>\nCo-Authored-By: Happy <yesreply@happy.engineering>\n"
         },
         {
           "sha": "bce987cf2042b57f9f9425e3083871db3886a5c1",
