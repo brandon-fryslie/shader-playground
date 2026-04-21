@@ -4,15 +4,29 @@
     {
       "version": "pr-12",
       "ref": "refs/pull/12/merge",
-      "sha": "e070191cbaace85dbe1ce7cef274dc9d481fcdd2",
-      "timestamp": "2026-04-21T04:54:25.532Z",
+      "sha": "5adc055b447e931756dbd271c795de4b886b78cb",
+      "timestamp": "2026-04-21T05:13:20.434Z",
       "commits": [
         {
-          "sha": "e070191cbaace85dbe1ce7cef274dc9d481fcdd2",
+          "sha": "5adc055b447e931756dbd271c795de4b886b78cb",
           "author_name": "Brandon Fryslie",
           "author_email": "530235+brandon-fryslie@users.noreply.github.com",
-          "timestamp": "2026-04-21T04:54:13Z",
-          "message": "Merge 66ef7c1af6c4bd5a057abc5f52e0775f00e571cd into 806c0ac22ecb4ac0a01350d9c72de335e33649f7\n"
+          "timestamp": "2026-04-21T05:13:04Z",
+          "message": "Merge 3510474fe542770e1f8f9b46b5e1c9bd40235665 into 806c0ac22ecb4ac0a01350d9c72de335e33649f7\n"
+        },
+        {
+          "sha": "3510474fe542770e1f8f9b46b5e1c9bd40235665",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-20T23:12:47-06:00",
+          "message": "feat(xr-ui): first bimanual clipboard panel held on off-hand\n\nRegisters a 'clipboard' layout — 20cm × 28cm panel anchored via the\n'held' anchor on XR_PANEL_HAND (default 'left'). Holds a mode readout\nplus three physics sliders (G, softening, interactionStrength) bound\nthrough the Binding registry. The debug all-kinds panel remains\nregistered as a renderer test fixture; activeLayoutId now defaults to\n'clipboard'.\n\nXR_PANEL_HAND is the one constant that selects which hand carries the\npanel. The other hand pinches widgets; both existing attractor-wand\nand two-hand-zoom flows remain untouched (xrUiClaimed gates sim-drag\nonly when UI actually claims a pinch).\n\nticket: shader-xrpanel-blk.13\n\nGenerated with [Claude Code](https://claude.ai/code)\nvia [Happy](https://happy.engineering)\n\nCo-Authored-By: Claude <noreply@anthropic.com>\nCo-Authored-By: Happy <yesreply@happy.engineering>\n"
+        },
+        {
+          "sha": "afb396015fe35f40fbb7537cd727925895200c6a",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-20T22:55:55-06:00",
+          "message": "fix(xr-ui): slider/dial drag, toggle/stepper wiring, label legibility\n\nFour fixes from the first XR session of ticket .19:\n\n1. Slider/dial broken — cancel-pending was killing value updates the\n   moment the hand moved off the widget center, but dragging means the\n   hand moves *constantly*. Cancel-pending now applies to 'pressing'\n   only; dragging always commits the latest value.\n\n2. Bottom-row widgets (toggle, stepper) silently no-op — beginInteraction\n   fell through to idle for those kinds. Now wired via a discriminated\n   InteractionState.commit field: pressing carries 'invoke' | 'toggle' |\n   'increment'. Toggle flips a boolean binding on commit; stepper adds\n   widget.step (clamped to range). Added 'app.paused' ToggleBinding so\n   the toggle widget has something real to flip in the debug fixture.\n\n3. Label text \"completely unreadable\" — atlas resolution was 256x32\n   strips at 20px font, soft after upscaling to a 16cm-wide widget at\n   60cm distance. Bumped to 512x64 strips at 600-weight 40px font\n   (8MB atlas) and rewrote the shader's atlas-uv math to be\n   aspect-correct: text now renders at the canvas's natural 8:1 glyph\n   aspect inside a sub-range of widget U, instead of stretching to fit\n   widget width. V band lifted from 35% → 45% for taller glyphs.\n\n4. Bottom row of debug fixture sat below comfortable gaze — panel\n   anchor lifted from y=1.4 → y=1.55 so row 2 is closer to eye level.\n\nenum-chips and category-tile remain idle on press: enum-chips needs\nchip-level hit zones (different from one big widget plate);\ncategory-tile needs the tabs container behavior from ticket .16.\n\nVerified: tsc clean, 83 bindings (added app.paused), 0 boot errors.\nVisual + interaction correctness requires another XR session.\n\nGenerated with [Claude Code](https://claude.ai/code)\nvia [Happy](https://happy.engineering)\n\nCo-Authored-By: Claude <noreply@anthropic.com>\nCo-Authored-By: Happy <yesreply@happy.engineering>\n"
         },
         {
           "sha": "66ef7c1af6c4bd5a057abc5f52e0775f00e571cd",
