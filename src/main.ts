@@ -5732,26 +5732,50 @@ async function toggleXR() {
     state.xrEnabled = true;
     currentGpuPhase = 'xr:awaiting first frame';
 
-    // Auto-register debug widget fixture so ticket .12 renders something visible
-    // without a console snippet. Remove when ticket .13 lands the real clipboard.
+    // Auto-register debug widget fixture so the renderer always has something
+    // visible without a console snippet. Expanded for ticket .19 to cover all
+    // 9 widget kinds — two rows, the new kinds in the second row. Remove when
+    // ticket .13 lands the real clipboard.
     const idQuat: [number, number, number, number] = [0, 0, 0, 1];
+    const widgetSize = { x: 0.16, y: 0.06 };
+    const widgetPad  = { x: 0.02, y: 0.02 };
     xrUiRegistry.layouts.set('debug', {
       id: 'debug-panel', kind: 'panel',
       anchor: { kind: 'world', pose: { position: [0, 1.4, -0.6], orientation: idQuat } },
-      size: { x: 0.8, y: 0.5 },
-      children: [{
-        id: 'debug-row', kind: 'group', layout: 'row',
-        children: [
-          { id: 'debug-s1', kind: 'slider', binding: 'physics.G',
-            orientation: 'horizontal', interaction: { kind: 'direct-drag', axis: 'x' },
-            visualSize: { x: 0.20, y: 0.05 }, hitPadding: { x: 0.02, y: 0.02 } },
-          { id: 'debug-b1', kind: 'button', binding: 'preset.physics.Default',
-            style: 'primary',
-            visualSize: { x: 0.15, y: 0.05 }, hitPadding: { x: 0.02, y: 0.02 } },
-          { id: 'debug-r1', kind: 'readout', binding: 'physics.G',
-            visualSize: { x: 0.18, y: 0.05 }, hitPadding: { x: 0.02, y: 0.02 } },
-        ],
-      }],
+      size: { x: 1.1, y: 0.5 },
+      children: [
+        {
+          id: 'debug-row-1', kind: 'group', layout: 'row',
+          children: [
+            { id: 'debug-s1', kind: 'slider', binding: 'physics.G',
+              orientation: 'horizontal', interaction: { kind: 'direct-drag', axis: 'x' },
+              visualSize: widgetSize, hitPadding: widgetPad },
+            { id: 'debug-b1', kind: 'button', binding: 'preset.physics.Default',
+              style: 'primary', visualSize: widgetSize, hitPadding: widgetPad },
+            { id: 'debug-r1', kind: 'readout', binding: 'physics.G',
+              visualSize: widgetSize, hitPadding: widgetPad },
+            { id: 'debug-d1', kind: 'dial', binding: 'physics.softening',
+              interaction: { kind: 'direct-drag', axis: 'x' },
+              visualSize: widgetSize, hitPadding: widgetPad },
+          ],
+        },
+        {
+          id: 'debug-row-2', kind: 'group', layout: 'row',
+          children: [
+            { id: 'debug-tg1', kind: 'toggle', binding: 'fx.bloom', style: 'switch',
+              visualSize: widgetSize, hitPadding: widgetPad },
+            { id: 'debug-st1', kind: 'stepper', binding: 'physics.count', step: 1000,
+              visualSize: widgetSize, hitPadding: widgetPad },
+            { id: 'debug-en1', kind: 'enum-chips', binding: 'physics.distribution',
+              visualSize: widgetSize, hitPadding: widgetPad },
+            { id: 'debug-pt1', kind: 'preset-tile', binding: 'preset.physics.Spiral Galaxy',
+              visualSize: widgetSize, hitPadding: widgetPad },
+            { id: 'debug-ct1', kind: 'category-tile', targetTabId: 'physics',
+              summary: {},
+              visualSize: widgetSize, hitPadding: widgetPad },
+          ],
+        },
+      ],
     });
     xrUiRegistry.activeLayoutId = 'debug';
 

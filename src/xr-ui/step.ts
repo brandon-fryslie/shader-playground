@@ -63,6 +63,12 @@ export interface RenderCommand {
   visualHalfExtent: Vec2;
   kind: Widget['kind'];
   state: { hover: boolean; pressed: boolean; dragging: boolean; value?: number };
+  // Pre-rendered text the label atlas should display on this widget.
+  // null/undefined means "no label" — the renderer skips atlas allocation
+  // for that instance. Computed in xrUiStep from binding.label / format(value)
+  // so the renderer never reaches back to the binding registry.
+  // [LAW:one-way-deps]
+  label?: string;
 }
 
 export interface XrUiPrev {
@@ -179,6 +185,7 @@ export function xrUiStep(
       visualHalfExtent: entry.visualRect.halfExtent,
       kind: widget.kind,
       state: { hover, pressed, dragging, value: readWidgetValue(widget, registry.bindings) },
+      label: readWidgetLabel(widget, registry.bindings),
     });
   }
 
@@ -210,6 +217,42 @@ export function applySideEffects(effects: XrUiSideEffect[], registry: XrUiRegist
 
 function anyState(states: Record<Hand, InteractionState>, fn: (s: InteractionState) => boolean): boolean {
   return fn(states.left) || fn(states.right);
+}
+
+// Compute the label text the renderer should rasterize for this widget.
+// Continuous widgets show formatted value (binding.format or fixed-precision);
+// action widgets show the binding's label; toggles show on/off; enum-chips and
+// stepper show the current value. Returns undefined when no label makes sense
+// (the renderer skips atlas allocation for that instance).
+function readWidgetLabel(widget: Widget, bindings: BindingRegistry): string | undefined {
+  if (widget.kind === 'category-tile') return undefined; // targetTabId, not a binding
+  const b = bindings.get(widget.binding);
+  if (!b) return undefined;
+  if (widget.kind === 'slider' || widget.kind === 'dial' || widget.kind === 'readout' || widget.kind === 'stepper') {
+    if (b.kind !== 'continuous') return b.label;
+    const v = b.get();
+    return b.format ? b.format(v) : formatNumber(v);
+  }
+  if (widget.kind === 'toggle') {
+    if (b.kind === 'toggle') return b.get() ? 'On' : 'Off';
+    return b.label;
+  }
+  if (widget.kind === 'enum-chips') {
+    return b.kind === 'enum' ? b.get() : b.label;
+  }
+  if (widget.kind === 'button' || widget.kind === 'preset-tile') {
+    return b.label;
+  }
+  return undefined;
+}
+
+function formatNumber(v: number): string {
+  if (Number.isInteger(v)) return String(v);
+  const a = Math.abs(v);
+  if (a >= 100) return v.toFixed(0);
+  if (a >= 10)  return v.toFixed(1);
+  if (a >= 1)   return v.toFixed(2);
+  return v.toFixed(3);
 }
 
 function readWidgetValue(widget: Widget, bindings: BindingRegistry): number | undefined {
