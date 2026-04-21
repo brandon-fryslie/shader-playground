@@ -4668,6 +4668,37 @@ const twoHandState = {
 // Previous frame's pinch state for edge detection (gesture events).
 const xrPrevPinch: Record<XrHand, boolean> = { left: false, right: false };
 
+// Previous-frame snapshot for joint-derived gesture detection. Parallel to
+// xrPrevPinch. [LAW:one-source-of-truth] Sole previous-state store for the
+// fine-modifier / palm-up / wrist-flick detectors.
+interface XrGestureSnapshot {
+  fineModifier: boolean;        // thumb-ring contact state last frame
+  palmUp: boolean;              // palm-up state last frame (post-hysteresis)
+  wristOrient: number[] | null; // wrist quaternion last frame (null when untracked)
+  wristTime: number;            // performance.now() when wristOrient was captured
+  flickArmed: boolean;          // last frame's angular speed above threshold
+  lastFlickAt: number;          // performance.now() of last emitted flick (refractory)
+}
+function makeGestureSnapshot(): XrGestureSnapshot {
+  return { fineModifier: false, palmUp: false, wristOrient: null, wristTime: 0, flickArmed: false, lastFlickAt: 0 };
+}
+const xrPrevGestureSnap: Record<XrHand, XrGestureSnapshot> = {
+  left: makeGestureSnapshot(),
+  right: makeGestureSnapshot(),
+};
+
+// Palm-up hysteresis on palmNormal·worldUp. Enter >0.7 (~45° of vertical),
+// exit <0.4 (~65°). The dead zone absorbs frame-to-frame noise when the palm
+// is held vertical.
+const XR_PALM_UP_ENTER = 0.7;
+const XR_PALM_UP_EXIT = 0.4;
+
+// Wrist-flick thresholds. 4 rad/s ≈ 230°/s — a deliberate snap, not casual
+// motion. 2-frame consensus (flickArmed) plus 300ms refractory suppresses
+// ringing and oscillation on the flick peak.
+const XR_FLICK_SPEED_RAD_S = 4.0;
+const XR_FLICK_REFRACTORY_MS = 300;
+
 // Synthetic pointer ids for XR attractors — one per hand so left and right
 // create independent concurrent attractors. [LAW:one-source-of-truth] Each hand
 // owns exactly one slot in the attractor system's pointer-id map.
@@ -4727,6 +4758,17 @@ function findHandForSource(source: XRInputSource): XrHand | null {
 // the common visionOS pinch-contact heuristic; squared so we skip the sqrt.
 const XR_GRIP_THRESHOLD_M = 0.03;
 const XR_GRIP_THRESHOLD_SQ = XR_GRIP_THRESHOLD_M * XR_GRIP_THRESHOLD_M;
+
+// Quaternion helpers (xyzw convention, matching XRJointPose.orientation).
+function quatConj(q: number[]): number[] { return [-q[0], -q[1], -q[2], q[3]]; }
+function quatMul(a: number[], b: number[]): number[] {
+  return [
+    a[3]*b[0] + a[0]*b[3] + a[1]*b[2] - a[2]*b[1],
+    a[3]*b[1] - a[0]*b[2] + a[1]*b[3] + a[2]*b[0],
+    a[3]*b[2] + a[0]*b[1] - a[1]*b[0] + a[2]*b[3],
+    a[3]*b[3] - a[0]*b[0] - a[1]*b[1] - a[2]*b[2],
+  ];
+}
 
 // Always returns a fully-populated record (all 25 keys). Entries are null when
 // `XRHand.get(name)` is missing or `frame.getJointPose` returns null for that
@@ -4899,6 +4941,7 @@ function xrDetectGestures(): XrGesture[] {
   const bothActive = leftActive && rightActive;
   const prevBoth = xrPrevPinch.left && xrPrevPinch.right;
 
+  const now = performance.now();
   for (const hand of ['left', 'right'] as XrHand[]) {
     const hf = xrHandFrames[hand];
     const wasActive = xrPrevPinch[hand];
@@ -4907,10 +4950,67 @@ function xrDetectGestures(): XrGesture[] {
     if (isActive && !wasActive && hf.gazeRay) {
       gestures.push({ kind: 'pinch-start', hand, gazeRay: hf.gazeRay });
     } else if (isActive && wasActive) {
-      gestures.push({ kind: 'pinch-hold', hand, dur: performance.now() - hf.pinch.startTime });
+      gestures.push({ kind: 'pinch-hold', hand, dur: now - hf.pinch.startTime });
     } else if (!isActive && wasActive) {
-      gestures.push({ kind: 'pinch-end', hand, dur: performance.now() - hf.pinch.startTime });
+      gestures.push({ kind: 'pinch-end', hand, dur: now - hf.pinch.startTime });
     }
+
+    const prev = xrPrevGestureSnap[hand];
+
+    // Fine-modifier: thumb-to-ring-finger contact edge. grip is null when the
+    // thumb-tip or all finger-tips are untracked — skip detection but keep prev
+    // so we don't spuriously re-fire 'off' when tracking returns.
+    if (hf.grip) {
+      const active = hf.grip.thumbRing === true;
+      if (active && !prev.fineModifier) gestures.push({ kind: 'fine-modifier-on', hand });
+      else if (!active && prev.fineModifier) gestures.push({ kind: 'fine-modifier-off', hand });
+      prev.fineModifier = active;
+    }
+
+    // Palm orientation: palmNormal · worldUp. Hysteresis band ENTER>0.7, EXIT<0.4
+    // prevents flicker when the palm is held near vertical.
+    if (hf.palmNormal) {
+      const upDot = hf.palmNormal[1];
+      const isUp = prev.palmUp ? (upDot > XR_PALM_UP_EXIT) : (upDot > XR_PALM_UP_ENTER);
+      if (isUp && !prev.palmUp) gestures.push({ kind: 'palm-up', hand });
+      else if (!isUp && prev.palmUp) gestures.push({ kind: 'palm-down', hand });
+      prev.palmUp = isUp;
+    }
+
+    // Wrist-flick: angular speed of wrist-quaternion delta. Dominant world axis
+    // → roll/pitch/yaw bucket (approximation; refine to forearm basis if needed).
+    // 2-frame consensus (flickArmed) + 300ms refractory suppresses ringing at
+    // the flick peak and prevents a single quick motion firing twice.
+    const wristQuat = hf.joints?.['wrist']?.orientation ?? null;
+    if (wristQuat && prev.wristOrient) {
+      const dtSec = Math.max(0.001, (now - prev.wristTime) / 1000);
+      const delta = quatMul(wristQuat, quatConj(prev.wristOrient));
+      const w = Math.min(1, Math.abs(delta[3]));
+      const angle = 2 * Math.acos(w);
+      const sinHalf = Math.sqrt(Math.max(0, 1 - w * w));
+      const s = delta[3] < 0 ? -1 : 1;
+      const ax = sinHalf > 1e-6 ? (delta[0] * s) / sinHalf : 0;
+      const ay = sinHalf > 1e-6 ? (delta[1] * s) / sinHalf : 0;
+      const az = sinHalf > 1e-6 ? (delta[2] * s) / sinHalf : 0;
+      const speed = angle / dtSec;
+      const armed = speed > XR_FLICK_SPEED_RAD_S;
+      if (armed && prev.flickArmed && (now - prev.lastFlickAt) > XR_FLICK_REFRACTORY_MS) {
+        const absX = Math.abs(ax), absY = Math.abs(ay), absZ = Math.abs(az);
+        const axis: 'roll' | 'pitch' | 'yaw' =
+          absX >= absY && absX >= absZ ? 'pitch' :
+          absY >= absZ                 ? 'yaw'   :
+                                         'roll';
+        const comp = axis === 'pitch' ? ax : axis === 'yaw' ? ay : az;
+        const sign: 1 | -1 = comp >= 0 ? 1 : -1;
+        gestures.push({ kind: 'wrist-flick', hand, axis, sign });
+        prev.lastFlickAt = now;
+      }
+      prev.flickArmed = armed;
+    } else {
+      prev.flickArmed = false;
+    }
+    prev.wristOrient = wristQuat ? [...wristQuat] : null;
+    prev.wristTime = now;
   }
 
   // Two-hand cooperative gestures.
@@ -5134,6 +5234,8 @@ function xrResetInputState(): void {
   xrInteractions.right = { kind: 'idle' };
   xrPrevPinch.left = false;
   xrPrevPinch.right = false;
+  xrPrevGestureSnap.left = makeGestureSnapshot();
+  xrPrevGestureSnap.right = makeGestureSnapshot();
   xrTuning.gainMultiplier = 1.0;
   setSimulationInteractionInactive();
   releaseAttractor(XR_ATTRACTOR_POINTER_ID.left);
