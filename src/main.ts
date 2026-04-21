@@ -7,6 +7,7 @@ import {
   xrUiStep, applySideEffects as xrUiApplyEffects, makeIdlePrev as xrUiMakeIdlePrev,
   uiHandClaimed, type XrUiPrev, type XrUiRegistry, type RenderCommand as XrRenderCommand,
 } from './xr-ui/step';
+import { createXrWidgetRenderer, type XrWidgetRenderer } from './xr-ui/renderer';
 
 // WGSL shader imports — Vite loads these as raw strings
 import SHADER_BOIDS_COMPUTE from './shaders/boids.compute.wgsl?raw';
@@ -4822,6 +4823,10 @@ const xrUiRegistry: XrUiRegistry = {
 let xrUiPrev: XrUiPrev = xrUiMakeIdlePrev();
 let xrUiRenderList: XrRenderCommand[] = [];
 const xrUiClaimed: Record<XrHand, boolean> = { left: false, right: false };
+// Created lazily on first XR frame (needs device + camera buffer). Empty render list
+// produces zero draw calls, so guarding the call site keeps desktop frames cheap.
+let xrWidgetRenderer: XrWidgetRenderer | null = null;
+let xrWidgetCameraBuffer: GPUBuffer | null = null;
 
 // View offset (modified by two-hand scale).
 // [LAW:one-source-of-truth] xrViewOffset is the single source for the user's
@@ -5835,7 +5840,25 @@ function xrFrame(time: DOMHighResTimeStamp, xrFrameData: XRFrame) {
       postFx.needsClear = true; // force loadOp:clear; no XR trails
       const sceneIdx = postFx.sceneIdx;
       currentGpuPhase = `xr:frame:${xrFrameCount}:sim.render(${state.mode},eye=${viewIndex})`;
-      sim.render(encoder, postFx.scene[sceneIdx].createView(), null, viewIndex);
+      const sceneView = postFx.scene[sceneIdx].createView();
+      sim.render(encoder, sceneView, null, viewIndex);
+
+      // [LAW:dataflow-not-control-flow] Always run the UI render pass — empty
+      // render list → zero draw calls → effectively a no-op. Lazy-init the
+      // renderer on first frame so it doesn't allocate when XR is never used.
+      if (!xrWidgetRenderer) {
+        xrWidgetCameraBuffer = device.createBuffer({
+          label: 'xr-widgets-camera',
+          size: CAMERA_STRIDE * 2,
+          usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+        });
+        xrWidgetRenderer = createXrWidgetRenderer(device, xrWidgetCameraBuffer, () => {
+          const aspect = width / height;
+          return getCameraUniformData(aspect);
+        });
+      }
+      currentGpuPhase = `xr:frame:${xrFrameCount}:xr-widgets(eye=${viewIndex})`;
+      xrWidgetRenderer.draw(encoder, sceneView, postFx.scene[sceneIdx].format, viewIndex, xrUiRenderList);
 
       currentGpuPhase = `xr:frame:${xrFrameCount}:bloom(eye=${viewIndex})`;
       runBloomChain(encoder);
