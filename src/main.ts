@@ -3391,40 +3391,55 @@ function setupGlobalControls() {
   setupXRButton();
 }
 
-// Burst-capture button: 1s pre-delay, 2s record, publish to console +
-// window.__xrLastRecording. Button is polled via rAF only while active; idle
-// state pays no per-frame cost.
+// One-click XR record button: enter XR and begin an unbounded recording;
+// the recording terminates when the XR session ends (user exits). Samples
+// publish to console + window.__xrLastRecording on stop.
 function setupRecordButton(): void {
   const btn = document.getElementById('btn-xr-record') as HTMLButtonElement | null;
   if (!btn) return;
-  const idleLabel = 'Record XR Gestures (1s + 2s)';
+  const idleLabel = 'Record XR Session';
   const tick = () => {
     const s = metrics.status();
     if (s.phase === 'idle') {
       btn.textContent = idleLabel;
-      btn.disabled = false;
+      btn.disabled = !!xrSession;  // also disabled while XR session alive
       return;
     }
-    btn.textContent = s.phase === 'pre-delay'
-      ? `Starting in ${(s.remainingMs / 1000).toFixed(1)}s…`
-      : `Recording… ${(s.remainingMs / 1000).toFixed(1)}s`;
+    btn.textContent = 'Recording — exit XR to stop';
     btn.disabled = true;
     requestAnimationFrame(tick);
   };
-  btn.addEventListener('click', () => {
-    if (metrics.status().phase !== 'idle') return;
-    metrics.record({ preDelayMs: 1000, durationMs: 2000 }).then((samples) => {
+  btn.addEventListener('click', async () => {
+    if (metrics.status().phase !== 'idle' || xrSession) return;
+    // Start the recording before the session so we capture session-setup
+    // signals too. Producers are dormant until xrInputStep runs, so no
+    // samples actually arrive until the first XR frame — this just ensures
+    // subscribers are live when they do.
+    metrics.record({}).then((samples) => {
       // eslint-disable-next-line no-console
-      console.group(`[xr] recording — ${samples.length} samples over 2000ms`);
+      console.group(`[xr] recording — ${samples.length} samples`);
       for (const s of samples) {
         // eslint-disable-next-line no-console
-        console.log(`[t=${s.t.toFixed(0).padStart(4)}ms] ${s.channel}`, s.payload);
+        console.log(`[t=${s.t.toFixed(0).padStart(5)}ms] ${s.channel}`, s.payload);
       }
       // eslint-disable-next-line no-console
       console.groupEnd();
       (window as unknown as { __xrLastRecording?: MetricSample[] }).__xrLastRecording = samples;
     });
     requestAnimationFrame(tick);
+    await toggleXR();
+    // toggleXR assigns the module-level xrSession during the await — but the
+    // early guard's narrowing of that variable persists past the await in TS,
+    // so we un-narrow via an explicit cast to read the live value.
+    const session = xrSession as unknown as XRSession | null;
+    if (!session) {
+      // Session failed to start — end the recording with whatever we have.
+      metrics.stop();
+      return;
+    }
+    // [LAW:single-enforcer] Our listener only calls metrics.stop(); the
+    // existing session-end handler in toggleXR owns the XR-side cleanup.
+    session.addEventListener('end', () => metrics.stop(), { once: true });
   });
 }
 
@@ -4563,19 +4578,21 @@ interface MetricSample {
 }
 type RecordPhase = 'idle' | 'pre-delay' | 'recording';
 interface RecordOptions {
-  preDelayMs: number;
-  durationMs: number;
+  preDelayMs?: number;   // default 0: skip pre-delay, go straight to recording
+  durationMs?: number;   // omit = unbounded; caller must call metrics.stop()
   channels?: MetricChannel<unknown>[];  // omit = all registered channels
 }
 interface RecordStatus {
   phase: RecordPhase;
-  remainingMs: number;
+  remainingMs: number;   // 0 when unbounded or idle
+  bounded: boolean;      // false for open-ended sessions (no durationMs)
 }
 
 const metricsChannels = new Map<string, MetricChannel<unknown>>();
 const metricsRecord = {
   phase: 'idle' as RecordPhase,
-  phaseDeadline: 0,
+  phaseDeadline: 0,       // 0 when unbounded or idle
+  bounded: false,
   samples: [] as MetricSample[],
   startedAt: 0,
   unsubs: [] as Array<() => void>,
@@ -4599,21 +4616,25 @@ const metrics = {
   emit<T>(chan: MetricChannel<T>, payload: T): void {
     for (const fn of chan.subscribers) fn(payload);
   },
+  // Begin a recording. Returns a Promise that resolves with the collected
+  // samples when the recording ends — either via the duration timer (bounded)
+  // or via metrics.stop() (unbounded).
   record(opts: RecordOptions): Promise<MetricSample[]> {
     if (metricsRecord.phase !== 'idle') {
       return Promise.reject(new Error('metrics.record: recording already in progress'));
     }
+    const preDelayMs = opts.preDelayMs ?? 0;
+    metricsRecord.samples = [];
+    metricsRecord.bounded = opts.durationMs !== undefined;
     return new Promise<MetricSample[]>((resolve) => {
-      metricsRecord.phase = 'pre-delay';
-      metricsRecord.phaseDeadline = performance.now() + opts.preDelayMs;
-      metricsRecord.samples = [];
       metricsRecord.resolve = resolve;
-      metricsRecord.preDelayTimer = setTimeout(() => {
-        // Enter recording phase: subscribe to all requested (or all registered) channels.
+      const begin = () => {
         const targets = opts.channels ?? Array.from(metricsChannels.values());
         metricsRecord.startedAt = performance.now();
         metricsRecord.phase = 'recording';
-        metricsRecord.phaseDeadline = metricsRecord.startedAt + opts.durationMs;
+        metricsRecord.phaseDeadline = opts.durationMs !== undefined
+          ? metricsRecord.startedAt + opts.durationMs
+          : 0;
         metricsRecord.preDelayTimer = null;
         for (const chan of targets) {
           const chanName = chan.name;
@@ -4625,26 +4646,51 @@ const metrics = {
             });
           }));
         }
-        metricsRecord.stopTimer = setTimeout(() => {
-          for (const u of metricsRecord.unsubs) u();
-          metricsRecord.unsubs = [];
-          metricsRecord.stopTimer = null;
-          const samples = metricsRecord.samples;
-          metricsRecord.samples = [];
-          metricsRecord.phase = 'idle';
-          metricsRecord.phaseDeadline = 0;
-          const res = metricsRecord.resolve;
-          metricsRecord.resolve = null;
-          if (res) res(samples);
-        }, opts.durationMs);
-      }, opts.preDelayMs);
+        if (opts.durationMs !== undefined) {
+          metricsRecord.stopTimer = setTimeout(() => metrics.stop(), opts.durationMs);
+        }
+      };
+      if (preDelayMs > 0) {
+        metricsRecord.phase = 'pre-delay';
+        metricsRecord.phaseDeadline = performance.now() + preDelayMs;
+        metricsRecord.preDelayTimer = setTimeout(begin, preDelayMs);
+      } else {
+        begin();
+      }
     });
   },
+  // End the current recording (bounded or unbounded). Cancels any pending
+  // timers, unsubscribes, resolves the promise with the collected samples.
+  // No-op when idle. [LAW:single-enforcer] Sole cleanup path for recordings.
+  stop(): void {
+    if (metricsRecord.phase === 'idle') return;
+    if (metricsRecord.preDelayTimer) {
+      clearTimeout(metricsRecord.preDelayTimer);
+      metricsRecord.preDelayTimer = null;
+    }
+    if (metricsRecord.stopTimer) {
+      clearTimeout(metricsRecord.stopTimer);
+      metricsRecord.stopTimer = null;
+    }
+    for (const u of metricsRecord.unsubs) u();
+    metricsRecord.unsubs = [];
+    const samples = metricsRecord.samples;
+    metricsRecord.samples = [];
+    metricsRecord.phase = 'idle';
+    metricsRecord.phaseDeadline = 0;
+    metricsRecord.bounded = false;
+    const res = metricsRecord.resolve;
+    metricsRecord.resolve = null;
+    if (res) res(samples);
+  },
   status(): RecordStatus {
-    if (metricsRecord.phase === 'idle') return { phase: 'idle', remainingMs: 0 };
+    if (metricsRecord.phase === 'idle') return { phase: 'idle', remainingMs: 0, bounded: false };
     return {
       phase: metricsRecord.phase,
-      remainingMs: Math.max(0, metricsRecord.phaseDeadline - performance.now()),
+      remainingMs: metricsRecord.phaseDeadline === 0
+        ? 0
+        : Math.max(0, metricsRecord.phaseDeadline - performance.now()),
+      bounded: metricsRecord.bounded,
     };
   },
 };
