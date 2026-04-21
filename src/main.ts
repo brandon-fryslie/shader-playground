@@ -1,5 +1,6 @@
 import '../styles/main.css';
 import type { SimMode, Simulation, AppState, Attractor, ThemeColors, RGBThemeColors, ParamDef, ParamSection, ShapeParamDef, XRCameraOverride, DepthRef, ModeParamsMap, ShapeName } from './types';
+import { bindingRegistry } from './xr-ui/bindings';
 
 // WGSL shader imports — Vite loads these as raw strings
 import SHADER_BOIDS_COMPUTE from './shaders/boids.compute.wgsl?raw';
@@ -6099,6 +6100,89 @@ function syncUIFromState() {
   rebuildShapeParams();
 }
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// BINDING REGISTRATION (parallel data source for the new XR widget system)
+// ═══════════════════════════════════════════════════════════════════════════════
+// [LAW:one-source-of-truth] Each Binding read/writes the canonical state field directly.
+// The DOM controls also write the same fields — both paths converge on the same state.
+// No widget consumes these bindings yet (that lands in ticket .10+); for now this is a
+// parallel descriptor tree the future widget layer will compose against.
+// [LAW:one-way-deps] bindings.ts knows nothing about main.ts; we register from here
+// using closures that capture state and mode-helper functions.
+function initBindings(): void {
+  // Continuous + enum bindings derived from PARAM_DEFS. id = `${mode}.${key}`.
+  for (const mode of Object.keys(PARAM_DEFS) as SimMode[]) {
+    for (const section of PARAM_DEFS[mode]) {
+      // Dynamic sections (parametric shape params) are rebuilt at runtime; skip them
+      // here — a follow-up ticket can register them from SHAPE_PARAMS metadata.
+      if (section.dynamic) continue;
+      for (const param of section.params) {
+        if (param.type === 'dropdown') {
+          bindingRegistry.register({
+            kind: 'enum',
+            id: `${mode}.${param.key}`,
+            label: param.label,
+            group: mode,
+            get: () => String(modeParams(mode)[param.key]),
+            set: (v) => {
+              const target = modeParams(mode);
+              const current = target[param.key];
+              target[param.key] = typeof current === 'number' ? Number(v) : v;
+            },
+            options: (param.options ?? []).map(o => ({ value: String(o), label: String(o) })),
+          });
+        } else if (param.min !== undefined && param.max !== undefined) {
+          bindingRegistry.register({
+            kind: 'continuous',
+            id: `${mode}.${param.key}`,
+            label: param.label,
+            group: mode,
+            get: () => Number(modeParams(mode)[param.key]),
+            set: (v) => { modeParams(mode)[param.key] = v; },
+            range: { min: param.min, max: param.max },
+            step: param.step,
+          });
+        }
+      }
+    }
+  }
+
+  // Preset actions. id = `preset.${mode}.${name}`. group = 'presets'.
+  for (const mode of Object.keys(PRESETS) as SimMode[]) {
+    for (const presetName of Object.keys(PRESETS[mode])) {
+      bindingRegistry.register({
+        kind: 'action',
+        id: `preset.${mode}.${presetName}`,
+        label: presetName,
+        group: 'presets',
+        invoke: () => applyPreset(mode, presetName),
+      });
+    }
+  }
+
+  // Mode + theme enums. group = 'app'. set() routes through the canonical helpers
+  // (selectMode, startThemeTransition) so DOM tabs and theme buttons stay in sync.
+  bindingRegistry.register({
+    kind: 'enum',
+    id: 'app.mode',
+    label: 'Mode',
+    group: 'app',
+    get: () => state.mode,
+    set: (v) => selectMode(v as SimMode),
+    options: (Object.keys(MODE_TAB_LABELS) as SimMode[])
+      .map(m => ({ value: m, label: MODE_TAB_LABELS[m] })),
+  });
+  bindingRegistry.register({
+    kind: 'enum',
+    id: 'app.theme',
+    label: 'Theme',
+    group: 'app',
+    get: () => state.colorTheme,
+    set: (v) => { state.colorTheme = v; startThemeTransition(v); },
+    options: Object.keys(COLOR_THEMES).map(name => ({ value: name, label: name })),
+  });
+}
+
 
 async function main() {
   const ok = await initWebGPU();
@@ -6123,6 +6207,7 @@ async function main() {
   loadState();
   if (isMobile) applyMobileDefaults();
   syncThemeTransition(state.colorTheme);
+  initBindings();
   buildControls();
   buildThemeSelector();
   setupTabs();
@@ -6158,6 +6243,7 @@ async function main() {
     return 'preset not found';
   };
   (window as any).__simState = () => ({ mode: state.mode, ...state[state.mode] as any, fps: currentFps, gpuMs: gpuFrameMs, gpuDetail: gpuTimingDetail });
+  (window as any).__bindings = bindingRegistry;
   (window as any).__simStats = () => {
     const sim = simulations[state.mode];
     const stats = (sim as any)?.getStats ? (sim as any).getStats() : { error: 'no stats on this sim' };
