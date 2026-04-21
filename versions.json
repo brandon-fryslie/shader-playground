@@ -4,15 +4,29 @@
     {
       "version": "pr-12",
       "ref": "refs/pull/12/merge",
-      "sha": "2595f1ac51c766a9cf008d2a8f308829f42f6fdb",
-      "timestamp": "2026-04-21T06:27:25.396Z",
+      "sha": "24872455e4f2989951eed3dc9228e4825a9c14f5",
+      "timestamp": "2026-04-21T06:32:39.985Z",
       "commits": [
         {
-          "sha": "2595f1ac51c766a9cf008d2a8f308829f42f6fdb",
+          "sha": "24872455e4f2989951eed3dc9228e4825a9c14f5",
           "author_name": "Brandon Fryslie",
           "author_email": "530235+brandon-fryslie@users.noreply.github.com",
-          "timestamp": "2026-04-21T06:27:08Z",
-          "message": "Merge 9f456beb8351ea149c6f502f30483ae1b6754d50 into 806c0ac22ecb4ac0a01350d9c72de335e33649f7\n"
+          "timestamp": "2026-04-21T06:32:18Z",
+          "message": "Merge 858281bba9abe5056962bf3e3aecfc2e57bcf7be into 806c0ac22ecb4ac0a01350d9c72de335e33649f7\n"
+        },
+        {
+          "sha": "858281bba9abe5056962bf3e3aecfc2e57bcf7be",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-21T00:32:03-06:00",
+          "message": "feat(physics): allocate PM grid buffers and constants (scaffold, no behavior change)\n\nLays down the full resource footprint for the upcoming P³M gravity\nsolver without changing any compute dispatches. 9 PM_* constants\nestablish the canonical grid layout (128³ level-0, 6-level multigrid,\nfixed-point density accumulation, V-cycle schedule). 14 buffers\nallocated: u32/f32 density at level 0, potential+residual pyramids\nacross all 6 levels, per-particle force, mean-density scratch.\n\nAll buffers released in destroy(). Mode switches do not leak —\n[LAW:single-enforcer] destroy() is the sole cleanup site.\n\nPM_DOMAIN_HALF/SIZE mirror DOMAIN_HALF/SIZE in nbody.compute.wgsl so\nthe integrator's periodic wrap and the PM grid span the same volume.\n[LAW:one-source-of-truth] Later tickets should extract these into a\nshared constants module if a second consumer needs them.\n\nticket: shader-physics-brr.2\n\nGenerated with [Claude Code](https://claude.ai/code)\nvia [Happy](https://happy.engineering)\n\nCo-Authored-By: Claude <noreply@anthropic.com>\nCo-Authored-By: Happy <yesreply@happy.engineering>\n"
+        },
+        {
+          "sha": "3062a7b289e27142f1b03a814ce8fd6611805ee6",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-21T00:30:48-06:00",
+          "message": "feat(xr): remote-eval debug bridge over ntfy.sh + ignore .claude/\n\nWires in src/xr-bridge.ts so on-device XR debugging (Vision Pro with\nno Safari Web Inspector access) can drive the page via curl against a\npublic ntfy.sh relay. Opt-in via ?xrbridge=<random-suffix>; the URL is\nthe capability. No-op without the param.\n\n- Import and call maybeInitXrBridge() at the top of main() so startup\n  events are observable before GPU init.\n- Indirect eval ((0, eval)(code)) runs commands in global scope, matching\n  DevTools console semantics rather than module scope.\n- .claude/ added to .gitignore (harness-local worktree metadata + empty\n  settings.local.json; shouldn't be committed).\n\nGenerated with [Claude Code](https://claude.ai/code)\nvia [Happy](https://happy.engineering)\n\nCo-Authored-By: Claude <noreply@anthropic.com>\nCo-Authored-By: Happy <yesreply@happy.engineering>\n"
         },
         {
           "sha": "9f456beb8351ea149c6f502f30483ae1b6754d50",
