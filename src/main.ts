@@ -1,7 +1,7 @@
 import '../styles/main.css';
 import type { SimMode, Simulation, AppState, Attractor, ThemeColors, RGBThemeColors, ParamDef, ParamSection, ShapeParamDef, XRCameraOverride, DepthRef, ModeParamsMap, ShapeName } from './types';
 import { bindingRegistry } from './xr-ui/bindings';
-import { evaluateAnchor } from './xr-ui/anchors';
+import { evaluateAnchor, type Anchor } from './xr-ui/anchors';
 import { layout as xrUiLayout, hitTestWidgets } from './xr-ui/layout';
 import {
   xrUiStep, applySideEffects as xrUiApplyEffects, makeIdlePrev as xrUiMakeIdlePrev,
@@ -5815,22 +5815,36 @@ async function toggleXR() {
     });
 
     // Bimanual clipboard — first real XR panel (ticket .13). Held on the non-
-    // dominant hand; the dominant hand pinches widgets. Offsets tuned in the
-    // ticket spec; expect to refine after on-headset passes.
+    // dominant hand; the dominant hand pinches widgets.
+    //
+    // The anchor is stored by reference in clipboardAnchor so the offset can
+    // be live-tweaked from DevTools (window.__xrUi.registry.layouts.get('clipboard').anchor)
+    // without re-deploying. Expect several iterations of on-headset tuning
+    // before these values feel right.
+    //
+    // Position: +0.15m "up" in wrist frame to lift the panel above the arm,
+    // -0.10m along wrist-local Z so it's on the palm side.
+    // Orientation: ~60° rotation around wrist-local X so the panel tilts up
+    // toward the user instead of lying flat along the forearm.
+    const tiltX = Math.sin(Math.PI * 0.33);
+    const tiltW = Math.cos(Math.PI * 0.33);
     const clipboardOffset = {
-      position: [0.10, 0.00, -0.05] as [number, number, number],  // 10cm out, 5cm toward user
-      orientation: idQuat,                                          // face user (refine in-headset)
+      position: [0.00, 0.15, -0.10] as [number, number, number],
+      orientation: [tiltX, 0, 0, tiltW] as [number, number, number, number],
     };
+    const clipboardAnchor: Anchor = { kind: 'held', hand: XR_PANEL_HAND, offset: clipboardOffset };
     const sliderSize = { x: 0.17, y: 0.030 };
     const readoutSize = { x: 0.18, y: 0.025 };
     xrUiRegistry.layouts.set('clipboard', {
       id: 'clipboard-panel', kind: 'panel',
-      anchor: { kind: 'held', hand: XR_PANEL_HAND, offset: clipboardOffset },
+      anchor: clipboardAnchor,
       size: { x: 0.20, y: 0.28 },
       children: [{
         id: 'clipboard-col', kind: 'group', layout: 'column', gap: 0.015,
         children: [
-          { id: 'clipboard-title', kind: 'readout', binding: 'app.mode',
+          // Title readout uses a concrete continuous binding. app.mode is an
+          // EnumBinding and the MVP readout renderer formats continuous values.
+          { id: 'clipboard-title', kind: 'readout', binding: 'physics.G',
             visualSize: readoutSize, hitPadding: { x: 0, y: 0 } },
           { id: 'clipboard-G', kind: 'slider', binding: 'physics.G',
             orientation: 'horizontal', interaction: { kind: 'direct-drag', axis: 'x' },
