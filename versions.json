@@ -4,15 +4,22 @@
     {
       "version": "pr-12",
       "ref": "refs/pull/12/merge",
-      "sha": "30bf2e106a7c19db128e27de8e0ded1b864cc501",
-      "timestamp": "2026-04-21T04:21:13.279Z",
+      "sha": "969382aaa865e18e8928a4864688c5ab5dab88ce",
+      "timestamp": "2026-04-21T04:27:09.431Z",
       "commits": [
         {
-          "sha": "30bf2e106a7c19db128e27de8e0ded1b864cc501",
+          "sha": "969382aaa865e18e8928a4864688c5ab5dab88ce",
           "author_name": "Brandon Fryslie",
           "author_email": "530235+brandon-fryslie@users.noreply.github.com",
-          "timestamp": "2026-04-21T04:20:54Z",
-          "message": "Merge 32064a63efafb2285880c280546d77b8ac64ecab into 806c0ac22ecb4ac0a01350d9c72de335e33649f7\n"
+          "timestamp": "2026-04-21T04:26:52Z",
+          "message": "Merge 70a5c3ced0ab464cffbf7ce1c32db4cdc90303b8 into 806c0ac22ecb4ac0a01350d9c72de335e33649f7\n"
+        },
+        {
+          "sha": "70a5c3ced0ab464cffbf7ce1c32db4cdc90303b8",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-20T22:26:44-06:00",
+          "message": "fix(xr): revert to immersive-vr — Vision Pro does not support immersive-ar in WebXR\n\nThe immersive-ar attempt errored \"operation not supported\" on visionOS\nSafari. Vision Pro WebXR is immersive-vr only. The auto-registered debug\nwidget layout from the prior commit stays — widgets should render in VR\nwithout console interaction.\n\nHand passthrough is not available with immersive-vr. Hand tracking\njoints/pinch still work for interaction, but the user's real hands are\nnot visible during the session.\n\nGenerated with [Claude Code](https://claude.ai/code)\nvia [Happy](https://happy.engineering)\n\nCo-Authored-By: Claude <noreply@anthropic.com>\nCo-Authored-By: Happy <yesreply@happy.engineering>\n"
         },
         {
           "sha": "32064a63efafb2285880c280546d77b8ac64ecab",
