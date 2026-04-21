@@ -4,15 +4,29 @@
     {
       "version": "pr-12",
       "ref": "refs/pull/12/merge",
-      "sha": "5adc055b447e931756dbd271c795de4b886b78cb",
-      "timestamp": "2026-04-21T05:13:20.434Z",
+      "sha": "e848ae1160014c4902fe6ebba0b99dcdb9fe15eb",
+      "timestamp": "2026-04-21T05:20:01.844Z",
       "commits": [
         {
-          "sha": "5adc055b447e931756dbd271c795de4b886b78cb",
+          "sha": "e848ae1160014c4902fe6ebba0b99dcdb9fe15eb",
           "author_name": "Brandon Fryslie",
           "author_email": "530235+brandon-fryslie@users.noreply.github.com",
-          "timestamp": "2026-04-21T05:13:04Z",
-          "message": "Merge 3510474fe542770e1f8f9b46b5e1c9bd40235665 into 806c0ac22ecb4ac0a01350d9c72de335e33649f7\n"
+          "timestamp": "2026-04-21T05:19:43Z",
+          "message": "Merge 45becc87049068e0b8b3abee8a4620c13309e0f2 into 806c0ac22ecb4ac0a01350d9c72de335e33649f7\n"
+        },
+        {
+          "sha": "45becc87049068e0b8b3abee8a4620c13309e0f2",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-20T23:19:35-06:00",
+          "message": "fix(xr-ui): clipboard anchor tilt + continuous readout\n\nTwo follow-ups after first on-headset session:\n- Readout bound to physics.G (continuous) instead of app.mode (enum);\n  the MVP readout renderer formats numbers, and blank-rendered on the\n  enum. Swap to exercise the known-good path; proper enum-readout is a\n  polish item.\n- Anchor offset lifts the panel +0.15m up in wrist-local frame and\n  tilts it ~60° around wrist-local X so it doesn't lie flat along the\n  forearm. Values live in a shared object referenced by the Container,\n  so live tweaks via DevTools (window.__xrUi.registry.layouts.get('clipboard').anchor.offset)\n  take effect on the next frame — no redeploy needed to iterate.\n\nGenerated with [Claude Code](https://claude.ai/code)\nvia [Happy](https://happy.engineering)\n\nCo-Authored-By: Claude <noreply@anthropic.com>\nCo-Authored-By: Happy <yesreply@happy.engineering>\n"
+        },
+        {
+          "sha": "388be481042c96fc2e303e824d7c6539103bd8a8",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-20T23:15:08-06:00",
+          "message": "fix(xr-ui): debug fixture uses head-hud anchor so widgets stay reachable\n\nXR session screenshots showed the debug all-kinds panel as pixel-sized\ncolored rectangles. Root cause: the panel was anchored to world\nposition (0, 1.55, -0.6) but the default xrViewOffset.z = -5 puts the\nuser 5 meters back from world origin, so the panel rendered 4.4m away\n— too far for SDF detail or label text to be legible at any zoom.\n\nSwitched anchor 'world' → 'head-hud' at 0.7m distance with -15cm Y\noffset so the panel sits below eye-line (doesn't block the simulation\nbehind it) but stays within arm reach. The panel now follows the\nuser's head and stays the same apparent size regardless of pan/zoom.\n\nThe clipboard panel (ticket .13) already uses 'held' anchor and is\nunaffected. To test the all-kinds renderer fixture in XR, set\nwindow.__xrUi.registry.activeLayoutId = 'debug' from the inspector.\n\nGenerated with [Claude Code](https://claude.ai/code)\nvia [Happy](https://happy.engineering)\n\nCo-Authored-By: Claude <noreply@anthropic.com>\nCo-Authored-By: Happy <yesreply@happy.engineering>\n"
         },
         {
           "sha": "3510474fe542770e1f8f9b46b5e1c9bd40235665",
