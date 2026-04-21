@@ -4,15 +4,22 @@
     {
       "version": "pr-12",
       "ref": "refs/pull/12/merge",
-      "sha": "24090f05d0d61592e343de552e89d3d53153ad24",
-      "timestamp": "2026-04-20T22:45:22.172Z",
+      "sha": "8106bd44a54d9f28864aa3614ba42b4584c26a2c",
+      "timestamp": "2026-04-21T00:01:00.118Z",
       "commits": [
         {
-          "sha": "24090f05d0d61592e343de552e89d3d53153ad24",
+          "sha": "8106bd44a54d9f28864aa3614ba42b4584c26a2c",
           "author_name": "Brandon Fryslie",
           "author_email": "530235+brandon-fryslie@users.noreply.github.com",
-          "timestamp": "2026-04-20T22:45:04Z",
-          "message": "Merge 2a03a69080031aea202c3c1900aac2fc61c7e49f into 806c0ac22ecb4ac0a01350d9c72de335e33649f7\n"
+          "timestamp": "2026-04-21T00:00:44Z",
+          "message": "Merge 711729434433c24eb38a1cd5864ca7779e6a7721 into 806c0ac22ecb4ac0a01350d9c72de335e33649f7\n"
+        },
+        {
+          "sha": "711729434433c24eb38a1cd5864ca7779e6a7721",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-20T18:00:28-06:00",
+          "message": "feat(xr): detect palm orientation, grip modifier, wrist-flick gestures\n\nWires four previously-stub gestures to actual detection using the\njoint/palmNormal/grip data populated in .5:\n\n- fine-modifier on/off: thumb-to-ring-finger contact edge\n- palm-up/palm-down: palmNormal·worldUp with hysteresis (0.7 enter /\n  0.4 exit) to prevent flicker at near-vertical palm\n- wrist-flick: wrist-quaternion delta → angular speed (rad/s) →\n  dominant world axis. 4 rad/s threshold with 2-frame consensus and\n  300ms refractory. World axes as first-cut; forearm basis refinement\n  deferred until a consumer lands.\n\nDetection is pure (data-in, gestures-out). No consumer wires up here —\n.15 consumes fine-modifier, .18 consumes palm-up/down, wrist-flick\nconsumer TBD. xrTuning.gainMultiplier already wires fine-modifier\nthrough the existing state-machine handler.\n\nSnapshot state (xrPrevGestureSnap) parallels xrPrevPinch and resets\non session end. [LAW:one-source-of-truth] sole prev-state store for\nthis layer.\n\nticket: shader-xrpanel-blk.7\n\nGenerated with [Claude Code](https://claude.ai/code)\nvia [Happy](https://happy.engineering)\n\nCo-Authored-By: Claude <noreply@anthropic.com>\nCo-Authored-By: Happy <yesreply@happy.engineering>\n"
         },
         {
           "sha": "2a03a69080031aea202c3c1900aac2fc61c7e49f",
