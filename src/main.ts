@@ -3430,8 +3430,18 @@ function setupRecordButton(): void {
         // pinch-hold fires every frame during a pinch — also bulk; skip from console.
         if (s.channel === 'xr.gesture'
           && (s.payload as XrGestureEvent).gesture.kind === 'pinch-hold') continue;
+        // Inline kind/transition into the prefix so Safari doesn't collapse nested
+        // objects to "Object" — the string prefix always prints fully.
+        let label = s.channel;
+        if (s.channel === 'xr.gesture') {
+          const p = s.payload as XrGestureEvent;
+          label = `xr.gesture:${p.gesture.kind}${p.hand ? `(${p.hand})` : ''}`;
+        } else if (s.channel === 'xr.state') {
+          const p = s.payload as XrStateEvent;
+          label = `xr.state:${p.hand} ${p.from}→${p.to}`;
+        }
         // eslint-disable-next-line no-console
-        console.log(`[t=${s.t.toFixed(0).padStart(5)}ms] ${s.channel}`, s.payload);
+        console.log(`[t=${s.t.toFixed(0).padStart(5)}ms] ${label}`, s.payload);
       }
       // eslint-disable-next-line no-console
       console.groupEnd();
