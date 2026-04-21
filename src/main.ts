@@ -5252,9 +5252,11 @@ function xrDetectGestures(): XrGesture[] {
     // → roll/pitch/yaw bucket (approximation; refine to forearm basis if needed).
     // 2-frame consensus (flickArmed) + 300ms refractory suppresses ringing at
     // the flick peak and prevents a single quick motion firing twice.
+    // Gated on !pinch.active — during a drag, rotational motion is a side
+    // effect of positioning the attractor, not an intentional flick gesture.
     const wristQuat = hf.joints?.['wrist']?.orientation ?? null;
     let flickSpeed = 0;
-    if (wristQuat && prev.wristOrient) {
+    if (wristQuat && prev.wristOrient && !hf.pinch.active) {
       const dtSec = Math.max(0.001, (now - prev.wristTime) / 1000);
       const delta = quatMul(wristQuat, quatConj(prev.wristOrient));
       const w = Math.min(1, Math.abs(delta[3]));
@@ -5761,7 +5763,9 @@ async function toggleXR() {
     const widgetPad  = { x: 0.02, y: 0.02 };
     xrUiRegistry.layouts.set('debug', {
       id: 'debug-panel', kind: 'panel',
-      anchor: { kind: 'world', pose: { position: [0, 1.4, -0.6], orientation: idQuat } },
+      // Lifted from y=1.4 → y=1.55 so the bottom row sits at gaze level for
+      // a typical standing user (~1.6m eye height) instead of below the chest.
+      anchor: { kind: 'world', pose: { position: [0, 1.55, -0.6], orientation: idQuat } },
       size: { x: 1.1, y: 0.5 },
       children: [
         {
@@ -5782,7 +5786,7 @@ async function toggleXR() {
         {
           id: 'debug-row-2', kind: 'group', layout: 'row',
           children: [
-            { id: 'debug-tg1', kind: 'toggle', binding: 'fx.bloom', style: 'switch',
+            { id: 'debug-tg1', kind: 'toggle', binding: 'app.paused', style: 'switch',
               visualSize: widgetSize, hitPadding: widgetPad },
             { id: 'debug-st1', kind: 'stepper', binding: 'physics.count', step: 1000,
               visualSize: widgetSize, hitPadding: widgetPad },
@@ -6578,6 +6582,17 @@ function initBindings(): void {
     get: () => state.colorTheme,
     set: (v) => { state.colorTheme = v; startThemeTransition(v); },
     options: Object.keys(COLOR_THEMES).map(name => ({ value: name, label: name })),
+  });
+
+  // Boolean toggles. PARAM_DEFS doesn't carry boolean params today; the
+  // app-level state has a few (paused) that the XR toggle widget can flip.
+  bindingRegistry.register({
+    kind: 'toggle',
+    id: 'app.paused',
+    label: 'Pause',
+    group: 'app',
+    get: () => state.paused,
+    set: (v) => { state.paused = v; syncPauseButtons(); },
   });
 }
 
