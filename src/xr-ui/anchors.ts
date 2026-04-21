@@ -57,6 +57,10 @@ export type Anchor =
 
 const IDENTITY_QUAT: [number, number, number, number] = [0, 0, 0, 1];
 
+export function quatConj(q: [number, number, number, number]): [number, number, number, number] {
+  return [-q[0], -q[1], -q[2], q[3]];
+}
+
 export function evaluateAnchor(anchor: Anchor, ctx: AnchorContext): Pose | null {
   switch (anchor.kind) {
     case 'world':
@@ -118,7 +122,7 @@ function quat4ToTuple(q: number[]): [number, number, number, number] {
 
 // Compose `parent · offset`: apply offset in parent's local frame, return the
 // world-space pose. Equivalent to mat4(parent) * mat4(offset).
-function composePose(parent: Pose, offset: Pose): Pose {
+export function composePose(parent: Pose, offset: Pose): Pose {
   const rot = quatRotateVec(parent.orientation, offset.position);
   return {
     position: [
@@ -130,7 +134,7 @@ function composePose(parent: Pose, offset: Pose): Pose {
   };
 }
 
-function quatMul(
+export function quatMul(
   a: [number, number, number, number],
   b: [number, number, number, number],
 ): [number, number, number, number] {
@@ -143,7 +147,7 @@ function quatMul(
 }
 
 // v' = v + 2 * cross(q.xyz, cross(q.xyz, v) + q.w * v)  (Rodrigues, optimized)
-function quatRotateVec(
+export function quatRotateVec(
   q: [number, number, number, number],
   v: [number, number, number],
 ): [number, number, number] {
