@@ -3,6 +3,10 @@ import type { SimMode, Simulation, AppState, Attractor, ThemeColors, RGBThemeCol
 import { bindingRegistry } from './xr-ui/bindings';
 import { evaluateAnchor } from './xr-ui/anchors';
 import { layout as xrUiLayout, hitTestWidgets } from './xr-ui/layout';
+import {
+  xrUiStep, applySideEffects as xrUiApplyEffects, makeIdlePrev as xrUiMakeIdlePrev,
+  uiHandClaimed, type XrUiPrev, type XrUiRegistry, type RenderCommand as XrRenderCommand,
+} from './xr-ui/step';
 
 // WGSL shader imports — Vite loads these as raw strings
 import SHADER_BOIDS_COMPUTE from './shaders/boids.compute.wgsl?raw';
@@ -4656,6 +4660,22 @@ const xrTuning = {
   gainMultiplier: 1.0,  // 0.1 when fine-modifier active (future)
 };
 
+// XR-UI module state. Single source of truth for the new widget pipeline:
+// - xrUiRegistry holds bindings + named layouts. Empty layouts map until ticket .13
+//   registers the first panel. xrUiStep returns idle/empty in that state.
+// - xrUiPrev is threaded into xrUiStep each frame and rebuilt from its result.
+// - xrUiClaimed mirrors uiHandClaimed(prev.states[hand]) so xrTransitionInteractions
+//   can short-circuit the pending→dragging sim promotion when UI owns the pinch.
+//   [LAW:single-enforcer] xrUiStep is the only writer of this flag.
+const xrUiRegistry: XrUiRegistry = {
+  bindings: bindingRegistry,
+  layouts: new Map(),
+  activeLayoutId: null,
+};
+let xrUiPrev: XrUiPrev = xrUiMakeIdlePrev();
+let xrUiRenderList: XrRenderCommand[] = [];
+const xrUiClaimed: Record<XrHand, boolean> = { left: false, right: false };
+
 // View offset (modified by two-hand scale).
 // [LAW:one-source-of-truth] xrViewOffset is the single source for the user's
 // virtual viewpoint position relative to the simulation.
@@ -5094,11 +5114,19 @@ function xrTransitionInteractions(gestures: XrGesture[], _frame: XRFrame): void 
   for (const hand of ['left', 'right'] as XrHand[]) {
     const ix = xrInteractions[hand];
     if (ix.kind === 'pending' && now >= ix.deadline) {
-      xrInteractions[hand] = {
-        kind: 'dragging',
-        handOrigin: [...xrHandFrames[hand].pinch.origin],
-        hasSample: false,
-      };
+      // [LAW:single-enforcer] UI selection wins over sim attractor on the same
+      // pinch. xrUiStep set xrUiClaimed[hand] at the pinch-start frame; if true,
+      // drop the pending pinch instead of starting a sim drag. The pinch will
+      // continue feeding xrUiStep until pinch-end.
+      if (xrUiClaimed[hand]) {
+        xrInteractions[hand] = { kind: 'idle' };
+      } else {
+        xrInteractions[hand] = {
+          kind: 'dragging',
+          handOrigin: [...xrHandFrames[hand].pinch.origin],
+          hasSample: false,
+        };
+      }
     }
   }
 }
@@ -5204,8 +5232,34 @@ function xrApplyInteractions(_frame: XRFrame): void {
 // ═══════════════════════════════════════════════════════════════════════════════
 // Called once per XR frame. Runs all four stages in order.
 
+// Extract head pose in current xrRefSpace as the AnchorContext shape.
+// Returns null while the viewer pose is unavailable (e.g. tracking dropouts).
+function extractXrHeadPose(frame: XRFrame): { position: [number, number, number]; orientation: [number, number, number, number] } | null {
+  if (!xrRefSpace) return null;
+  const pose = frame.getViewerPose(xrRefSpace);
+  if (!pose) return null;
+  const t = pose.transform;
+  return {
+    position: [t.position.x, t.position.y, t.position.z],
+    orientation: [t.orientation.x, t.orientation.y, t.orientation.z, t.orientation.w],
+  };
+}
+
 function xrInputStep(frame: XRFrame): void {
   xrUpdateHandFrames(frame);
+  // [LAW:single-enforcer] xrUiStep runs BEFORE gesture/transition stages so
+  // its claim flag is current by the time xrTransitionInteractions's deadline
+  // pass decides whether to promote a pending pinch to a sim attractor drag.
+  // [LAW:dataflow-not-control-flow] Always called; with no active layout it
+  // returns idle/empty. No "if UI active" branch around it.
+  const headPose = extractXrHeadPose(frame);
+  const uiResult = xrUiStep(xrUiRegistry, xrHandFrames, xrUiPrev, { hands: xrHandFrames, headPose }, xrTuning, 16);
+  xrUiApplyEffects(uiResult.sideEffects, xrUiRegistry);
+  xrUiPrev = uiResult.next;
+  xrUiRenderList = uiResult.renderList;
+  xrUiClaimed.left  = uiHandClaimed(uiResult.next.states.left);
+  xrUiClaimed.right = uiHandClaimed(uiResult.next.states.right);
+
   const gestures = xrDetectGestures();
   xrTransitionInteractions(gestures, frame);
   xrApplyInteractions(frame);
@@ -5240,6 +5294,10 @@ function xrResetInputState(): void {
   xrPrevGestureSnap.left = makeGestureSnapshot();
   xrPrevGestureSnap.right = makeGestureSnapshot();
   xrTuning.gainMultiplier = 1.0;
+  xrUiPrev = xrUiMakeIdlePrev();
+  xrUiRenderList = [];
+  xrUiClaimed.left = false;
+  xrUiClaimed.right = false;
   setSimulationInteractionInactive();
   releaseAttractor(XR_ATTRACTOR_POINTER_ID.left);
   releaseAttractor(XR_ATTRACTOR_POINTER_ID.right);
@@ -6247,7 +6305,14 @@ async function main() {
   (window as any).__simState = () => ({ mode: state.mode, ...state[state.mode] as any, fps: currentFps, gpuMs: gpuFrameMs, gpuDetail: gpuTimingDetail });
   (window as any).__bindings = bindingRegistry;
   (window as any).__anchors = { evaluateAnchor, handFrames: xrHandFrames };
-  (window as any).__xrUi = { layout: xrUiLayout, hitTestWidgets };
+  (window as any).__xrUi = {
+    layout: xrUiLayout, hitTestWidgets,
+    step: xrUiStep, applyEffects: xrUiApplyEffects,
+    registry: xrUiRegistry, makeIdlePrev: xrUiMakeIdlePrev,
+    getRenderList: () => xrUiRenderList,
+    getPrev: () => xrUiPrev,
+    getClaimed: () => ({ ...xrUiClaimed }),
+  };
   (window as any).__simStats = () => {
     const sim = simulations[state.mode];
     const stats = (sim as any)?.getStats ? (sim as any).getStats() : { error: 'no stats on this sim' };
