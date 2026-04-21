@@ -4,15 +4,22 @@
     {
       "version": "pr-12",
       "ref": "refs/pull/12/merge",
-      "sha": "84dc86d4090247aed5a598ac5a2816ee2d47fba3",
-      "timestamp": "2026-04-21T04:45:57.201Z",
+      "sha": "d7c41603886211e00359cb848830076b84ce6266",
+      "timestamp": "2026-04-21T04:52:05.918Z",
       "commits": [
         {
-          "sha": "84dc86d4090247aed5a598ac5a2816ee2d47fba3",
+          "sha": "d7c41603886211e00359cb848830076b84ce6266",
           "author_name": "Brandon Fryslie",
           "author_email": "530235+brandon-fryslie@users.noreply.github.com",
-          "timestamp": "2026-04-21T04:45:37Z",
-          "message": "Merge e6748250252b579435270c640f4fdc13ba688ea4 into 806c0ac22ecb4ac0a01350d9c72de335e33649f7\n"
+          "timestamp": "2026-04-21T04:51:49Z",
+          "message": "Merge aed628e7ef579b1b9672873031879e925f754541 into 806c0ac22ecb4ac0a01350d9c72de335e33649f7\n"
+        },
+        {
+          "sha": "aed628e7ef579b1b9672873031879e925f754541",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-20T22:51:41-06:00",
+          "message": "fix(xr): inline gesture kind + state transition into log prefix\n\nSafari's console collapses nested objects to \"Object\" when the line is\nlong, hiding which gesture actually fired. Inline the kind (and hand,\nand from→to for state) into the prefix string so it always prints in\nfull — the readable label is now the first thing you see:\n\n  [t= 9397ms] xr.gesture:pinch-start(right) { ... }\n  [t= 9552ms] xr.state:right pending→dragging { ... }\n\nThe full payload is still logged for drill-down.\n\nGenerated with [Claude Code](https://claude.ai/code)\nvia [Happy](https://happy.engineering)\n\nCo-Authored-By: Claude <noreply@anthropic.com>\nCo-Authored-By: Happy <yesreply@happy.engineering>\n"
         },
         {
           "sha": "e6748250252b579435270c640f4fdc13ba688ea4",
