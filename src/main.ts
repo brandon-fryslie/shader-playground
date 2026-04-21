@@ -3416,15 +3416,22 @@ function setupRecordButton(): void {
     // samples actually arrive until the first XR frame — this just ensures
     // subscribers are live when they do.
     metrics.record({}).then((samples) => {
+      // Full sample array on window for programmatic inspection. Console only
+      // shows edge events (gestures + state transitions) to avoid 90 Hz × 2-hand
+      // snap spam. To walk snaps yourself: __xrLastRecording.filter(s => s.channel === 'xr.snap').
+      (window as unknown as { __xrLastRecording?: MetricSample[] }).__xrLastRecording = samples;
+      const counts: Record<string, number> = {};
+      for (const s of samples) counts[s.channel] = (counts[s.channel] ?? 0) + 1;
+      const summary = Object.entries(counts).map(([c, n]) => `${c}: ${n}`).join(', ');
       // eslint-disable-next-line no-console
-      console.group(`[xr] recording — ${samples.length} samples`);
+      console.group(`[xr] recording — ${samples.length} samples (${summary})`);
       for (const s of samples) {
+        if (s.channel === 'xr.snap') continue;  // bulk data; inspect via __xrLastRecording
         // eslint-disable-next-line no-console
         console.log(`[t=${s.t.toFixed(0).padStart(5)}ms] ${s.channel}`, s.payload);
       }
       // eslint-disable-next-line no-console
       console.groupEnd();
-      (window as unknown as { __xrLastRecording?: MetricSample[] }).__xrLastRecording = samples;
     });
     requestAnimationFrame(tick);
     await toggleXR();
