@@ -4,15 +4,22 @@
     {
       "version": "pr-12",
       "ref": "refs/pull/12/merge",
-      "sha": "54fab0301e87fc5599f93b7f222329ebe0636a16",
-      "timestamp": "2026-04-21T06:34:16.472Z",
+      "sha": "15a25460727df41f97a41a0a41f559b6108ec976",
+      "timestamp": "2026-04-21T06:40:43.558Z",
       "commits": [
         {
-          "sha": "54fab0301e87fc5599f93b7f222329ebe0636a16",
+          "sha": "15a25460727df41f97a41a0a41f559b6108ec976",
           "author_name": "Brandon Fryslie",
           "author_email": "530235+brandon-fryslie@users.noreply.github.com",
-          "timestamp": "2026-04-21T06:34:00Z",
-          "message": "Merge d298ef505b716b4c5180b729f7c702ff30e4edd6 into 806c0ac22ecb4ac0a01350d9c72de335e33649f7\n"
+          "timestamp": "2026-04-21T06:40:25Z",
+          "message": "Merge 60fdc4cdf9d9a95d00f775f61d53a9ae00a8234f into 806c0ac22ecb4ac0a01350d9c72de335e33649f7\n"
+        },
+        {
+          "sha": "60fdc4cdf9d9a95d00f775f61d53a9ae00a8234f",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-21T00:40:11-06:00",
+          "message": "feat(physics): PM CIC deposition and mean-subtracted density field\n\nTwo new compute shaders + three pipelines wired into createPhysicsSimulation:\n\n  pm.deposit          — CIC (cloud-in-cell) scatter of each particle's mass\n                        into its 8 neighboring cells with trilinear weights.\n                        Fixed-point u32 atomicAdd sidesteps WebGPU's lack of\n                        f32 atomics; mass × SCALE (65536) gives ~4-decimal\n                        precision while staying 3 orders below u32 overflow.\n                        Deposit happens at posHalf (DKD midpoint) to match\n                        force evaluation in nbody.compute.wgsl.\n\n  pm.density_convert  — two entry points sharing one bind group.\n                        reduce:  sum densityU32 into meanScratch[0] via\n                                 one atomicAdd per cell.\n                        convert: read u32 cell value, subtract per-cell\n                                 mean, write f32 to densityF32. Produces\n                                 the mean-zero density the periodic\n                                 Poisson solver (.4) needs — ∇²φ = ρ has\n                                 no torus solution unless ρ̄ = 0.\n\nEach frame: clearBuffer(densityU32) + clearBuffer(meanScratch) → deposit\n→ reduce → convert. No force coupling yet — the output is computed but\nnot consumed until .5 lands PM force sampling.\n\nDiagnostic: window.__pmDumpDensity() returns a Float32Array of length\n128³ = 2,097,152 for verification. Mean ≈ 0, clustered regions positive,\nempty regions negative.\n\nticket: shader-physics-brr.3\n\nGenerated with [Claude Code](https://claude.ai/code)\nvia [Happy](https://happy.engineering)\n\nCo-Authored-By: Claude <noreply@anthropic.com>\nCo-Authored-By: Happy <yesreply@happy.engineering>\n"
         },
         {
           "sha": "d298ef505b716b4c5180b729f7c702ff30e4edd6",
