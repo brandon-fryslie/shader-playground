@@ -4927,7 +4927,8 @@ interface XrGestureEvent { hand: XrHand | null; gesture: XrGesture }
 interface XrStateEvent { hand: XrHand; from: XrInteraction['kind']; to: XrInteraction['kind'] }
 interface XrSnapEvent {
   hand: XrHand;
-  tracked: boolean;
+  handTracked: boolean;      // hand-tracking is producing joints this frame
+  pinching: boolean;         // a pinch source is currently active (system gesture)
   palmDot: number | null;    // palmNormal · worldUp
   palmUp: boolean;
   fineModifier: boolean;
@@ -5268,7 +5269,8 @@ function xrDetectGestures(): XrGesture[] {
     if (chanXrSnap.subscribers.size > 0) {
       metrics.emit(chanXrSnap, {
         hand,
-        tracked: hf.tracked,
+        handTracked: hf.joints !== null,
+        pinching: hf.pinch.active,
         palmDot: hf.palmNormal ? hf.palmNormal[1] : null,
         palmUp: prev.palmUp,
         fineModifier: prev.fineModifier,
