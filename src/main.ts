@@ -5546,10 +5546,7 @@ async function toggleXR() {
     // 'layers' is optional — Safari accepts it in updateRenderState({ layers: [...] })
     // even when not listed as required. 'local-floor' is optional; fall back to 'local'.
     currentGpuPhase = 'xr:requestSession';
-    // [LAW:one-source-of-truth] 'immersive-ar' = passthrough mode on Vision Pro so the
-    // user's real hands remain visible. 'immersive-vr' is full-immersion (no passthrough,
-    // no real hands). The XR widget layer is alpha-blended onto the HDR scene either way.
-    xrSession = await navigator.xr!.requestSession('immersive-ar', {
+    xrSession = await navigator.xr!.requestSession('immersive-vr', {
       requiredFeatures: ['webgpu'],
       optionalFeatures: ['layers', 'local-floor', 'hand-tracking'],
     });
