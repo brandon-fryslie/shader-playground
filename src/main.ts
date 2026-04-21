@@ -5546,7 +5546,10 @@ async function toggleXR() {
     // 'layers' is optional — Safari accepts it in updateRenderState({ layers: [...] })
     // even when not listed as required. 'local-floor' is optional; fall back to 'local'.
     currentGpuPhase = 'xr:requestSession';
-    xrSession = await navigator.xr!.requestSession('immersive-vr', {
+    // [LAW:one-source-of-truth] 'immersive-ar' = passthrough mode on Vision Pro so the
+    // user's real hands remain visible. 'immersive-vr' is full-immersion (no passthrough,
+    // no real hands). The XR widget layer is alpha-blended onto the HDR scene either way.
+    xrSession = await navigator.xr!.requestSession('immersive-ar', {
       requiredFeatures: ['webgpu'],
       optionalFeatures: ['layers', 'local-floor', 'hand-tracking'],
     });
@@ -5683,6 +5686,29 @@ async function toggleXR() {
     btn.textContent = 'Exit VR';
     state.xrEnabled = true;
     currentGpuPhase = 'xr:awaiting first frame';
+
+    // Auto-register debug widget fixture so ticket .12 renders something visible
+    // without a console snippet. Remove when ticket .13 lands the real clipboard.
+    const idQuat: [number, number, number, number] = [0, 0, 0, 1];
+    xrUiRegistry.layouts.set('debug', {
+      id: 'debug-panel', kind: 'panel',
+      anchor: { kind: 'world', pose: { position: [0, 1.4, -0.6], orientation: idQuat } },
+      size: { x: 0.8, y: 0.5 },
+      children: [{
+        id: 'debug-row', kind: 'group', layout: 'row',
+        children: [
+          { id: 'debug-s1', kind: 'slider', binding: 'physics.G',
+            orientation: 'horizontal', interaction: { kind: 'direct-drag', axis: 'x' },
+            visualSize: { x: 0.20, y: 0.05 }, hitPadding: { x: 0.02, y: 0.02 } },
+          { id: 'debug-b1', kind: 'button', binding: 'preset.physics.Default',
+            style: 'primary',
+            visualSize: { x: 0.15, y: 0.05 }, hitPadding: { x: 0.02, y: 0.02 } },
+          { id: 'debug-r1', kind: 'readout', binding: 'physics.G',
+            visualSize: { x: 0.18, y: 0.05 }, hitPadding: { x: 0.02, y: 0.02 } },
+        ],
+      }],
+    });
+    xrUiRegistry.activeLayoutId = 'debug';
 
     xrSession.addEventListener('visibilitychange', () => {
       logInfo('xr', 'visibilitychange', {
