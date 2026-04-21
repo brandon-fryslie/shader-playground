@@ -4,15 +4,29 @@
     {
       "version": "pr-12",
       "ref": "refs/pull/12/merge",
-      "sha": "6207683fd6159a9f9247bc25b1a44a2d10f62b87",
-      "timestamp": "2026-04-21T04:36:02.817Z",
+      "sha": "1a3be876baad0b45114d3647869292ac02a973b5",
+      "timestamp": "2026-04-21T04:41:07.049Z",
       "commits": [
         {
-          "sha": "6207683fd6159a9f9247bc25b1a44a2d10f62b87",
+          "sha": "1a3be876baad0b45114d3647869292ac02a973b5",
           "author_name": "Brandon Fryslie",
           "author_email": "530235+brandon-fryslie@users.noreply.github.com",
-          "timestamp": "2026-04-21T04:35:51Z",
-          "message": "Merge 12dd0f1f63d5d94885339032a40b6009e0948d86 into 806c0ac22ecb4ac0a01350d9c72de335e33649f7\n"
+          "timestamp": "2026-04-21T04:40:54Z",
+          "message": "Merge a51bfea2e13c0866ed44be6d49986ffcd9a45754 into 806c0ac22ecb4ac0a01350d9c72de335e33649f7\n"
+        },
+        {
+          "sha": "a51bfea2e13c0866ed44be6d49986ffcd9a45754",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-20T22:40:45-06:00",
+          "message": "fix(xr): drop xr.snap from console dump — summary + edge events only\n\nPer-frame per-hand snap events are ~90 Hz × 2 = ~180 entries/sec,\ndrowning out the gesture/state edge events that are usually what you\nwant to see. Console now shows:\n  - a summary line with per-channel counts\n  - every xr.gesture / xr.state sample inline\nThe full sample array (including all snaps) stays on\nwindow.__xrLastRecording for programmatic inspection.\n\nGenerated with [Claude Code](https://claude.ai/code)\nvia [Happy](https://happy.engineering)\n\nCo-Authored-By: Claude <noreply@anthropic.com>\nCo-Authored-By: Happy <yesreply@happy.engineering>\n"
+        },
+        {
+          "sha": "5df5ac6443d2175e4322208ab831ca62e816c1d9",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-20T22:39:57-06:00",
+          "message": "feat(xr-ui): complete SDF widget renderer + label atlas\n\nCloses ticket shader-xrpanel-blk.19 — the work that .12 deferred.\nAdds the 6 remaining widget kinds (dial, toggle, stepper, enum-chips,\npreset-tile, category-tile) and a canvas→GPU label atlas so any widget\ncan render text without a per-frame allocation.\n\n- src/shaders/xr-widgets.wgsl: 9 SDF kind branches, atlas binding +\n  aspect-corrected label sampling. Instance struct expanded to 64\n  bytes (added labelStripIndex + hasLabel + 2 pad u32).\n- src/xr-ui/renderer.ts: 256x2048 RGBA8 atlas, 32px strips (64 max),\n  2D canvas re-renders only the changed strip per frame and uploads\n  via copyExternalImageToTexture sub-rect. Per-instance KIND map +\n  ensureLabelStrip() do all the work; the draw path stays one\n  instanced draw call.\n- src/xr-ui/step.ts: RenderCommand.label populated by readWidgetLabel\n  from binding.label / binding.format(value) / on/off / current enum.\n  formatNumber chooses precision by magnitude.\n- src/main.ts: debug XR fixture expanded to two rows showing all 9\n  widget kinds so visual verification covers everything in one\n  session.\n\nVerified in headless Chrome: tsc clean, page boots with 0 errors in\n__errorLog, 82 bindings still register, 120 FPS. Visual correctness\nof the 6 new kinds + label rendering requires Vision Pro testing\n(same as ticket .12).\n\nGenerated with [Claude Code](https://claude.ai/code)\nvia [Happy](https://happy.engineering)\n\nCo-Authored-By: Claude <noreply@anthropic.com>\nCo-Authored-By: Happy <yesreply@happy.engineering>\n"
         },
         {
           "sha": "12dd0f1f63d5d94885339032a40b6009e0948d86",
