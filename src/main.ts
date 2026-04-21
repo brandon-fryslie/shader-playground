@@ -3384,8 +3384,47 @@ function setupGlobalControls() {
     location.reload();
   });
 
+  setupRecordButton();
+
   // XR button setup
   setupXRButton();
+}
+
+// Burst-capture button: 1s pre-delay, 2s record, publish to console +
+// window.__xrLastRecording. Button is polled via rAF only while active; idle
+// state pays no per-frame cost.
+function setupRecordButton(): void {
+  const btn = document.getElementById('btn-xr-record') as HTMLButtonElement | null;
+  if (!btn) return;
+  const idleLabel = 'Record XR Gestures (1s + 2s)';
+  const tick = () => {
+    const s = metrics.status();
+    if (s.phase === 'idle') {
+      btn.textContent = idleLabel;
+      btn.disabled = false;
+      return;
+    }
+    btn.textContent = s.phase === 'pre-delay'
+      ? `Starting in ${(s.remainingMs / 1000).toFixed(1)}s…`
+      : `Recording… ${(s.remainingMs / 1000).toFixed(1)}s`;
+    btn.disabled = true;
+    requestAnimationFrame(tick);
+  };
+  btn.addEventListener('click', () => {
+    if (metrics.status().phase !== 'idle') return;
+    metrics.record({ preDelayMs: 1000, durationMs: 2000 }).then((samples) => {
+      // eslint-disable-next-line no-console
+      console.group(`[xr] recording — ${samples.length} samples over 2000ms`);
+      for (const s of samples) {
+        // eslint-disable-next-line no-console
+        console.log(`[t=${s.t.toFixed(0).padStart(4)}ms] ${s.channel}`, s.payload);
+      }
+      // eslint-disable-next-line no-console
+      console.groupEnd();
+      (window as unknown as { __xrLastRecording?: MetricSample[] }).__xrLastRecording = samples;
+    });
+    requestAnimationFrame(tick);
+  });
 }
 
 // [LAW:single-enforcer] Time-reverse input is owned here. Desktop: hold R. Mobile: hold rewind FAB.
@@ -4503,6 +4542,114 @@ let SHADER_REACTION_RENDER_EDIT: string | null = null;
 
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// METRICS BUS
+// ═══════════════════════════════════════════════════════════════════════════════
+// Typed pub/sub channels with first-class burst-capture recording. Producers
+// guard emit with `chan.subscribers.size > 0` for zero-cost-when-idle — no
+// payload is constructed when nobody is listening. All consumers (console
+// loggers, HUDs, the burst recorder) subscribe the same way; adding a new
+// consumer is free at producer sites. [LAW:one-source-of-truth] One registry
+// of channels and one recorder state.
+
+interface MetricChannel<T> {
+  readonly name: string;
+  readonly subscribers: Set<(payload: T) => void>;
+}
+interface MetricSample {
+  t: number;             // ms since recording-window start (pre-delay is invisible)
+  channel: string;
+  payload: unknown;
+}
+type RecordPhase = 'idle' | 'pre-delay' | 'recording';
+interface RecordOptions {
+  preDelayMs: number;
+  durationMs: number;
+  channels?: MetricChannel<unknown>[];  // omit = all registered channels
+}
+interface RecordStatus {
+  phase: RecordPhase;
+  remainingMs: number;
+}
+
+const metricsChannels = new Map<string, MetricChannel<unknown>>();
+const metricsRecord = {
+  phase: 'idle' as RecordPhase,
+  phaseDeadline: 0,
+  samples: [] as MetricSample[],
+  startedAt: 0,
+  unsubs: [] as Array<() => void>,
+  preDelayTimer: null as ReturnType<typeof setTimeout> | null,
+  stopTimer: null as ReturnType<typeof setTimeout> | null,
+  resolve: null as ((samples: MetricSample[]) => void) | null,
+};
+
+const metrics = {
+  channel<T>(name: string): MetricChannel<T> {
+    const existing = metricsChannels.get(name);
+    if (existing) return existing as MetricChannel<T>;
+    const chan: MetricChannel<T> = { name, subscribers: new Set() };
+    metricsChannels.set(name, chan as unknown as MetricChannel<unknown>);
+    return chan;
+  },
+  subscribe<T>(chan: MetricChannel<T>, fn: (p: T) => void): () => void {
+    chan.subscribers.add(fn);
+    return () => { chan.subscribers.delete(fn); };
+  },
+  emit<T>(chan: MetricChannel<T>, payload: T): void {
+    for (const fn of chan.subscribers) fn(payload);
+  },
+  record(opts: RecordOptions): Promise<MetricSample[]> {
+    if (metricsRecord.phase !== 'idle') {
+      return Promise.reject(new Error('metrics.record: recording already in progress'));
+    }
+    return new Promise<MetricSample[]>((resolve) => {
+      metricsRecord.phase = 'pre-delay';
+      metricsRecord.phaseDeadline = performance.now() + opts.preDelayMs;
+      metricsRecord.samples = [];
+      metricsRecord.resolve = resolve;
+      metricsRecord.preDelayTimer = setTimeout(() => {
+        // Enter recording phase: subscribe to all requested (or all registered) channels.
+        const targets = opts.channels ?? Array.from(metricsChannels.values());
+        metricsRecord.startedAt = performance.now();
+        metricsRecord.phase = 'recording';
+        metricsRecord.phaseDeadline = metricsRecord.startedAt + opts.durationMs;
+        metricsRecord.preDelayTimer = null;
+        for (const chan of targets) {
+          const chanName = chan.name;
+          metricsRecord.unsubs.push(metrics.subscribe(chan, (payload) => {
+            metricsRecord.samples.push({
+              t: performance.now() - metricsRecord.startedAt,
+              channel: chanName,
+              payload,
+            });
+          }));
+        }
+        metricsRecord.stopTimer = setTimeout(() => {
+          for (const u of metricsRecord.unsubs) u();
+          metricsRecord.unsubs = [];
+          metricsRecord.stopTimer = null;
+          const samples = metricsRecord.samples;
+          metricsRecord.samples = [];
+          metricsRecord.phase = 'idle';
+          metricsRecord.phaseDeadline = 0;
+          const res = metricsRecord.resolve;
+          metricsRecord.resolve = null;
+          if (res) res(samples);
+        }, opts.durationMs);
+      }, opts.preDelayMs);
+    });
+  },
+  status(): RecordStatus {
+    if (metricsRecord.phase === 'idle') return { phase: 'idle', remainingMs: 0 };
+    return {
+      phase: metricsRecord.phase,
+      remainingMs: Math.max(0, metricsRecord.phaseDeadline - performance.now()),
+    };
+  },
+};
+
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // SECTION 8: WEBXR
 // ═══════════════════════════════════════════════════════════════════════════════
 
@@ -4721,6 +4868,35 @@ const XR_PALM_UP_EXIT = 0.4;
 // ringing and oscillation on the flick peak.
 const XR_FLICK_SPEED_RAD_S = 4.0;
 const XR_FLICK_REFRACTORY_MS = 300;
+
+// ── METRIC CHANNELS ────────────────────────────────────────────────────────────
+// Declared once; producers below guard emit with `chan.subscribers.size > 0`.
+// Payload shapes are typed here and flow through subscribers unchanged.
+interface XrGestureEvent { hand: XrHand | null; gesture: XrGesture }
+interface XrStateEvent { hand: XrHand; from: XrInteraction['kind']; to: XrInteraction['kind'] }
+interface XrSnapEvent {
+  hand: XrHand;
+  tracked: boolean;
+  palmDot: number | null;    // palmNormal · worldUp
+  palmUp: boolean;
+  fineModifier: boolean;
+  flickSpeed: number;        // rad/s, 0 when no prior orientation
+  grip: XrGripState | null;
+}
+const chanXrGesture = metrics.channel<XrGestureEvent>('xr.gesture');
+const chanXrState   = metrics.channel<XrStateEvent>('xr.state');
+const chanXrSnap    = metrics.channel<XrSnapEvent>('xr.snap');
+
+// State-transition helper: routes every xrInteractions[hand] assignment so the
+// change emits on xr.state exactly once per kind-change. Kind-identical writes
+// (e.g. re-entering pending with a fresh deadline) do not emit.
+function xrSetInteraction(hand: XrHand, next: XrInteraction): void {
+  const prev = xrInteractions[hand];
+  xrInteractions[hand] = next;
+  if (chanXrState.subscribers.size > 0 && prev.kind !== next.kind) {
+    metrics.emit(chanXrState, { hand, from: prev.kind, to: next.kind });
+  }
+}
 
 // Synthetic pointer ids for XR attractors — one per hand so left and right
 // create independent concurrent attractors. [LAW:one-source-of-truth] Each hand
@@ -5005,6 +5181,7 @@ function xrDetectGestures(): XrGesture[] {
     // 2-frame consensus (flickArmed) + 300ms refractory suppresses ringing at
     // the flick peak and prevents a single quick motion firing twice.
     const wristQuat = hf.joints?.['wrist']?.orientation ?? null;
+    let flickSpeed = 0;
     if (wristQuat && prev.wristOrient) {
       const dtSec = Math.max(0.001, (now - prev.wristTime) / 1000);
       const delta = quatMul(wristQuat, quatConj(prev.wristOrient));
@@ -5015,8 +5192,8 @@ function xrDetectGestures(): XrGesture[] {
       const ax = sinHalf > 1e-6 ? (delta[0] * s) / sinHalf : 0;
       const ay = sinHalf > 1e-6 ? (delta[1] * s) / sinHalf : 0;
       const az = sinHalf > 1e-6 ? (delta[2] * s) / sinHalf : 0;
-      const speed = angle / dtSec;
-      const armed = speed > XR_FLICK_SPEED_RAD_S;
+      flickSpeed = angle / dtSec;
+      const armed = flickSpeed > XR_FLICK_SPEED_RAD_S;
       if (armed && prev.flickArmed && (now - prev.lastFlickAt) > XR_FLICK_REFRACTORY_MS) {
         const absX = Math.abs(ax), absY = Math.abs(ay), absZ = Math.abs(az);
         const axis: 'roll' | 'pitch' | 'yaw' =
@@ -5034,6 +5211,20 @@ function xrDetectGestures(): XrGesture[] {
     }
     prev.wristOrient = wristQuat ? [...wristQuat] : null;
     prev.wristTime = now;
+
+    // Per-hand per-frame snapshot. Zero-cost when no subscriber — the recorder
+    // (or any future HUD / chart) subscribes only while active.
+    if (chanXrSnap.subscribers.size > 0) {
+      metrics.emit(chanXrSnap, {
+        hand,
+        tracked: hf.tracked,
+        palmDot: hf.palmNormal ? hf.palmNormal[1] : null,
+        palmUp: prev.palmUp,
+        fineModifier: prev.fineModifier,
+        flickSpeed,
+        grip: hf.grip,
+      });
+    }
   }
 
   // Two-hand cooperative gestures.
@@ -5046,6 +5237,15 @@ function xrDetectGestures(): XrGesture[] {
   // Snapshot for next frame's edge detection.
   xrPrevPinch.left = leftActive;
   xrPrevPinch.right = rightActive;
+
+  // Emit each gesture on the metrics bus. Guarded so no payloads or per-event
+  // property reads happen when nobody is subscribed. Two-hand gestures have no
+  // hand field — encode as null.
+  if (chanXrGesture.subscribers.size > 0) {
+    for (const g of gestures) {
+      metrics.emit(chanXrGesture, { hand: 'hand' in g ? g.hand : null, gesture: g });
+    }
+  }
 
   return gestures;
 }
@@ -5062,10 +5262,10 @@ function xrTransitionInteractions(gestures: XrGesture[], _frame: XRFrame): void 
         // Enter pending window. Commit happens via two-hand-pinch-start
         // (simultaneous → zoom) OR via the deadline pass below (sequential →
         // single-hand attractor). No immediate dragging start.
-        xrInteractions[g.hand] = {
+        xrSetInteraction(g.hand, {
           kind: 'pending',
           deadline: performance.now() + XR_SIMUL_WINDOW_MS,
-        };
+        });
         break;
       }
       case 'two-hand-pinch-start': {
@@ -5078,16 +5278,16 @@ function xrTransitionInteractions(gestures: XrGesture[], _frame: XRFrame): void 
           const d = sub3(xrHandFrames.left.pinch.current, xrHandFrames.right.pinch.current);
           twoHandState.startDistance = Math.max(0.01, Math.sqrt(dot3(d, d)));
           twoHandState.startOffset = { ...xrViewOffset };
-          xrInteractions.left = { kind: 'two-hand-scale' };
-          xrInteractions.right = { kind: 'two-hand-scale' };
+          xrSetInteraction('left', { kind: 'two-hand-scale' });
+          xrSetInteraction('right', { kind: 'two-hand-scale' });
         }
         break;
       }
       case 'two-hand-pinch-end': {
         // End scale on both hands. No auto-promote of the remaining pinching
         // hand — user must release and re-pinch to create an attractor.
-        if (xrInteractions.left.kind === 'two-hand-scale') xrInteractions.left = { kind: 'idle' };
-        if (xrInteractions.right.kind === 'two-hand-scale') xrInteractions.right = { kind: 'idle' };
+        if (xrInteractions.left.kind === 'two-hand-scale') xrSetInteraction('left', { kind: 'idle' });
+        if (xrInteractions.right.kind === 'two-hand-scale') xrSetInteraction('right', { kind: 'idle' });
         break;
       }
       case 'pinch-end': {
@@ -5119,13 +5319,13 @@ function xrTransitionInteractions(gestures: XrGesture[], _frame: XRFrame): void 
       // drop the pending pinch instead of starting a sim drag. The pinch will
       // continue feeding xrUiStep until pinch-end.
       if (xrUiClaimed[hand]) {
-        xrInteractions[hand] = { kind: 'idle' };
+        xrSetInteraction(hand, { kind: 'idle' });
       } else {
-        xrInteractions[hand] = {
+        xrSetInteraction(hand, {
           kind: 'dragging',
           handOrigin: [...xrHandFrames[hand].pinch.origin],
           hasSample: false,
-        };
+        });
       }
     }
   }
@@ -5144,7 +5344,7 @@ function xrEndInteraction(hand: XrHand): void {
     case 'idle':
       break;
   }
-  xrInteractions[hand] = { kind: 'idle' };
+  xrSetInteraction(hand, { kind: 'idle' });
   // [LAW:one-source-of-truth] Release ray has now been consumed (if needed by
   // the 'pressing' case above). Final hand-frame cleanup here — guarded on
   // !pinch.active so two-hand-pinch-start (which calls xrEndInteraction with
@@ -5287,8 +5487,8 @@ function xrResetInputState(): void {
   xrPendingSources.length = 0;
   xrHandFrames.left = makeIdleHandFrame('left');
   xrHandFrames.right = makeIdleHandFrame('right');
-  xrInteractions.left = { kind: 'idle' };
-  xrInteractions.right = { kind: 'idle' };
+  xrSetInteraction('left', { kind: 'idle' });
+  xrSetInteraction('right', { kind: 'idle' });
   xrPrevPinch.left = false;
   xrPrevPinch.right = false;
   xrPrevGestureSnap.left = makeGestureSnapshot();
