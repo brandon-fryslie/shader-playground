@@ -4,15 +4,22 @@
     {
       "version": "pr-12",
       "ref": "refs/pull/12/merge",
-      "sha": "4b7be22862695ddff980468a1bf1ffcddc50e305",
-      "timestamp": "2026-04-21T03:58:19.024Z",
+      "sha": "641aa321b2710ef1a3ace6cb0651ba4967488f65",
+      "timestamp": "2026-04-21T04:17:18.013Z",
       "commits": [
         {
-          "sha": "4b7be22862695ddff980468a1bf1ffcddc50e305",
+          "sha": "641aa321b2710ef1a3ace6cb0651ba4967488f65",
           "author_name": "Brandon Fryslie",
           "author_email": "530235+brandon-fryslie@users.noreply.github.com",
-          "timestamp": "2026-04-21T03:58:02Z",
-          "message": "Merge 33298a141a68b4fef45ebfae59a55ddfc3c5c12a into 806c0ac22ecb4ac0a01350d9c72de335e33649f7\n"
+          "timestamp": "2026-04-20T22:16:58-06:00",
+          "message": "Merge 72640e63379c9053bc5ab31e8217f06eac33ae7c into 806c0ac22ecb4ac0a01350d9c72de335e33649f7\n"
+        },
+        {
+          "sha": "72640e63379c9053bc5ab31e8217f06eac33ae7c",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-20T22:04:59-06:00",
+          "message": "feat(xr-ui): SDF-based widget renderer (MVP: slider/button/readout)\n\nImplements the GPU renderer for ticket shader-xrpanel-blk.12. One\ninstanced draw call per eye per frame; the instance buffer is built\nfrom xrUiStep's RenderCommand[]. Empty list → zero draws (no CPU\n\"should we render?\" branch).\n\nMVP scope cut: only slider, button, and readout get distinct SDF\nfragment paths; the other 6 widget kinds render as rounded-rect\nplaceholders. Ticket .19 expands kind coverage and adds a label/text\natlas.\n\n- src/shaders/xr-widgets.wgsl: instanced quad vertex + rounded-box SDF\n  fragment with per-kind branches. Camera struct + Instance struct\n  match the layout in renderer.ts.\n- src/xr-ui/renderer.ts: createXrWidgetRenderer factory. Owns pipeline,\n  bind groups (one per eye), instance buffer (64 cap), and a per-format\n  pipeline cache so the HDR scene format is picked up automatically.\n- src/main.ts: lazy init on first XR frame; draws between sim.render\n  and runBloomChain so widgets get bloomed too. Touches xrFrame in\n  one block; nothing else changes. xrWidgetRenderer / xrWidgetCameraBuffer\n  module-state declared near the rest of the xr-ui module state.\n\nVerified in headless Chrome: page loads with 0 errors in __errorLog,\n82 bindings still register, 120 FPS, shader module compiles. Visual\ncorrectness in stereo XR requires Vision Pro testing (acceptance\ncriteria 'renders correctly with hover highlight' and 'renders\ncleanly in both eyes' deferred to user verification).\n\nGenerated with [Claude Code](https://claude.ai/code)\nvia [Happy](https://happy.engineering)\n\nCo-Authored-By: Claude <noreply@anthropic.com>\nCo-Authored-By: Happy <yesreply@happy.engineering>\n"
         },
         {
           "sha": "33298a141a68b4fef45ebfae59a55ddfc3c5c12a",
