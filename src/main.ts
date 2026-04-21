@@ -20,6 +20,10 @@ import SHADER_NBODY_RENDER from './shaders/nbody.render.wgsl?raw';
 import SHADER_NBODY_CLASSIC_COMPUTE from './shaders/nbody.classic.compute.wgsl?raw';
 import SHADER_PM_DEPOSIT from './shaders/pm.deposit.wgsl?raw';
 import SHADER_PM_DENSITY_CONVERT from './shaders/pm.density_convert.wgsl?raw';
+import SHADER_PM_SMOOTH from './shaders/pm.smooth.wgsl?raw';
+import SHADER_PM_RESIDUAL from './shaders/pm.residual.wgsl?raw';
+import SHADER_PM_RESTRICT from './shaders/pm.restrict.wgsl?raw';
+import SHADER_PM_PROLONG from './shaders/pm.prolong.wgsl?raw';
 import SHADER_NBODY_CLASSIC_RENDER from './shaders/nbody.classic.render.wgsl?raw';
 import SHADER_FLUID_FORCES_ADVECT from './shaders/fluid.forces.wgsl?raw';
 import SHADER_FLUID_DIFFUSE from './shaders/fluid.diffuse.wgsl?raw';
@@ -1793,6 +1797,16 @@ function createPhysicsSimulation() {
   // Mean density scratch (single f32 + padding to 16 bytes).
   const pmMeanScratch = device.createBuffer({ size: 16, usage: PM_BUF_USAGE });
 
+  // Coarse-level RHS buffers for the V-cycle (restricted residuals).
+  // [LAW:one-source-of-truth] pmRho[l] is the sole RHS buffer at level l.
+  // Level 0 aliases pmDensityF32 (never overwritten); levels 1..5 are fresh
+  // allocations written by restrict and read by smoother/residual.
+  const pmRho: GPUBuffer[] = [pmDensityF32];
+  for (let l = 1; l < PM_MULTIGRID_LEVELS; l++) {
+    const sizeL = PM_GRID_RES >> l;
+    pmRho.push(device.createBuffer({ size: sizeL * sizeL * sizeL * 4, usage: PM_BUF_USAGE }));
+  }
+
   // PM uniform params — 32 bytes, shared by deposit + reduce + convert pipelines.
   // [LAW:one-source-of-truth] Single host-side uniform; both shader structs
   // (pm.deposit.wgsl and pm.density_convert.wgsl) declare the identical layout.
@@ -1866,13 +1880,151 @@ function createPhysicsSimulation() {
     ]}),
   ];
 
-  // Dev-only staging for window.__pmDumpDensity. 128³ × 4 = 8 MB. Persistent
-  // allocation mirrors the existing diagStaging pattern.
+  // Dev-only staging for window.__pmDumpDensity / __pmDumpPotential. 128³ × 4
+  // = 8 MB. Persistent allocation mirrors the existing diagStaging pattern.
   const pmDensityStaging = device.createBuffer({
     size: pmLevel0Cells * 4,
     usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
   });
   let pmDiagPending = false;
+
+  // ── Multigrid V-cycle pipelines (smooth / residual / restrict / prolong) ──
+  // [LAW:single-enforcer] All Poisson-solver pipelines declared here; the
+  // V-cycle driver in compute() is the sole dispatcher.
+  const pmSmoothModule   = createShaderModuleChecked('pm.smooth',   SHADER_PM_SMOOTH);
+  const pmResidualModule = createShaderModuleChecked('pm.residual', SHADER_PM_RESIDUAL);
+  const pmRestrictModule = createShaderModuleChecked('pm.restrict', SHADER_PM_RESTRICT);
+  const pmProlongModule  = createShaderModuleChecked('pm.prolong',  SHADER_PM_PROLONG);
+
+  const pmSmoothBGL = device.createBindGroupLayout({
+    entries: [
+      { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },          // phi (rw)
+      { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },// rho
+      { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
+    ]
+  });
+  const pmResidualBGL = device.createBindGroupLayout({
+    entries: [
+      { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },// phi
+      { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },// rho
+      { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },          // residual (rw)
+      { binding: 3, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
+    ]
+  });
+  const pmRestrictBGL = device.createBindGroupLayout({
+    entries: [
+      { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },// fine
+      { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },          // coarse (rw)
+      { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
+    ]
+  });
+  const pmProlongBGL = device.createBindGroupLayout({
+    entries: [
+      { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },// coarse
+      { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },          // fine (rw, accumulates)
+      { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
+    ]
+  });
+
+  const pmSmoothPipeline   = device.createComputePipeline({ layout: device.createPipelineLayout({ bindGroupLayouts: [pmSmoothBGL] }),   compute: { module: pmSmoothModule,   entryPoint: 'main' } });
+  const pmResidualPipeline = device.createComputePipeline({ layout: device.createPipelineLayout({ bindGroupLayouts: [pmResidualBGL] }), compute: { module: pmResidualModule, entryPoint: 'main' } });
+  const pmRestrictPipeline = device.createComputePipeline({ layout: device.createPipelineLayout({ bindGroupLayouts: [pmRestrictBGL] }), compute: { module: pmRestrictModule, entryPoint: 'main' } });
+  const pmProlongPipeline  = device.createComputePipeline({ layout: device.createPipelineLayout({ bindGroupLayouts: [pmProlongBGL] }),  compute: { module: pmProlongModule,  entryPoint: 'main' } });
+
+  // Per-level uniform buffers, pre-populated at factory init. Each holds a
+  // tiny struct (16 bytes) specific to its shader:
+  //   smoothUniform[l][parity]  → { gridRes, parity, hSquared, fourPiG }
+  //   residualUniform[l]        → { gridRes, _pad, hSquared, fourPiG }
+  //   restrictUniform[l]        → { coarseGridRes, _pad×3 }   (for transition l → l+1)
+  //   prolongUniform[l]         → { fineGridRes, _pad×3 }     (for transition l+1 → l)
+  const PM_FOUR_PI_G = 4 * Math.PI * (state.physics.G ?? 1.5) * 0.001 / Math.sqrt(Math.max(1, MASSIVE_BODY_COUNT) / 1000);
+  const pmSmoothUniform: GPUBuffer[][] = [];
+  const pmResidualUniform: GPUBuffer[] = [];
+  const pmRestrictUniform: GPUBuffer[] = [];   // index l → transition l → l+1
+  const pmProlongUniform: GPUBuffer[] = [];    // index l → transition l+1 → l
+  for (let l = 0; l < PM_MULTIGRID_LEVELS; l++) {
+    const sizeL = PM_GRID_RES >> l;
+    const hL = PM_DOMAIN_SIZE / sizeL;
+    const hSqL = hL * hL;
+    pmSmoothUniform.push([0, 1].map(parity => {
+      const buf = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+      const ab = new ArrayBuffer(16);
+      new Uint32Array(ab, 0, 2).set([sizeL, parity]);
+      new Float32Array(ab, 8, 2).set([hSqL, PM_FOUR_PI_G]);
+      device.queue.writeBuffer(buf, 0, ab);
+      return buf;
+    }));
+    {
+      const buf = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+      const ab = new ArrayBuffer(16);
+      new Uint32Array(ab, 0, 2).set([sizeL, 0]);
+      new Float32Array(ab, 8, 2).set([hSqL, PM_FOUR_PI_G]);
+      device.queue.writeBuffer(buf, 0, ab);
+      pmResidualUniform.push(buf);
+    }
+    if (l + 1 < PM_MULTIGRID_LEVELS) {
+      const coarseSize = PM_GRID_RES >> (l + 1);
+      {
+        const buf = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+        const ab = new ArrayBuffer(16);
+        new Uint32Array(ab, 0, 1).set([coarseSize]);
+        device.queue.writeBuffer(buf, 0, ab);
+        pmRestrictUniform.push(buf);
+      }
+      {
+        const buf = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+        const ab = new ArrayBuffer(16);
+        new Uint32Array(ab, 0, 1).set([sizeL]);  // fineGridRes for the transition l+1 → l
+        device.queue.writeBuffer(buf, 0, ab);
+        pmProlongUniform.push(buf);
+      }
+    }
+  }
+
+  // Per-level bind groups.
+  const pmSmoothBG: GPUBindGroup[][] = [];
+  const pmResidualBG: GPUBindGroup[] = [];
+  const pmRestrictBG: GPUBindGroup[] = [];   // transition l → l+1
+  const pmProlongBG: GPUBindGroup[] = [];    // transition l+1 → l
+  for (let l = 0; l < PM_MULTIGRID_LEVELS; l++) {
+    pmSmoothBG.push([0, 1].map(parity => device.createBindGroup({
+      layout: pmSmoothBGL, entries: [
+        { binding: 0, resource: { buffer: pmPotential[l] } },
+        { binding: 1, resource: { buffer: pmRho[l] } },
+        { binding: 2, resource: { buffer: pmSmoothUniform[l][parity] } },
+      ]
+    })));
+    pmResidualBG.push(device.createBindGroup({
+      layout: pmResidualBGL, entries: [
+        { binding: 0, resource: { buffer: pmPotential[l] } },
+        { binding: 1, resource: { buffer: pmRho[l] } },
+        { binding: 2, resource: { buffer: pmResidual[l] } },
+        { binding: 3, resource: { buffer: pmResidualUniform[l] } },
+      ]
+    }));
+    if (l + 1 < PM_MULTIGRID_LEVELS) {
+      pmRestrictBG.push(device.createBindGroup({
+        layout: pmRestrictBGL, entries: [
+          { binding: 0, resource: { buffer: pmResidual[l] } },
+          { binding: 1, resource: { buffer: pmRho[l + 1] } },
+          { binding: 2, resource: { buffer: pmRestrictUniform[l] } },
+        ]
+      }));
+      pmProlongBG.push(device.createBindGroup({
+        layout: pmProlongBGL, entries: [
+          { binding: 0, resource: { buffer: pmPotential[l + 1] } },
+          { binding: 1, resource: { buffer: pmPotential[l] } },
+          { binding: 2, resource: { buffer: pmProlongUniform[l] } },
+        ]
+      }));
+    }
+  }
+
+  // Workgroup counts per level (each shader uses @workgroup_size(4,4,4)).
+  const pmWgCount: number[] = [];
+  for (let l = 0; l < PM_MULTIGRID_LEVELS; l++) {
+    pmWgCount.push(Math.max(1, (PM_GRID_RES >> l) / 4));
+  }
 
   const computeModule = createShaderModuleChecked('nbody.compute', SHADER_NBODY_COMPUTE_EDIT || SHADER_NBODY_COMPUTE);
   const renderModule = createShaderModuleChecked('nbody.render', SHADER_NBODY_RENDER_EDIT || SHADER_NBODY_RENDER);
@@ -2121,6 +2273,64 @@ function createPhysicsSimulation() {
       pmPass.dispatchWorkgroups(Math.ceil(pmLevel0Cells / 256));
       pmPass.end();
 
+      // ── Multigrid V-cycle Poisson solver ───────────────────────────────────
+      // Input:  pmDensityF32 (mean-zero RHS at level 0)
+      // Output: pmPotential[0] (φ satisfying ∇²φ = 4πGρ on the 3-torus)
+      // [LAW:dataflow-not-control-flow] Same fixed schedule every frame. Warm-
+      // start from previous frame's pmPotential[0]; coarse-level corrections
+      // re-zero each V-cycle because they accumulate intermediate data.
+      const pmMaxLevel = PM_MULTIGRID_LEVELS - 1;
+      const PM_COARSEST_SWEEPS = 16;
+      for (let v = 0; v < PM_V_CYCLE_COUNT; v++) {
+        // Zero coarse-level correction buffers before each V-cycle. Level 0
+        // (the running potential) is preserved for warm-start continuity.
+        for (let l = 1; l < PM_MULTIGRID_LEVELS; l++) encoder.clearBuffer(pmPotential[l]);
+
+        const vPass = encoder.beginComputePass();
+
+        // Descent: pre-smooth, compute residual, restrict to coarser level.
+        for (let l = 0; l < pmMaxLevel; l++) {
+          vPass.setPipeline(pmSmoothPipeline);
+          for (let s = 0; s < PM_SMOOTH_PRE; s++) {
+            vPass.setBindGroup(0, pmSmoothBG[l][0]);
+            vPass.dispatchWorkgroups(pmWgCount[l], pmWgCount[l], pmWgCount[l]);
+            vPass.setBindGroup(0, pmSmoothBG[l][1]);
+            vPass.dispatchWorkgroups(pmWgCount[l], pmWgCount[l], pmWgCount[l]);
+          }
+          vPass.setPipeline(pmResidualPipeline);
+          vPass.setBindGroup(0, pmResidualBG[l]);
+          vPass.dispatchWorkgroups(pmWgCount[l], pmWgCount[l], pmWgCount[l]);
+          vPass.setPipeline(pmRestrictPipeline);
+          vPass.setBindGroup(0, pmRestrictBG[l]);
+          vPass.dispatchWorkgroups(pmWgCount[l + 1], pmWgCount[l + 1], pmWgCount[l + 1]);
+        }
+
+        // Coarsest level: solve "exactly" by over-smoothing a tiny grid.
+        vPass.setPipeline(pmSmoothPipeline);
+        for (let s = 0; s < PM_COARSEST_SWEEPS; s++) {
+          vPass.setBindGroup(0, pmSmoothBG[pmMaxLevel][0]);
+          vPass.dispatchWorkgroups(pmWgCount[pmMaxLevel], pmWgCount[pmMaxLevel], pmWgCount[pmMaxLevel]);
+          vPass.setBindGroup(0, pmSmoothBG[pmMaxLevel][1]);
+          vPass.dispatchWorkgroups(pmWgCount[pmMaxLevel], pmWgCount[pmMaxLevel], pmWgCount[pmMaxLevel]);
+        }
+
+        // Ascent: prolong correction, post-smooth.
+        for (let l = pmMaxLevel - 1; l >= 0; l--) {
+          vPass.setPipeline(pmProlongPipeline);
+          vPass.setBindGroup(0, pmProlongBG[l]);
+          vPass.dispatchWorkgroups(pmWgCount[l], pmWgCount[l], pmWgCount[l]);
+          vPass.setPipeline(pmSmoothPipeline);
+          for (let s = 0; s < PM_SMOOTH_POST; s++) {
+            vPass.setBindGroup(0, pmSmoothBG[l][0]);
+            vPass.dispatchWorkgroups(pmWgCount[l], pmWgCount[l], pmWgCount[l]);
+            vPass.setBindGroup(0, pmSmoothBG[l][1]);
+            vPass.dispatchWorkgroups(pmWgCount[l], pmWgCount[l], pmWgCount[l]);
+          }
+        }
+
+        vPass.end();
+      }
+
       const cTsw = tsWrites(0);
       const pass = encoder.beginComputePass(cTsw ? { timestampWrites: cTsw } : undefined);
       pass.setPipeline(computePipeline);
@@ -2323,6 +2533,43 @@ function createPhysicsSimulation() {
       return out;
     },
 
+    // Dumps level-0 potential φ (128³ f32). Reuses pmDensityStaging since the
+    // buffer sizes match; diagPending flag serializes access.
+    async dumpPotential(): Promise<Float32Array | null> {
+      if (pmDiagPending) return null;
+      pmDiagPending = true;
+      const enc = device.createCommandEncoder();
+      enc.copyBufferToBuffer(pmPotential[0], 0, pmDensityStaging, 0, pmLevel0Cells * 4);
+      device.queue.submit([enc.finish()]);
+      await device.queue.onSubmittedWorkDone();
+      await pmDensityStaging.mapAsync(GPUMapMode.READ);
+      const out = new Float32Array(pmDensityStaging.getMappedRange().slice(0));
+      pmDensityStaging.unmap();
+      pmDiagPending = false;
+      return out;
+    },
+
+    // Max |residual| at level 0 — the convergence metric for the V-cycle.
+    // Below ~1% of peak density value after 4 V-cycles indicates good solve.
+    async maxResidual(): Promise<number | null> {
+      if (pmDiagPending) return null;
+      pmDiagPending = true;
+      const enc = device.createCommandEncoder();
+      enc.copyBufferToBuffer(pmResidual[0], 0, pmDensityStaging, 0, pmLevel0Cells * 4);
+      device.queue.submit([enc.finish()]);
+      await device.queue.onSubmittedWorkDone();
+      await pmDensityStaging.mapAsync(GPUMapMode.READ);
+      const arr = new Float32Array(pmDensityStaging.getMappedRange());
+      let maxAbs = 0;
+      for (let i = 0; i < arr.length; i++) {
+        const a = Math.abs(arr[i]);
+        if (a > maxAbs) maxAbs = a;
+      }
+      pmDensityStaging.unmap();
+      pmDiagPending = false;
+      return maxAbs;
+    },
+
     destroy() {
       bufferA.destroy(); bufferB.destroy();
       paramsBuffer.destroy(); cameraBuffer.destroy(); blurBuffer.destroy();
@@ -2335,6 +2582,13 @@ function createPhysicsSimulation() {
       for (const b of pmResidual) b.destroy();
       pmForce.destroy(); pmMeanScratch.destroy();
       pmParamsBuffer.destroy(); pmDensityStaging.destroy();
+      // V-cycle: coarse-level RHS buffers (pmRho[0] aliases pmDensityF32, skip).
+      for (let l = 1; l < pmRho.length; l++) pmRho[l].destroy();
+      // V-cycle: per-level uniforms.
+      for (const pair of pmSmoothUniform) for (const b of pair) b.destroy();
+      for (const b of pmResidualUniform) b.destroy();
+      for (const b of pmRestrictUniform) b.destroy();
+      for (const b of pmProlongUniform) b.destroy();
       destroyDepthRef(depthRef);
     },
     // PM internal state — not read by external callers today. Future tickets
@@ -6959,12 +7213,25 @@ async function main() {
     return 'preset not found';
   };
   (window as any).__simState = () => ({ mode: state.mode, ...state[state.mode] as any, fps: currentFps, gpuMs: gpuFrameMs, gpuDetail: gpuTimingDetail });
-  // PM density field dump — only wired for the physics sim (other modes don't
-  // have the PM pipeline). Returns a Float32Array of length PM_GRID_RES³ or
-  // null if a prior dump is still in flight.
+  // PM diagnostics — only wired for the physics sim (other modes don't have
+  // the PM pipeline). Each returns null if a prior dump is still in flight or
+  // if the active mode lacks the diagnostic.
+  type PmDiag = {
+    dumpDensity?: () => Promise<Float32Array | null>,
+    dumpPotential?: () => Promise<Float32Array | null>,
+    maxResidual?: () => Promise<number | null>,
+  };
   (window as any).__pmDumpDensity = () => {
-    const sim = simulations[state.mode] as unknown as { dumpDensity?: () => Promise<Float32Array | null> };
+    const sim = simulations[state.mode] as unknown as PmDiag;
     return sim?.dumpDensity ? sim.dumpDensity() : Promise.resolve(null);
+  };
+  (window as any).__pmDumpPotential = () => {
+    const sim = simulations[state.mode] as unknown as PmDiag;
+    return sim?.dumpPotential ? sim.dumpPotential() : Promise.resolve(null);
+  };
+  (window as any).__pmMaxResidual = () => {
+    const sim = simulations[state.mode] as unknown as PmDiag;
+    return sim?.maxResidual ? sim.maxResidual() : Promise.resolve(null);
   };
   (window as any).__bindings = bindingRegistry;
   (window as any).__anchors = { evaluateAnchor, handFrames: xrHandFrames };
