@@ -1673,12 +1673,33 @@ function createPhysicsSimulation() {
     initData[off + 10] = 0;
   }
 
-  // ── PM (Particle-Mesh) scaffolding ──────────────────────────────────────────
-  // Grid/solver constants for the upcoming P³M gravity path. Nothing in the
-  // current compute dispatches reads these yet — this ticket only allocates
-  // resources and defines the canonical domain extent. [LAW:one-source-of-truth]
-  // PM_DOMAIN_HALF/SIZE must match DOMAIN_HALF/SIZE in nbody.compute.wgsl so the
-  // integrator's periodic wrap and the PM grid span the same volume.
+  // ── PM (Particle-Mesh) gravity ──────────────────────────────────────────────
+  // Solver pipeline: CIC deposit → mean-subtract → V-cycle → CIC interpolate.
+  // [LAW:one-source-of-truth] PM_DOMAIN_HALF/SIZE must match DOMAIN_HALF/SIZE
+  // in nbody.compute.wgsl so the integrator's periodic wrap and the PM grid
+  // span the same volume.
+  //
+  // Tuning (shader-physics-brr.7):
+  //   PM_V_CYCLE_COUNT = 4
+  //     Each cycle knocks residual down ~1 order of magnitude; 4 cycles give
+  //     ~4 orders, well under the 1% target. Dropping to 3 is viable if GPU
+  //     time becomes tight — verify with __pmMaxResidual().
+  //   PM_SMOOTH_PRE = PM_SMOOTH_POST = 2
+  //     Red-black GS converges ~2× faster per pass than Jacobi; 2 sweeps each
+  //     side of the V gives good damping of high-frequency error. 1 sweep is
+  //     usable but residual rises.
+  //   PM_FIXED_POINT_SCALE = 65536 (2¹⁶)
+  //     PARTICLE_MASS = 1/count ≈ 1.25e-5 at N=80k → per-particle deposit =
+  //     65536 × 1.25e-5 ≈ 0.82 integer units. Mean cell sum over all 2.1M
+  //     cells ≈ 65536 (total mass × scale) — 5 orders below u32 overflow.
+  //   DEFAULTS.physics.G = 0.3
+  //     First-cut after removing the old √(MASSIVE_BODY_COUNT/1000) ≈ 2.86
+  //     normalization. Sweep via the UI slider and __pmReversibilityTest to
+  //     verify dynamics are stable at your preferred preset.
+  //
+  // Verification: __pmReversibilityTest(1000) → maxErr < 0.01 world units.
+  // Values much larger indicate a sampling mismatch (pos vs posHalf) or a
+  // non-reversible operation slipped in somewhere.
   const PM_GRID_RES = 128;                          // 128³ cells at level 0
   const PM_DOMAIN_HALF = 16.0;                      // matches DOMAIN_HALF in nbody.compute.wgsl
   const PM_DOMAIN_SIZE = PM_DOMAIN_HALF * 2;        // = 32.0
@@ -2550,6 +2571,78 @@ function createPhysicsSimulation() {
       pmDensityStaging.unmap();
       pmDiagPending = false;
       return maxAbs;
+    },
+
+    // PM reversibility harness. Snapshots particle positions, runs N forward
+    // steps, then N reverse steps, then compares. A sound PM implementation
+    // should return particles to within ~1e-3 world units for N=1000 thanks
+    // to the fixed-point u32 atomic deposit (order-independent) + DKD
+    // half-step symmetry. Values much larger indicate a bug:
+    //   • Deposition/interpolation sampling at pos (not posHalf)
+    //   • f32 atomics (non-associative)
+    //   • State-dependent iteration count in the multigrid
+    //
+    // Pauses the sim for the test duration and restores on exit. Shares
+    // pmDiagPending with other PM dumps — no concurrent use.
+    async reversibilityTest(nSteps: number): Promise<{ maxErr: number; meanErr: number; count: number } | null> {
+      if (pmDiagPending) return null;
+      const particleBytes = count * 48;
+      if (particleBytes > pmDensityStaging.size) return null;
+      pmDiagPending = true;
+      const wasPaused = state.paused;
+      const savedDir = timeDirection;
+      state.paused = true;
+
+      const snapshotPositions = async (): Promise<Float32Array> => {
+        const e = device.createCommandEncoder();
+        const src = pingPong === 0 ? bufferA : bufferB;
+        e.copyBufferToBuffer(src, 0, pmDensityStaging, 0, particleBytes);
+        device.queue.submit([e.finish()]);
+        await device.queue.onSubmittedWorkDone();
+        await pmDensityStaging.mapAsync(GPUMapMode.READ);
+        const out = new Float32Array(pmDensityStaging.getMappedRange(0, particleBytes).slice(0));
+        pmDensityStaging.unmap();
+        return out;
+      };
+
+      const startPos = await snapshotPositions();
+
+      // Forward N, then reverse N. One submit per step — simple and unambiguous
+      // ordering relative to each step's params writeBuffer.
+      timeDirection = 1;
+      for (let i = 0; i < nSteps; i++) {
+        const e = device.createCommandEncoder();
+        // eslint-disable-next-line @typescript-eslint/no-use-before-define
+        this.compute(e);
+        device.queue.submit([e.finish()]);
+      }
+      timeDirection = -1;
+      for (let i = 0; i < nSteps; i++) {
+        const e = device.createCommandEncoder();
+        // eslint-disable-next-line @typescript-eslint/no-use-before-define
+        this.compute(e);
+        device.queue.submit([e.finish()]);
+      }
+      timeDirection = savedDir;
+      state.paused = wasPaused;
+
+      const endPos = await snapshotPositions();
+
+      // Body layout: pos(3) mass(1) vel(3) pad(1) home(3) pad(1) = 12 floats.
+      // Compare the position triplet per body.
+      let maxErr = 0;
+      let sumErr = 0;
+      for (let i = 0; i < count; i++) {
+        const o = i * 12;
+        const dx = endPos[o]     - startPos[o];
+        const dy = endPos[o + 1] - startPos[o + 1];
+        const dz = endPos[o + 2] - startPos[o + 2];
+        const err = Math.sqrt(dx * dx + dy * dy + dz * dz);
+        if (err > maxErr) maxErr = err;
+        sumErr += err;
+      }
+      pmDiagPending = false;
+      return { maxErr, meanErr: sumErr / count, count };
     },
 
     destroy() {
@@ -7202,6 +7295,7 @@ async function main() {
     dumpDensity?: () => Promise<Float32Array | null>,
     dumpPotential?: () => Promise<Float32Array | null>,
     maxResidual?: () => Promise<number | null>,
+    reversibilityTest?: (n: number) => Promise<{ maxErr: number; meanErr: number; count: number } | null>,
   };
   (window as any).__pmDumpDensity = () => {
     const sim = simulations[state.mode] as unknown as PmDiag;
@@ -7214,6 +7308,13 @@ async function main() {
   (window as any).__pmMaxResidual = () => {
     const sim = simulations[state.mode] as unknown as PmDiag;
     return sim?.maxResidual ? sim.maxResidual() : Promise.resolve(null);
+  };
+  // Reversibility harness. Runs N forward + N reverse compute() steps and
+  // returns per-particle position error vs the starting state. Pauses the
+  // sim for the duration; restores on exit. Expected: maxErr < 1e-3 for N=1000.
+  (window as any).__pmReversibilityTest = (n = 1000) => {
+    const sim = simulations[state.mode] as unknown as PmDiag;
+    return sim?.reversibilityTest ? sim.reversibilityTest(n) : Promise.resolve(null);
   };
   (window as any).__bindings = bindingRegistry;
   (window as any).__anchors = { evaluateAnchor, handFrames: xrHandFrames };
