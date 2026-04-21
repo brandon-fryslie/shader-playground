@@ -215,7 +215,13 @@ function anyState(states: Record<Hand, InteractionState>, fn: (s: InteractionSta
 function readWidgetValue(widget: Widget, bindings: BindingRegistry): number | undefined {
   if (widget.kind !== 'slider' && widget.kind !== 'dial' && widget.kind !== 'readout') return undefined;
   const b = bindings.get(widget.binding);
-  return b && b.kind === 'continuous' ? b.get() : undefined;
+  if (!b || b.kind !== 'continuous') return undefined;
+  // Normalize to 0..1 by the binding's range so the renderer can position
+  // sliders/dials independently of the binding's physical units. Readout still
+  // gets the same field — ticket .19's text atlas formats it via b.format().
+  const span = b.range.max - b.range.min;
+  if (span <= 0) return 0;
+  return (b.get() - b.range.min) / span;
 }
 
 function beginInteraction(
