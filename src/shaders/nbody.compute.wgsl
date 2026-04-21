@@ -2,10 +2,15 @@
 // Time-reversible: negating params.dt produces the exact inverse trajectory.
 //
 // The integration scheme per step:
-//   1. Half-drift: posHalf = pos + vel * dt/2         (all particles, inline in tile loads)
-//   2. Forces: acc = F(posHalf)                       (gravity + dark matter + attractors + tidal + boundary)
+//   1. Half-drift: posHalf = pos + vel * dt/2
+//   2. Forces: acc = F(posHalf)                       (PM gravity + dark matter + attractors + tidal + boundary)
 //   3. Kick: velNew = vel + acc * dt                  (full velocity update)
 //   4. Half-drift: posNew = posHalf + velNew * dt/2   (complete the position step)
+//
+// Gravity is computed via Particle-Mesh: pmForce[idx] is populated by
+// pm.interpolate.wgsl earlier in the frame from the Poisson-solved potential.
+// The old source/tracer tile-pair loop is gone — every particle contributes
+// mass to the density grid and reads force from it uniformly.
 //
 // Reversibility proof: forces at the half-step position are identical in forward and reverse
 // because posHalf is reached by the same half-drift from either direction. Under dt → -dt,
@@ -30,11 +35,11 @@ struct Attractor {
 struct Params {
   dt: f32,
   G: f32,
-  softening: f32,
-  haloMass: f32,      // Plummer halo gravitational mass (was `damping`)
+  softening: f32,     // unused by PM gravity; reserved for future per-particle softening
+  haloMass: f32,      // Plummer halo gravitational mass
   count: u32,
-  sourceCount: u32,
-  haloScale: f32,     // Plummer halo softening radius (was `coreOrbit`)
+  _pad_sourceCount_removed: u32,  // was sourceCount (tile-pair gravity removed in .6)
+  haloScale: f32,     // Plummer halo softening radius
   time: f32,
   attractorCount: u32,
   _pad_a: u32,
@@ -42,13 +47,13 @@ struct Params {
   _pad_c: u32,
   diskNormal: vec3f,
   _pad4: f32,
-  diskMass: f32,      // Miyamoto-Nagai disk mass (was `diskVertDamp`)
-  diskScaleA: f32,    // MN radial scale length (was `diskRadDamp`)
-  diskScaleB: f32,    // MN vertical scale height (was `diskTangGain`)
-  pmBlend: f32,       // 0 = tile-pair gravity only; 1 = PM gravity only (was `_pad_e`)
-  _pad_f: f32,        // (was `diskAlignGain`)
+  diskMass: f32,      // Miyamoto-Nagai disk mass
+  diskScaleA: f32,    // MN radial scale length
+  diskScaleB: f32,    // MN vertical scale height
+  _pad_pmBlend_removed: f32,      // was pmBlend (tile-pair gravity removed in .6)
+  _pad_f: f32,
   _pad_d: f32,
-  _pad_g: f32,        // (was `diskTangSpeed`)
+  _pad_g: f32,
   tidalStrength: f32,
   // Attractor array at offset 96 (16-aligned). CPU packing must match.
   attractors: array<Attractor, 32>,
@@ -58,9 +63,9 @@ struct Params {
 @group(0) @binding(1) var<storage, read_write> bodiesOut: array<Body>;
 @group(0) @binding(2) var<uniform> params: Params;
 // Per-particle PM force (CIC-interpolated gradient of the Poisson potential).
-// Populated each frame by pm.interpolate.wgsl before this shader runs. At
-// params.pmBlend = 0 the buffer is read but ignored; at pmBlend = 1 it
-// replaces the tile-pair gravity entirely.
+// Populated each frame by pm.interpolate.wgsl before this shader runs.
+// [LAW:single-enforcer] Sole source of gravity in this shader — no tile-pair
+// fallback, no blend knob.
 @group(0) @binding(3) var<storage, read> pmForce: array<vec4f>;
 
 // [LAW:one-source-of-truth] All forces are conservative (position-only, derivable from a potential).
@@ -83,11 +88,6 @@ const INTERACTION_WELL_SOFTENING = 0.25;
 const INTERACTION_CORE_RADIUS = 0.3;
 const INTERACTION_CORE_PRESSURE = 16.0;
 
-// Shared memory tile for source bodies — pos_half + mass packed as vec4f.
-// [LAW:one-source-of-truth] TILE_SIZE matches @workgroup_size so every thread loads exactly one body per tile.
-const TILE_SIZE = 256u;
-var<workgroup> tile: array<vec4f, TILE_SIZE>;
-
 // Maps each component into [-DOMAIN_HALF, +DOMAIN_HALF) via a reversible mod.
 // The + DOMAIN_HALF shift handles negative values cleanly (WGSL's % can return
 // negative results for negative operands, so we use floor() instead).
@@ -99,54 +99,23 @@ fn wrapPeriodic(p: vec3f) -> vec3f {
   return shifted - floor(shifted / DOMAIN_SIZE) * DOMAIN_SIZE - vec3f(DOMAIN_HALF);
 }
 
-@compute @workgroup_size(TILE_SIZE)
-fn main(@builtin(global_invocation_id) gid: vec3u, @builtin(local_invocation_id) lid: vec3u) {
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) gid: vec3u) {
   let idx = gid.x;
-  let alive = idx < params.count;
+  if (idx >= params.count) { return; }
 
-  let me = bodiesIn[min(idx, params.count - 1u)];
+  let me = bodiesIn[idx];
   let halfDt = params.dt * 0.5;
 
   // ── DKD STEP 1: Half-drift ──────────────────────────────────────────────────
-  // All particles advance to the half-step position. For the self-particle this
-  // is computed here; for tile-loaded source particles it's computed inline below.
   let posHalf = me.pos + me.vel * halfDt;
 
   // ── FORCE ACCUMULATION at posHalf ───────────────────────────────────────────
-  var acc = vec3f(0.0);
-
-  let softeningSq = params.softening * params.softening;
-  let G = params.G;
-  let numTiles = (params.sourceCount + TILE_SIZE - 1u) / TILE_SIZE;
-
-  // N-body gravity: tile-based O(N×S), with sources half-drifted inline.
-  for (var t = 0u; t < numTiles; t++) {
-    let loadIdx = t * TILE_SIZE + lid.x;
-    let src = bodiesIn[min(loadIdx, params.sourceCount - 1u)];
-    // [LAW:one-source-of-truth] Half-drift the source particle inline so gravity is evaluated
-    // at consistent half-step positions across all pairs — this is what makes DKD reversible.
-    let srcHalf = src.pos + src.vel * halfDt;
-    tile[lid.x] = select(vec4f(0.0), vec4f(srcHalf, src.mass), loadIdx < params.sourceCount);
-    workgroupBarrier();
-
-    let tileEnd = min(TILE_SIZE, params.sourceCount - t * TILE_SIZE);
-    for (var j = 0u; j < tileEnd; j++) {
-      let other = tile[j];
-      let diff = other.xyz - posHalf;
-      let dist2 = dot(diff, diff) + softeningSq;
-      let inv = inverseSqrt(dist2);
-      acc += diff * (G * other.w * inv * inv * inv);
-    }
-    workgroupBarrier();
-  }
-
-  if (!alive) { return; }
-
-  // PM force blend. Only tile-pair gravity is blended here; analytic forces
-  // (attractors, halo, disk, boundary, tidal) stay full-strength at any
-  // blend value. [LAW:dataflow-not-control-flow] Same math every frame;
-  // pmBlend varies the value, never the execution path.
-  acc = acc * (1.0 - params.pmBlend) + pmForce[idx].xyz * params.pmBlend;
+  // PM is the sole pair-gravity source. [LAW:one-source-of-truth] pmForce was
+  // computed by pm.interpolate.wgsl earlier this frame from the Poisson-solved
+  // potential — it IS the gravitational acceleration at posHalf. Analytic
+  // forces (attractors, halo, disk, boundary, tidal) add to it below.
+  var acc = pmForce[idx].xyz;
 
   let countScale = sqrt(f32(params.count) / 1000.0);
 
@@ -171,10 +140,9 @@ fn main(@builtin(global_invocation_id) gid: vec3u, @builtin(local_invocation_id)
   // ── DARK MATTER: Plummer halo (conservative) ───────────────────────────────
   // Spherical potential: φ = -M_halo / sqrt(r² + a²)
   // Force: F = -M_halo * r / (r² + a²)^(3/2)
-  // haloMass is a GM-equivalent parameter (gravitational constant rolled in), NOT a raw mass.
-  // It is intentionally decoupled from params.G because params.G is normalized for the pairwise
-  // N-body sum (p.G * 0.001 / sqrt(sourceCount/1000)) — applying it here would crush the halo
-  // force by ~1000× and break the confinement tuning.
+  // haloMass is a GM-equivalent parameter (gravitational constant rolled in),
+  // decoupled from params.G — the two were tuned independently historically
+  // and that calibration is preserved.
   let haloR2 = dot(posHalf, posHalf);
   let haloD2 = haloR2 + params.haloScale * params.haloScale;
   let haloInv3 = 1.0 / (haloD2 * sqrt(haloD2));

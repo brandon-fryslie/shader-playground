@@ -160,7 +160,11 @@ const DEFAULTS: ModeParamsMap = {
     maxSpeed: 2.0, maxForce: 0.05, visualRange: 100
   },
   physics: {
-    count: 80000, G: 1.0, softening: 1.5, distribution: 'disk',
+    // G retuned for PM gravity (ticket .6). Old normalization divided G by
+    // sqrt(MASSIVE_BODY_COUNT / 1000) ≈ 2.86 for typical N; PM applies G
+    // directly with total_mass = 1.0. First-cut default; .7 handles proper
+    // tuning.
+    count: 80000, G: 0.3, softening: 1.5, distribution: 'disk',
     interactionStrength: 1.0, tidalStrength: 0.008,
     attractorDecayRatio: 0.5, attractorDecayCap: 2.0,
     haloMass: 5.0, haloScale: 2.0, diskMass: 3.0, diskScaleA: 1.5, diskScaleB: 0.3,
@@ -1409,22 +1413,9 @@ function createPhysicsSimulation() {
   // [LAW:one-source-of-truth] N-body orbit shaping constants live together so position thickness and velocity tilt stay in sync.
   const DISK_THICKNESS = 0.2;
   const VERTICAL_DRIFT = 0.18;
-  // [LAW:one-source-of-truth] Massive-body seeding lives here so orbital structure and tracer distribution share one initialization model.
-  // Source bodies drive the O(N*S) force loop — cap S to keep high particle counts interactive.
-  const BIG_BODY_COUNT = Math.min(count, Math.max(1, Math.round(count * 0.03)));
-  const MEDIUM_BODY_COUNT = Math.min(count - BIG_BODY_COUNT, Math.max(1, Math.round(count * 0.1)));
-  const MASSIVE_BODY_COUNT = Math.min(BIG_BODY_COUNT + MEDIUM_BODY_COUNT, 8192);
-  const CORE_BODY_MASS = 2.0;
-  const BIG_BODY_MASS_MIN = 0.8;
-  const BIG_BODY_MASS_MAX = 1.8;
-  const MEDIUM_BODY_MASS_MIN = 0.3;
-  const MEDIUM_BODY_MASS_MAX = 0.9;
-  const BIG_BODY_RADIUS_MIN = 0.2;
-  const BIG_BODY_RADIUS_MAX = 2.5;
-  const MEDIUM_BODY_RADIUS_MIN = 0.5;
-  const MEDIUM_BODY_RADIUS_MAX = 4.0;
-  const BIG_BODY_HEIGHT = 0.12;
-  const MEDIUM_BODY_HEIGHT = 0.2;
+  // PM gravity is uniform across all particles — no source/tracer distinction.
+  // All particles deposit mass AND feel force from the Poisson potential, so
+  // the old "cap N² cost with 3% heavy sources" machinery is gone.
   // [LAW:one-source-of-truth] Circular velocity includes self-gravity + dark matter (halo + disk).
   // This is the single formula that determines whether particles start in equilibrium.
   const haloM = state.physics.haloMass ?? 5.0;
@@ -1447,75 +1438,22 @@ function createPhysicsSimulation() {
     const v2disk = diskM * r2 / (diskD2 * Math.sqrt(diskD2));
     return v2halo + v2disk;
   }
-  const BIG_BODY_SWIRL = 0.6;    // fallback for non-spiral distributions
-  const MEDIUM_BODY_SWIRL = 0.6;
 
   const initData = new Float32Array(count * 12);
   const dist = state.physics.distribution;
   const orbitalNormal = normalize3([0.18, 1.0, -0.12]);
   const orbitalTangent = normalize3(cross3([0, 1, 0], orbitalNormal));
   const orbitalBitangent = cross3(orbitalNormal, orbitalTangent);
+  // Uniform particle mass — total mass of the simulation = 1.0 regardless of
+  // count. Simpler and more consistent than the old 3%/10%/87% big/medium/tracer
+  // triad. Per-preset dynamics adjust via the G slider; .7 handles tuning.
+  const PARTICLE_MASS = 1.0 / count;
   for (let i = 0; i < count; i++) {
     const off = i * 12;
     let x, y, z, vx = 0, vy = 0, vz = 0;
-    let mass = 0.0;
-    const isCoreBody = i === 0;
-    const isBigBody = i < BIG_BODY_COUNT;
-    const isMediumBody = i >= BIG_BODY_COUNT && i < MASSIVE_BODY_COUNT;
-    if (isCoreBody) {
-      x = 0; y = 0; z = 0; vx = 0; vy = 0; vz = 0;
-      mass = CORE_BODY_MASS;
-    } else if (isBigBody || isMediumBody) {
-      if (dist === 'spiral') {
-        // Massive bodies follow the same exponential disk as tracers.
-        // Same profile, same circular velocities, just heavier.
-        const LAMBDA_M = 5.0;
-        const SCALE_M = 3.5;
-        const r_m = Math.exp(-LAMBDA_M * Math.random()) * SCALE_M;
-        const angle_m = Math.random() * Math.PI * 2;
-        const h_m = (Math.random() - 0.5) * 0.2;
-        x = orbitalTangent[0]*Math.cos(angle_m)*r_m + orbitalBitangent[0]*Math.sin(angle_m)*r_m + orbitalNormal[0]*h_m;
-        y = orbitalTangent[1]*Math.cos(angle_m)*r_m + orbitalBitangent[1]*Math.sin(angle_m)*r_m + orbitalNormal[1]*h_m;
-        z = orbitalTangent[2]*Math.cos(angle_m)*r_m + orbitalBitangent[2]*Math.sin(angle_m)*r_m + orbitalNormal[2]*h_m;
-        const intR_m = (-1/LAMBDA_M) * Math.exp(-LAMBDA_M * r_m / SCALE_M) + (1/LAMBDA_M);
-        const intMax_m = (-1/LAMBDA_M) * Math.exp(-LAMBDA_M) + (1/LAMBDA_M);
-        const avgM = ((BIG_BODY_MASS_MIN+BIG_BODY_MASS_MAX+MEDIUM_BODY_MASS_MIN+MEDIUM_BODY_MASS_MAX)/4);
-        const refTotalM = 1000 * avgM;
-        const Geff_m = (state.physics.G ?? 1.5) * 0.001 / Math.sqrt(Math.max(1, MASSIVE_BODY_COUNT) / 1000);
-        // Circular velocity from enclosed particle mass + dark matter potential.
-        const vC_m = Math.sqrt(Math.max(0.001, Geff_m * (intR_m/intMax_m) * refTotalM / Math.max(r_m, 0.05) + darkMatterVcirc2(r_m)));
-        vx = (-Math.sin(angle_m)*orbitalTangent[0] + Math.cos(angle_m)*orbitalBitangent[0]) * vC_m;
-        vy = (-Math.sin(angle_m)*orbitalTangent[1] + Math.cos(angle_m)*orbitalBitangent[1]) * vC_m;
-        vz = (-Math.sin(angle_m)*orbitalTangent[2] + Math.cos(angle_m)*orbitalBitangent[2]) * vC_m;
-        mass = isBigBody
-          ? BIG_BODY_MASS_MIN + Math.pow(Math.random(), 0.4) * (BIG_BODY_MASS_MAX - BIG_BODY_MASS_MIN)
-          : MEDIUM_BODY_MASS_MIN + Math.pow(Math.random(), 0.7) * (MEDIUM_BODY_MASS_MAX - MEDIUM_BODY_MASS_MIN);
-      } else {
-        // Standard massive body placement for non-spiral presets
-        const bodyIndex = isBigBody ? i - 1 : i - BIG_BODY_COUNT;
-        const bodyCount = isBigBody ? Math.max(1, BIG_BODY_COUNT - 1) : MEDIUM_BODY_COUNT;
-        const bodyProgress = bodyCount > 1 ? bodyIndex / (bodyCount - 1) : 0.5;
-        const radiusMin = isBigBody ? BIG_BODY_RADIUS_MIN : MEDIUM_BODY_RADIUS_MIN;
-        const radiusMax = isBigBody ? BIG_BODY_RADIUS_MAX : MEDIUM_BODY_RADIUS_MAX;
-        const radiusJitter = isBigBody ? 0.05 : 0.1;
-        const radius = radiusMin + (radiusMax - radiusMin) * bodyProgress + (Math.random() - 0.5) * radiusJitter;
-        const heightScale = isBigBody ? BIG_BODY_HEIGHT : MEDIUM_BODY_HEIGHT;
-        const heightOffset = (Math.random() - 0.5) * heightScale;
-        const angleOffset = isBigBody ? Math.PI * 0.18 : Math.PI / Math.max(3, MEDIUM_BODY_COUNT);
-        const angle = (bodyIndex / Math.max(1, bodyCount)) * Math.PI * 2 + angleOffset;
-        x = orbitalTangent[0]*Math.cos(angle)*radius + orbitalBitangent[0]*Math.sin(angle)*radius + orbitalNormal[0]*heightOffset;
-        y = orbitalTangent[1]*Math.cos(angle)*radius + orbitalBitangent[1]*Math.sin(angle)*radius + orbitalNormal[1]*heightOffset;
-        z = orbitalTangent[2]*Math.cos(angle)*radius + orbitalBitangent[2]*Math.sin(angle)*radius + orbitalNormal[2]*heightOffset;
-        const swirl = isBigBody ? BIG_BODY_SWIRL : MEDIUM_BODY_SWIRL;
-        const speed = swirl / Math.sqrt(radius + 0.05);
-        vx = (-Math.sin(angle)*orbitalTangent[0] + Math.cos(angle)*orbitalBitangent[0])*speed;
-        vy = (-Math.sin(angle)*orbitalTangent[1] + Math.cos(angle)*orbitalBitangent[1])*speed;
-        vz = (-Math.sin(angle)*orbitalTangent[2] + Math.cos(angle)*orbitalBitangent[2])*speed;
-        mass = isBigBody
-          ? BIG_BODY_MASS_MIN + Math.pow(Math.random(), 0.4) * (BIG_BODY_MASS_MAX - BIG_BODY_MASS_MIN)
-          : MEDIUM_BODY_MASS_MIN + Math.pow(Math.random(), 0.7) * (MEDIUM_BODY_MASS_MAX - MEDIUM_BODY_MASS_MIN);
-      }
-    } else if (dist === 'spiral') {
+    let mass = PARTICLE_MASS;
+    const tracerFrac = i / count;
+    if (dist === 'spiral') {
       // Smooth exponential disk — spiral arms emerge from N-body dynamics, not seeded.
       // Based on barnes-hut approach: exponential radial profile with enclosed-mass
       // circular velocities. Pure gravity + tidal perturbation creates arms via
@@ -1523,8 +1461,6 @@ function createPhysicsSimulation() {
       const LAMBDA = 5.0;           // exponential steepness (higher = more concentrated)
       const DISK_SCALE = 3.5;       // max radius
       const HALO_FRAC_S = 0.04;
-
-      const tracerFrac = (i - MASSIVE_BODY_COUNT) / Math.max(1, count - MASSIVE_BODY_COUNT);
 
       if (tracerFrac < HALO_FRAC_S) {
         // Spherical halo
@@ -1547,13 +1483,11 @@ function createPhysicsSimulation() {
         const intMax = (-1/LAMBDA) * Math.exp(-LAMBDA) + (1/LAMBDA);
         const massFrac = intR / intMax;
 
-        // Circular velocity from enclosed mass. Use a fixed reference mass (1000 sources * avgMass)
-        // so that vCirc is independent of particle count — the G_eff normalization already handles scaling.
-        const REF_SOURCES = 1000;
-        const avgMass = ((BIG_BODY_MASS_MIN + BIG_BODY_MASS_MAX) / 2 + (MEDIUM_BODY_MASS_MIN + MEDIUM_BODY_MASS_MAX) / 2) / 2;
-        const refTotalMass = REF_SOURCES * avgMass;
-        const enclosedMass = massFrac * refTotalMass;
-        const Geff = (state.physics.G ?? 1.5) * 0.001 / Math.sqrt(Math.max(1, MASSIVE_BODY_COUNT) / 1000);
+        // Circular velocity from enclosed mass. Reference total = 1.0 (all
+        // particles have PARTICLE_MASS = 1/count, so total mass = 1 regardless
+        // of N). PM gravity applies uniformly — no source-cap normalization.
+        const enclosedMass = massFrac * 1.0;
+        const Geff = (state.physics.G ?? 0.3) * 0.001;
         // Circular velocity from enclosed particle mass + dark matter potential.
         const vCirc = Math.sqrt(Math.max(0.001, Geff * enclosedMass / Math.max(r, 0.05) + darkMatterVcirc2(r)));
 
@@ -1575,7 +1509,6 @@ function createPhysicsSimulation() {
       const angle = Math.random() * Math.PI * 2;
       const r = Math.sqrt(Math.random()) * 4.5;
       mass = Math.pow(Math.random(), 3.0) * 0.8;
-      const tracerFrac = (i - MASSIVE_BODY_COUNT) / Math.max(1, count - MASSIVE_BODY_COUNT);
       if (tracerFrac < 0.03) {
         const h = (Math.random() - 0.5) * DISK_THICKNESS * 0.5;
         x = orbitalTangent[0]*Math.cos(angle)*r + orbitalBitangent[0]*Math.sin(angle)*r + orbitalNormal[0]*h;
@@ -1963,9 +1896,6 @@ function createPhysicsSimulation() {
     ]}),
   ];
 
-  // Runtime blend knob. 0 = pure tile-pair gravity (legacy); 1 = pure PM.
-  // Flipped via window.__pmSetBlend at runtime for side-by-side testing.
-  let pmBlendValue = 0.0;
 
   // Per-level uniform buffers, pre-populated at factory init. Each holds a
   // tiny struct (16 bytes) specific to its shader:
@@ -1973,7 +1903,7 @@ function createPhysicsSimulation() {
   //   residualUniform[l]        → { gridRes, _pad, hSquared, fourPiG }
   //   restrictUniform[l]        → { coarseGridRes, _pad×3 }   (for transition l → l+1)
   //   prolongUniform[l]         → { fineGridRes, _pad×3 }     (for transition l+1 → l)
-  const PM_FOUR_PI_G = 4 * Math.PI * (state.physics.G ?? 1.5) * 0.001 / Math.sqrt(Math.max(1, MASSIVE_BODY_COUNT) / 1000);
+  const PM_FOUR_PI_G = 4 * Math.PI * (state.physics.G ?? 0.3) * 0.001;
   const pmSmoothUniform: GPUBuffer[][] = [];
   const pmResidualUniform: GPUBuffer[] = [];
   const pmRestrictUniform: GPUBuffer[] = [];   // index l → transition l → l+1
@@ -2234,13 +2164,15 @@ function createPhysicsSimulation() {
       const p = state.physics;
       const baseDt = PHYSICS_BASE_DT * state.fx.timeScale;
       const dt = baseDt * timeDirection;
-      // [LAW:one-source-of-truth] G normalized by sqrt(sourceCount) so gravity scales sub-linearly with particle count.
+      // PM gravity is uniform across all particles — no sqrt(sourceCount)
+      // normalization. Total mass is now 1.0 (PARTICLE_MASS = 1/count) so
+      // the effective gravity strength is set purely by G.
       f32[0] = dt;
-      f32[1] = p.G * 0.001 / Math.sqrt(Math.max(1, MASSIVE_BODY_COUNT) / 1000);
+      f32[1] = p.G * 0.001;
       f32[2] = p.softening;
       f32[3] = p.haloMass ?? 5.0;
       u32[4] = count;
-      u32[5] = MASSIVE_BODY_COUNT;
+      u32[5] = 0;  // was sourceCount; tile-pair gravity removed in ticket .6
       f32[6] = p.haloScale ?? 2.0;
       // [LAW:one-source-of-truth] Simulation clock: simStep × baseDt gives deterministic tidal angle.
       f32[7] = simStep * baseDt;
@@ -2249,7 +2181,7 @@ function createPhysicsSimulation() {
       f32[16] = p.diskMass ?? 3.0;
       f32[17] = p.diskScaleA ?? 1.5;
       f32[18] = p.diskScaleB ?? 0.3;
-      f32[19] = pmBlendValue;  // was _pad_e, now params.pmBlend (see nbody.compute.wgsl)
+      f32[19] = 0;  // was pmBlend; tile-pair gravity removed in ticket .6
       f32[20] = 0; f32[21] = 0; f32[22] = 0;
       f32[23] = p.tidalStrength ?? 0.005;
 
@@ -2396,11 +2328,11 @@ function createPhysicsSimulation() {
       const now = performance.now();
       if (!statsPendingMap && now - lastStatsTime > STATS_INTERVAL_MS) {
         lastStatsTime = now;
-        const Geff = (p.G ?? 1.5) * 0.001 / Math.sqrt(Math.max(1, MASSIVE_BODY_COUNT) / 1000);
+        const Geff = (p.G ?? 0.3) * 0.001;
         const statsParamsData = new Float32Array(4);
         const statsParamsU32 = new Uint32Array(statsParamsData.buffer);
         statsParamsU32[0] = count;
-        statsParamsU32[1] = MASSIVE_BODY_COUNT;
+        statsParamsU32[1] = count;  // was MASSIVE_BODY_COUNT; every particle is a source now
         statsParamsData[2] = (p.softening ?? 0.15) * (p.softening ?? 0.15);
         statsParamsData[3] = Geff;
         device.queue.writeBuffer(statsParamsBuffer, 0, statsParamsData);
@@ -2462,16 +2394,16 @@ function createPhysicsSimulation() {
     async diagnose(): Promise<Record<string, number | number[]>> {
       if (diagPending) return { error: 1 };
       diagPending = true;
-      // Copy several large chunks from evenly-spaced regions across the tracer population.
-      const tracerCount = count - MASSIVE_BODY_COUNT;
-      const sampleCount = Math.min(tracerCount, DIAG_SAMPLE);
+      // Copy several large chunks from evenly-spaced regions across the population.
+      // No source/tracer distinction — every particle is a sample candidate.
+      const sampleCount = Math.min(count, DIAG_SAMPLE);
       const NUM_CHUNKS = 8;
       const chunkBodies = Math.floor(sampleCount / NUM_CHUNKS);
-      const regionSize = Math.floor(tracerCount / NUM_CHUNKS);
+      const regionSize = Math.floor(count / NUM_CHUNKS);
       const srcBuf = pingPong === 0 ? bufferA : bufferB;
       const encoder = device.createCommandEncoder();
       for (let c = 0; c < NUM_CHUNKS; c++) {
-        const srcIdx = MASSIVE_BODY_COUNT + c * regionSize;
+        const srcIdx = c * regionSize;
         encoder.copyBufferToBuffer(srcBuf, srcIdx * 48, diagStaging, c * chunkBodies * 48, chunkBodies * 48);
       }
       device.queue.submit([encoder.finish()]);
@@ -2597,12 +2529,6 @@ function createPhysicsSimulation() {
       pmDensityStaging.unmap();
       pmDiagPending = false;
       return out;
-    },
-
-    // Runtime PM-vs-pair blend setter. Clamped [0,1]. Takes effect on the
-    // next frame's params pack. Intended for dev use via window.__pmSetBlend.
-    setBlend(x: number): void {
-      pmBlendValue = Math.max(0, Math.min(1, x));
     },
 
     // Max |residual| at level 0 — the convergence metric for the V-cycle.
@@ -7276,11 +7202,6 @@ async function main() {
     dumpDensity?: () => Promise<Float32Array | null>,
     dumpPotential?: () => Promise<Float32Array | null>,
     maxResidual?: () => Promise<number | null>,
-    setBlend?: (x: number) => void,
-  };
-  (window as any).__pmSetBlend = (x: number) => {
-    const sim = simulations[state.mode] as unknown as PmDiag;
-    sim?.setBlend?.(x);
   };
   (window as any).__pmDumpDensity = () => {
     const sim = simulations[state.mode] as unknown as PmDiag;
