@@ -4,15 +4,22 @@
     {
       "version": "pr-12",
       "ref": "refs/pull/12/merge",
-      "sha": "d7c41603886211e00359cb848830076b84ce6266",
-      "timestamp": "2026-04-21T04:52:05.918Z",
+      "sha": "e070191cbaace85dbe1ce7cef274dc9d481fcdd2",
+      "timestamp": "2026-04-21T04:54:25.532Z",
       "commits": [
         {
-          "sha": "d7c41603886211e00359cb848830076b84ce6266",
+          "sha": "e070191cbaace85dbe1ce7cef274dc9d481fcdd2",
           "author_name": "Brandon Fryslie",
           "author_email": "530235+brandon-fryslie@users.noreply.github.com",
-          "timestamp": "2026-04-21T04:51:49Z",
-          "message": "Merge aed628e7ef579b1b9672873031879e925f754541 into 806c0ac22ecb4ac0a01350d9c72de335e33649f7\n"
+          "timestamp": "2026-04-21T04:54:13Z",
+          "message": "Merge 66ef7c1af6c4bd5a057abc5f52e0775f00e571cd into 806c0ac22ecb4ac0a01350d9c72de335e33649f7\n"
+        },
+        {
+          "sha": "66ef7c1af6c4bd5a057abc5f52e0775f00e571cd",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-20T22:54:04-06:00",
+          "message": "fix(xr): suppress wrist-flick detection while pinching\n\nDuring a drag, the hand naturally rotates as the user positions the\nattractor. Angular speed easily crosses the 4 rad/s flick threshold,\nand the 300ms refractory paces emits to steady intervals — which was\nflooding recordings with spurious wrist-flick events during every\ndrag. Gate detection on !hf.pinch.active so flicks only fire when the\nhand is idle-but-rotating, which matches the intent of the gesture.\n\nThe else branch already resets flickArmed=false when the guard is\nfalse, so state stays coherent across pinch transitions and we don't\nspuriously fire on pinch-release either.\n\nGenerated with [Claude Code](https://claude.ai/code)\nvia [Happy](https://happy.engineering)\n\nCo-Authored-By: Claude <noreply@anthropic.com>\nCo-Authored-By: Happy <yesreply@happy.engineering>\n"
         },
         {
           "sha": "aed628e7ef579b1b9672873031879e925f754541",
