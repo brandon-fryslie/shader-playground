@@ -8,6 +8,7 @@ import {
   uiHandClaimed, type XrUiPrev, type XrUiRegistry, type RenderCommand as XrRenderCommand,
 } from './xr-ui/step';
 import { createXrWidgetRenderer, type XrWidgetRenderer } from './xr-ui/renderer';
+import { HIG_DEFAULTS } from './xr-ui/widgets';
 
 // WGSL shader imports — Vite loads these as raw strings
 import SHADER_BOIDS_COMPUTE from './shaders/boids.compute.wgsl?raw';
@@ -4874,6 +4875,11 @@ const xrTuning = {
   gainMultiplier: 1.0,  // 0.1 when fine-modifier active (future)
 };
 
+// Which hand carries the bimanual clipboard panel. The other hand is free to
+// pinch widgets on the panel. [LAW:one-source-of-truth] One constant; don't
+// hardcode 'left' anywhere else in the XR code.
+const XR_PANEL_HAND: XrHand = 'left';
+
 // XR-UI module state. Single source of truth for the new widget pipeline:
 // - xrUiRegistry holds bindings + named layouts. Empty layouts map until ticket .13
 //   registers the first panel. xrUiStep returns idle/empty in that state.
@@ -5801,7 +5807,41 @@ async function toggleXR() {
         },
       ],
     });
-    xrUiRegistry.activeLayoutId = 'debug';
+
+    // Bimanual clipboard — first real XR panel (ticket .13). Held on the non-
+    // dominant hand; the dominant hand pinches widgets. Offsets tuned in the
+    // ticket spec; expect to refine after on-headset passes.
+    const clipboardOffset = {
+      position: [0.10, 0.00, -0.05] as [number, number, number],  // 10cm out, 5cm toward user
+      orientation: idQuat,                                          // face user (refine in-headset)
+    };
+    const sliderSize = { x: 0.17, y: 0.030 };
+    const readoutSize = { x: 0.18, y: 0.025 };
+    xrUiRegistry.layouts.set('clipboard', {
+      id: 'clipboard-panel', kind: 'panel',
+      anchor: { kind: 'held', hand: XR_PANEL_HAND, offset: clipboardOffset },
+      size: { x: 0.20, y: 0.28 },
+      children: [{
+        id: 'clipboard-col', kind: 'group', layout: 'column', gap: 0.015,
+        children: [
+          { id: 'clipboard-title', kind: 'readout', binding: 'app.mode',
+            visualSize: readoutSize, hitPadding: { x: 0, y: 0 } },
+          { id: 'clipboard-G', kind: 'slider', binding: 'physics.G',
+            orientation: 'horizontal', interaction: { kind: 'direct-drag', axis: 'x' },
+            visualSize: sliderSize, hitPadding: HIG_DEFAULTS.defaultHitPadding },
+          { id: 'clipboard-soft', kind: 'slider', binding: 'physics.softening',
+            orientation: 'horizontal', interaction: { kind: 'direct-drag', axis: 'x' },
+            visualSize: sliderSize, hitPadding: HIG_DEFAULTS.defaultHitPadding },
+          { id: 'clipboard-int', kind: 'slider', binding: 'physics.interactionStrength',
+            orientation: 'horizontal', interaction: { kind: 'direct-drag', axis: 'x' },
+            visualSize: sliderSize, hitPadding: HIG_DEFAULTS.defaultHitPadding },
+        ],
+      }],
+    });
+    // Default to the clipboard. The 'debug' layout remains registered — switch
+    // via window.__xrUi-style inspection tools when the renderer test fixture
+    // is needed.
+    xrUiRegistry.activeLayoutId = 'clipboard';
 
     xrSession.addEventListener('visibilitychange', () => {
       logInfo('xr', 'visibilitychange', {
