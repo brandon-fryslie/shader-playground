@@ -44,7 +44,14 @@ export type InteractionState =
   | { kind: 'hovering'; widgetId: string }
   | { kind: 'pressing';
       widgetId: string; bindingId: string; startedAt: number;
-      cancelPending: boolean }
+      cancelPending: boolean;
+      // Discriminator chosen at pinch-start; tells the commit handler which
+      // side effect to emit if the press isn't cancelled. Captured here so the
+      // commit doesn't have to look the widget up again at pinch-end.
+      commit:
+        | { kind: 'invoke' }                              // button / preset-tile → action binding
+        | { kind: 'toggle'; valueAtOrigin: boolean }      // toggle widget → flip
+        | { kind: 'increment'; valueAtOrigin: number; step: number; min: number; max: number } }
   | { kind: 'dragging';
       widgetId: string; bindingId: string;
       handOriginPos: number[];        // world-space hand position at pinch-start
@@ -141,26 +148,35 @@ export function xrUiStep(
     } else if (!isPinching && wasPinching) {
       // PINCH-END → COMMIT or RELEASE.
       if (prevState.kind === 'pressing' && !prevState.cancelPending) {
-        sideEffects.push({ kind: 'binding-invoke', bindingId: prevState.bindingId });
+        const c = prevState.commit;
+        if (c.kind === 'invoke') {
+          sideEffects.push({ kind: 'binding-invoke', bindingId: prevState.bindingId });
+        } else if (c.kind === 'toggle') {
+          sideEffects.push({ kind: 'binding-set', bindingId: prevState.bindingId, value: !c.valueAtOrigin });
+        } else { // increment
+          const next = Math.max(c.min, Math.min(c.max, c.valueAtOrigin + c.step));
+          sideEffects.push({ kind: 'binding-set', bindingId: prevState.bindingId, value: next });
+        }
       }
       nextState = { kind: 'idle' };
     } else if (isPinching && wasPinching) {
-      // HOLD frame → continuous drag updates + cancel test.
-      // [LAW:one-source-of-truth] Cancel test ALWAYS reads currentRay (hand-steered).
+      // HOLD frame → continuous drag updates (sliders/dials) + cancel test (buttons).
+      // Cancel-pending applies ONLY to pressing — dragging means the hand is
+      // intentionally moving away from the widget center to scrub the value;
+      // gating updates on currentRay-on-widget would freeze the slider the moment
+      // the user starts dragging. (Bug fix from initial XR session feedback.)
       if (prevState.kind === 'dragging') {
         const binding = registry.bindings.get(prevState.bindingId);
-        const onWidget = !!hf.currentRay && hitTestWidgets(laid, hf.currentRay) === prevState.widgetId;
-        const cancel = !onWidget;
-        if (binding && binding.kind === 'continuous' && !cancel) {
+        if (binding && binding.kind === 'continuous') {
           const value = computeDragValue(prevState, hf, binding, tuning.gainMultiplier);
           sideEffects.push({ kind: 'binding-set', bindingId: prevState.bindingId, value });
         }
-        nextState = { ...prevState, cancelPending: cancel };
+        nextState = prevState;
       } else if (prevState.kind === 'pressing') {
+        // [LAW:one-source-of-truth] Cancel test ALWAYS reads currentRay (hand-steered).
         const onWidget = !!hf.currentRay && hitTestWidgets(laid, hf.currentRay) === prevState.widgetId;
         nextState = { ...prevState, cancelPending: !onWidget };
       }
-      // pinch-unclaimed (held over empty space) → stay idle; nothing to update.
     } else {
       // NO PINCH → HOVER pipeline.
       // [LAW:one-source-of-truth] Hover ALWAYS reads hf.ray (advisory laser).
@@ -276,7 +292,22 @@ function beginInteraction(
   if (widget.kind === 'button' || widget.kind === 'preset-tile') {
     const b = bindings.get(widget.binding);
     if (!b || b.kind !== 'action') return { kind: 'idle' };
-    return { kind: 'pressing', widgetId, bindingId: b.id, startedAt: hf.pinch.startTime, cancelPending: false };
+    return { kind: 'pressing', widgetId, bindingId: b.id, startedAt: hf.pinch.startTime,
+             cancelPending: false, commit: { kind: 'invoke' } };
+  }
+  if (widget.kind === 'toggle') {
+    const b = bindings.get(widget.binding);
+    if (!b || b.kind !== 'toggle') return { kind: 'idle' };
+    return { kind: 'pressing', widgetId, bindingId: b.id, startedAt: hf.pinch.startTime,
+             cancelPending: false, commit: { kind: 'toggle', valueAtOrigin: b.get() } };
+  }
+  if (widget.kind === 'stepper') {
+    const b = bindings.get(widget.binding);
+    if (!b || b.kind !== 'continuous') return { kind: 'idle' };
+    return { kind: 'pressing', widgetId, bindingId: b.id, startedAt: hf.pinch.startTime,
+             cancelPending: false,
+             commit: { kind: 'increment', valueAtOrigin: b.get(), step: widget.step,
+                       min: b.range.min, max: b.range.max } };
   }
   if (widget.kind === 'slider' || widget.kind === 'dial') {
     const b = bindings.get(widget.binding);
@@ -290,7 +321,9 @@ function beginInteraction(
       cancelPending: false,
     };
   }
-  // toggle, stepper, enum-chips, category-tile, readout — not yet wired.
+  // enum-chips, category-tile, readout — not yet wired.
+  // enum-chips needs chip-level hit zones (not just one big plate);
+  // category-tile needs the tabs container behavior from ticket .16.
   // Returning idle leaves the pinch unclaimed; sim-side input proceeds normally.
   return { kind: 'idle' };
 }

@@ -38,9 +38,9 @@ struct Instance {
   _pad1: u32,
 };
 
-const ATLAS_W: f32 = 256.0;
-const ATLAS_H: f32 = 2048.0;
-const STRIP_H: f32 = 32.0;
+const ATLAS_W: f32 = 512.0;
+const ATLAS_H: f32 = 4096.0;
+const STRIP_H: f32 = 64.0;
 const STRIP_V_FRAC: f32 = STRIP_H / ATLAS_H; // 1/64
 
 @group(0) @binding(0) var<uniform> camera: Camera;
@@ -211,26 +211,25 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
   }
 
   // ── LABEL OVERLAY ───────────────────────────────────────────────────────
-  // Sample the atlas only when the instance has one; aspect-correct mapping so
-  // text width matches the widget's visual aspect (avoids stretched glyphs on
-  // wide buttons / tall sliders).
+  // Aspect-correct atlas sampling. Atlas strip is 8:1 wide; widget text region
+  // is (2*halfX) : (V_BAND * 2*halfY). Map widget uv.x to a sub-range of atlas
+  // u so glyphs render at their natural aspect — full atlas width across a
+  // wide widget would stretch text 2x+ horizontally; sub-range keeps glyphs
+  // shaped like the canvas drew them.
   if (in.hasLabel != 0u) {
+    let CANVAS_ASPECT = ATLAS_W / STRIP_H;        // 8.0
+    let V_BAND = 0.45;                             // strip occupies ±V_BAND in widget uv
+    let widgetTextAspect = in.halfX / max(V_BAND * in.halfY, 0.001);
+    // Floor uHalf at 0.4 so very narrow widgets still show readable text
+    // (cropping a few glyphs is preferable to invisible text).
+    let uHalf = clamp(widgetTextAspect / CANVAS_ASPECT * 0.5, 0.1, 0.5);
+    let labelU = 0.5 + in.uv.x * uHalf;
+    let labelLocalV = (in.uv.y - labelCenterY) / V_BAND; // -1..1 inside the strip
     let stripV0 = f32(in.stripIndex) * STRIP_V_FRAC;
-    // Map widget-local uv (centered at 0) into atlas strip space.
-    // Horizontal: glyphs were rasterized centered in a 256-wide canvas. Scale
-    // u by widget aspect so a wide button doesn't squish the text — assume
-    // glyph block ~half the strip wide; widgets keep text legible by being
-    // at least ~0.18m visualX (roughly the slider visualSize defaults).
-    let aspect = in.halfX / max(in.halfY, 0.0001);
-    let labelU = 0.5 + (in.uv.x / max(aspect * 0.6, 0.6)) * 0.5;
-    // Vertical: place glyph row at labelCenterY ± half strip-height in widget
-    // space. Strip occupies vertical range ~[labelCenterY - 0.35, +0.35].
-    let labelLocalV = (in.uv.y - labelCenterY) / 0.35; // -1..1 inside the strip
     let labelV = stripV0 + (labelLocalV * 0.5 + 0.5) * STRIP_V_FRAC;
     if (labelU >= 0.0 && labelU <= 1.0 && labelLocalV >= -1.0 && labelLocalV <= 1.0) {
       let glyph = textureSample(atlas, atlasSampler, vec2<f32>(labelU, labelV));
-      // White text; a is glyph alpha. Composite onto fill.
-      fill = mix(fill, vec3<f32>(0.95, 0.95, 0.95), glyph.a);
+      fill = mix(fill, vec3<f32>(0.97, 0.97, 0.97), glyph.a);
     }
   }
 

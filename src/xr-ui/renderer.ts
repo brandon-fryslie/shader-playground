@@ -27,10 +27,13 @@ const CAMERA_STRIDE = 256;
 
 // Label atlas. One row of pixels per widget; widgets ask for a strip the
 // first time they need a label and the renderer re-rasterizes on text change.
-const ATLAS_W = 256;
-const STRIP_H = 32;
+// Bumped from 256x32 → 512x64 strips after first XR session reported text
+// "completely unreadable" — the lower resolution was too soft when sampled
+// across a typical 16cm-wide widget at 60cm distance.
+const ATLAS_W = 512;
+const STRIP_H = 64;
 const MAX_STRIPS = MAX_INSTANCES;            // one strip per instance slot
-const ATLAS_H = STRIP_H * MAX_STRIPS;        // 2048 px
+const ATLAS_H = STRIP_H * MAX_STRIPS;        // 4096 px (8 MB RGBA8)
 
 // Widget kind codes — must match xr-widgets.wgsl. Add a kind here AND a case
 // in the fragment shader (and ideally bump this list to a shared constants file
@@ -88,7 +91,7 @@ export function createXrWidgetRenderer(
   const ctxNullable = canvas.getContext('2d');
   if (!ctxNullable) throw new Error('xr-widgets: 2D canvas context unavailable');
   const ctx: CanvasRenderingContext2D = ctxNullable;
-  ctx.font = '20px system-ui, -apple-system, sans-serif';
+  ctx.font = '600 40px system-ui, -apple-system, sans-serif';
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
 
