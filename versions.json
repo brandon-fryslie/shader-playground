@@ -4,15 +4,22 @@
     {
       "version": "pr-12",
       "ref": "refs/pull/12/merge",
-      "sha": "2121695359946b46332d4cbd0b36e0921407c0b0",
-      "timestamp": "2026-04-21T23:18:42.680Z",
+      "sha": "7382d69fe3dee5ab63019be87e832a23222b5138",
+      "timestamp": "2026-04-21T23:20:06.887Z",
       "commits": [
         {
-          "sha": "2121695359946b46332d4cbd0b36e0921407c0b0",
+          "sha": "7382d69fe3dee5ab63019be87e832a23222b5138",
           "author_name": "Brandon Fryslie",
           "author_email": "530235+brandon-fryslie@users.noreply.github.com",
-          "timestamp": "2026-04-21T23:18:29Z",
-          "message": "Merge c4027811026ce5d0150857d1bd80575e8aecbe62 into 806c0ac22ecb4ac0a01350d9c72de335e33649f7\n"
+          "timestamp": "2026-04-21T23:19:52Z",
+          "message": "Merge a7fe86f619d1ab443a2ee8ca68ddc42939e1148a into 806c0ac22ecb4ac0a01350d9c72de335e33649f7\n"
+        },
+        {
+          "sha": "a7fe86f619d1ab443a2ee8ca68ddc42939e1148a",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-21T17:19:32-06:00",
+          "message": "feat(physics): diegetic attractor indicator — marker swarm + HDR glow; remove reticle/lensing\n\nReplaces the overlay-style reticle with in-scene feedback. Each attractor\nspawns ~36 CPU-animated marker sprites that orbit the wand and render into\nthe HDR scene, picking up bloom naturally. Nearby simulation particles also\ngain a log-scaled HDR boost + accent tint via a new render-side attractor\nUBO. Composite pass no longer draws a reticle or applies screen-space\ngravitational lensing — both were reading as overlaid UI rather than part\nof the simulation. Composite UBO shrinks 592→64 bytes with the cleanup.\n\nGenerated with [Claude Code](https://claude.ai/code)\nvia [Happy](https://happy.engineering)\n\nCo-Authored-By: Claude <noreply@anthropic.com>\nCo-Authored-By: Happy <yesreply@happy.engineering>\n"
         },
         {
           "sha": "c4027811026ce5d0150857d1bd80575e8aecbe62",
