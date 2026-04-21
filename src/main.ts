@@ -1,6 +1,7 @@
 import '../styles/main.css';
 import type { SimMode, Simulation, AppState, Attractor, ThemeColors, RGBThemeColors, ParamDef, ParamSection, ShapeParamDef, XRCameraOverride, DepthRef, ModeParamsMap, ShapeName } from './types';
 import { bindingRegistry } from './xr-ui/bindings';
+import { evaluateAnchor } from './xr-ui/anchors';
 
 // WGSL shader imports — Vite loads these as raw strings
 import SHADER_BOIDS_COMPUTE from './shaders/boids.compute.wgsl?raw';
@@ -6244,6 +6245,7 @@ async function main() {
   };
   (window as any).__simState = () => ({ mode: state.mode, ...state[state.mode] as any, fps: currentFps, gpuMs: gpuFrameMs, gpuDetail: gpuTimingDetail });
   (window as any).__bindings = bindingRegistry;
+  (window as any).__anchors = { evaluateAnchor, handFrames: xrHandFrames };
   (window as any).__simStats = () => {
     const sim = simulations[state.mode];
     const stats = (sim as any)?.getStats ? (sim as any).getStats() : { error: 'no stats on this sim' };
