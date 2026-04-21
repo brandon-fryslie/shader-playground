@@ -1,5 +1,6 @@
 import '../styles/main.css';
 import type { SimMode, Simulation, AppState, Attractor, ThemeColors, RGBThemeColors, ParamDef, ParamSection, ShapeParamDef, XRCameraOverride, DepthRef, ModeParamsMap, ShapeName } from './types';
+import { maybeInitXrBridge } from './xr-bridge';
 import { bindingRegistry } from './xr-ui/bindings';
 import { evaluateAnchor, type Anchor } from './xr-ui/anchors';
 import { layout as xrUiLayout, hitTestWidgets } from './xr-ui/layout';
@@ -1732,6 +1733,25 @@ function createPhysicsSimulation() {
     initData[off + 10] = 0;
   }
 
+  // ── PM (Particle-Mesh) scaffolding ──────────────────────────────────────────
+  // Grid/solver constants for the upcoming P³M gravity path. Nothing in the
+  // current compute dispatches reads these yet — this ticket only allocates
+  // resources and defines the canonical domain extent. [LAW:one-source-of-truth]
+  // PM_DOMAIN_HALF/SIZE must match DOMAIN_HALF/SIZE in nbody.compute.wgsl so the
+  // integrator's periodic wrap and the PM grid span the same volume.
+  const PM_GRID_RES = 128;                          // 128³ cells at level 0
+  const PM_DOMAIN_HALF = 16.0;                      // matches DOMAIN_HALF in nbody.compute.wgsl
+  const PM_DOMAIN_SIZE = PM_DOMAIN_HALF * 2;        // = 32.0
+  const PM_CELL_SIZE = PM_DOMAIN_SIZE / PM_GRID_RES; // = 0.25 world units per cell
+  const PM_FIXED_POINT_SCALE = 65536;               // 2^16 — u32 atomic mass accumulation
+  const PM_MULTIGRID_LEVELS = 6;                    // 128³, 64³, 32³, 16³, 8³, 4³
+  const PM_V_CYCLE_COUNT = 4;                       // V-cycles per Poisson solve
+  const PM_SMOOTH_PRE = 2;                          // red-black GS passes before restriction
+  const PM_SMOOTH_POST = 2;                         // red-black GS passes after prolongation
+  // Silence "declared but never read" until downstream tickets wire the solver.
+  void PM_CELL_SIZE; void PM_FIXED_POINT_SCALE;
+  void PM_V_CYCLE_COUNT; void PM_SMOOTH_PRE; void PM_SMOOTH_POST;
+
   const bufferA = device.createBuffer({ size: bodyBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC, mappedAtCreation: true });
   new Float32Array(bufferA.getMappedRange()).set(initData);
   bufferA.unmap();
@@ -1746,6 +1766,29 @@ function createPhysicsSimulation() {
   const blurBuffer = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
   const blurScratch = new Float32Array(4);
   device.queue.writeBuffer(blurBuffer, 0, blurScratch); // init to 0 so the first pre-skip frames render circles
+
+  // PM grid buffers. All live at multigrid-level granularity — level 0 is the
+  // full 128³; each successive level halves the resolution. Total ~36 MB for
+  // the whole pyramid (density + potential + residual + per-particle force +
+  // mean scratch). [LAW:single-enforcer] All PM allocations go here; destroy()
+  // below is the sole cleanup site.
+  const PM_BUF_USAGE = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST;
+  const pmLevel0Cells = PM_GRID_RES * PM_GRID_RES * PM_GRID_RES;
+  const pmDensityU32 = device.createBuffer({ size: pmLevel0Cells * 4, usage: PM_BUF_USAGE });
+  const pmDensityF32 = device.createBuffer({ size: pmLevel0Cells * 4, usage: PM_BUF_USAGE });
+  const pmPotential: GPUBuffer[] = [];
+  const pmResidual: GPUBuffer[] = [];
+  for (let l = 0; l < PM_MULTIGRID_LEVELS; l++) {
+    const sizeL = PM_GRID_RES >> l;
+    const bytesL = sizeL * sizeL * sizeL * 4;
+    pmPotential.push(device.createBuffer({ size: bytesL, usage: PM_BUF_USAGE }));
+    pmResidual.push(device.createBuffer({ size: bytesL, usage: PM_BUF_USAGE }));
+  }
+  // Per-particle force buffer: vec4<f32> per particle (16-byte alignment; xyz used, w pad).
+  const pmForce = device.createBuffer({ size: count * 16, usage: PM_BUF_USAGE });
+  // Mean density scratch (single f32 + padding to 16 bytes).
+  const pmMeanScratch = device.createBuffer({ size: 16, usage: PM_BUF_USAGE });
+
   const computeModule = createShaderModuleChecked('nbody.compute', SHADER_NBODY_COMPUTE_EDIT || SHADER_NBODY_COMPUTE);
   const renderModule = createShaderModuleChecked('nbody.render', SHADER_NBODY_RENDER_EDIT || SHADER_NBODY_RENDER);
 
@@ -2161,6 +2204,12 @@ function createPhysicsSimulation() {
       paramsBuffer.destroy(); cameraBuffer.destroy(); blurBuffer.destroy();
       statsOutBuffer.destroy(); statsStaging.destroy(); statsParamsBuffer.destroy();
       diagStaging.destroy();
+      // PM scaffolding cleanup. Every buffer allocated in the PM block above
+      // is released here. [LAW:single-enforcer] No other destroy site exists.
+      pmDensityU32.destroy(); pmDensityF32.destroy();
+      for (const b of pmPotential) b.destroy();
+      for (const b of pmResidual) b.destroy();
+      pmForce.destroy(); pmMeanScratch.destroy();
       destroyDepthRef(depthRef);
     }
   };
@@ -6713,6 +6762,11 @@ function initBindings(): void {
 
 
 async function main() {
+  // [LAW:single-enforcer] Remote-eval debug bridge is bootstrapped here, before any GPU init, so
+  // that on-device debugging (Vision Pro with no Web Inspector access) can observe the full startup
+  // sequence. It's a no-op unless the URL carries ?xrbridge=<suffix>, so there's no prod cost.
+  maybeInitXrBridge();
+
   const ok = await initWebGPU();
   if (!ok) return;
 

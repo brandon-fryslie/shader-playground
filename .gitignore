@@ -1,4 +1,5 @@
 *.pem
+.claude/
 .firecrawl/
 .idea/
 node_modules/
