@@ -3427,6 +3427,9 @@ function setupRecordButton(): void {
       console.group(`[xr] recording — ${samples.length} samples (${summary})`);
       for (const s of samples) {
         if (s.channel === 'xr.snap') continue;  // bulk data; inspect via __xrLastRecording
+        // pinch-hold fires every frame during a pinch — also bulk; skip from console.
+        if (s.channel === 'xr.gesture'
+          && (s.payload as XrGestureEvent).gesture.kind === 'pinch-hold') continue;
         // eslint-disable-next-line no-console
         console.log(`[t=${s.t.toFixed(0).padStart(5)}ms] ${s.channel}`, s.payload);
       }
