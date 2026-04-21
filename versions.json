@@ -4,15 +4,22 @@
     {
       "version": "pr-12",
       "ref": "refs/pull/12/merge",
-      "sha": "641aa321b2710ef1a3ace6cb0651ba4967488f65",
-      "timestamp": "2026-04-21T04:17:18.013Z",
+      "sha": "30bf2e106a7c19db128e27de8e0ded1b864cc501",
+      "timestamp": "2026-04-21T04:21:13.279Z",
       "commits": [
         {
-          "sha": "641aa321b2710ef1a3ace6cb0651ba4967488f65",
+          "sha": "30bf2e106a7c19db128e27de8e0ded1b864cc501",
           "author_name": "Brandon Fryslie",
           "author_email": "530235+brandon-fryslie@users.noreply.github.com",
-          "timestamp": "2026-04-20T22:16:58-06:00",
-          "message": "Merge 72640e63379c9053bc5ab31e8217f06eac33ae7c into 806c0ac22ecb4ac0a01350d9c72de335e33649f7\n"
+          "timestamp": "2026-04-21T04:20:54Z",
+          "message": "Merge 32064a63efafb2285880c280546d77b8ac64ecab into 806c0ac22ecb4ac0a01350d9c72de335e33649f7\n"
+        },
+        {
+          "sha": "32064a63efafb2285880c280546d77b8ac64ecab",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-20T22:20:46-06:00",
+          "message": "fix(xr): immersive-ar for passthrough hands; auto-register debug widget layout\n\nTwo fixes for testing ticket .12 on Vision Pro:\n\n1. Switch session mode 'immersive-vr' → 'immersive-ar'. immersive-vr is\n   full-immersion (opaque scene, no passthrough = no real hands visible).\n   immersive-ar keeps passthrough so the user's hands remain visible\n   while the simulation + widgets composite over the room.\n\n2. Auto-register a debug widget fixture (panel + slider + button +\n   readout) when an XR session starts. Removes the requirement to paste\n   a console snippet to see anything. Marked for removal when ticket\n   .13 lands the real bimanual clipboard layout.\n\nGenerated with [Claude Code](https://claude.ai/code)\nvia [Happy](https://happy.engineering)\n\nCo-Authored-By: Claude <noreply@anthropic.com>\nCo-Authored-By: Happy <yesreply@happy.engineering>\n"
         },
         {
           "sha": "72640e63379c9053bc5ab31e8217f06eac33ae7c",
