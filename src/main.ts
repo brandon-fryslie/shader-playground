@@ -1748,7 +1748,9 @@ function createPhysicsSimulation() {
   const PM_V_CYCLE_COUNT = 4;                       // V-cycles per Poisson solve
   const PM_SMOOTH_PRE = 2;                          // red-black GS passes before restriction
   const PM_SMOOTH_POST = 2;                         // red-black GS passes after prolongation
-  // Silence "declared but never read" until downstream tickets wire the solver.
+  // Silence noUnusedLocals until downstream tickets (.3 deposition, .4
+  // multigrid, .5 force sampling) reference these. Landing the canonical
+  // values now establishes the contract; later tickets only tune usage.
   void PM_CELL_SIZE; void PM_FIXED_POINT_SCALE;
   void PM_V_CYCLE_COUNT; void PM_SMOOTH_PRE; void PM_SMOOTH_POST;
 
@@ -2211,7 +2213,16 @@ function createPhysicsSimulation() {
       for (const b of pmResidual) b.destroy();
       pmForce.destroy(); pmMeanScratch.destroy();
       destroyDepthRef(depthRef);
-    }
+    },
+    // PM internal state — not read by external callers today. Future tickets
+    // (CIC deposition .3, Poisson solver .4, force sampling .5) will dispatch
+    // compute work against these from inside this factory's closure.
+    pmDensityU32,
+    pmDensityF32,
+    pmPotential,
+    pmResidual,
+    pmForce,
+    pmMeanScratch,
   };
 }
 
