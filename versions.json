@@ -2,6 +2,42 @@
   "schema": 2,
   "versions": [
     {
+      "version": "pr-13",
+      "ref": "refs/pull/13/merge",
+      "sha": "18fcbd157116b03edf7fec758e1cd656bf20d431",
+      "timestamp": "2026-04-22T17:50:45.767Z",
+      "commits": [
+        {
+          "sha": "18fcbd157116b03edf7fec758e1cd656bf20d431",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-22T11:50:26-06:00",
+          "message": "Merge 4a64ce018f9e4dfaf2796cff25b57958a512bc11 into e59fa2d42b0961590a58c5fa15d159d77978f0e0\n"
+        },
+        {
+          "sha": "4a64ce018f9e4dfaf2796cff25b57958a512bc11",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-22T11:49:40-06:00",
+          "message": "docs(physics): document nested PM grid scheme in CLAUDE.md\n"
+        },
+        {
+          "sha": "d64927fd3589cf5aebbaeb69010a3dc9e9179a4f",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-22T11:48:21-06:00",
+          "message": "feat(physics): shrink inner PM to ±16, blend inner/outer force via smoothstep (A4+A6)\n\nNested PM scheme goes live:\n- Inner PM grid: 128³ over ±16 (cell size 0.25 — restores pre-expansion\n  resolution exactly in the galaxy region, 4× sharper than the ±64\n  uniform grid it replaces).\n- Outer PM grid: 64³ over ±64 (cell 2.0, added in prior commit) now\n  sourced by ALL particles and consumed by force interpolation.\n- New pm.interpolate_nested.wgsl samples both grids and smoothstep-blends\n  force across the [PM_DOMAIN_HALF-2, PM_DOMAIN_HALF] shell. Inside:\n  pure inner. Outside ±16: pure outer. No branches — blend weight\n  decides which contribution survives.\n\npm.deposit.wgsl gets a domain filter so particles outside ±domainHalf\nskip deposition (would otherwise wrap-pollute the inner grid via the\nexisting periodic index wrap).\n\nInner grid still uses periodic BC in this commit — minor boundary\nartifacts are masked by the blend shell weighting the outer edge\ntoward outer grid. A5 replaces the inner periodic BC with Dirichlet\nvalues sampled from the outer potential for sharp inner boundaries.\n\nMemory: unchanged from A3 (~49.5 MB PM total). Compute: inner V-cycle\nper-frame cost unchanged (same grid size, just different domain).\nOuter V-cycle still ~0.6 ms full-cycle per frame.\n\nVerification:\n- npm run build clean\n- __pmMaxResidual() returns { inner, outer } — both should be < 1% peak\n- __pmReversibilityTest(1000) — maxErr < 0.01 expected (pending on-device)\n"
+        },
+        {
+          "sha": "b79ad685bd4572a17805821fc49613577972c7bf",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-22T11:42:52-06:00",
+          "message": "feat(physics): scaffold outer PM grid for nested zoom-in scheme (Phase A2+A3)\n\nAdds a 64³ outer multigrid Poisson solve spanning the full ±64 periodic\ndomain, running every frame alongside the existing 128³ inner grid. Shader\nmodules + pipelines are reused unchanged — only buffers, uniforms, and\nbind groups are outer-specific (the pm.* shaders were already parameterized\nvia gridRes/domainHalf/cellSize uniforms, so no shader edits needed yet).\n\nIn this commit the outer potential is computed but unused downstream;\nforce interpolation still reads the inner grid only. Subsequent Phase A\ncommits shrink the inner grid to ±16 (A4), add Dirichlet BC sampled from\nthe outer potential (A5), and blend inner/outer force at the transition\nshell (A6). See /Users/bmf/.claude/plans/cosmic-weaving-flask.md.\n\nMemory: +~4.6 MB (outer pyramid at 64/32/16/8/4 + staging). Compute: one\nfull V-cycle on 64³ per frame, ~0.6 ms on M2 — well under the Vision Pro\n11 ms budget. No split-across-frames needed (inner still splits).\n\nDiagnostics added:\n- __pmDumpOuterDensity() / __pmDumpOuterPotential() — 64³ readback\n- __pmMaxResidual() now returns { inner, outer } for convergence per grid\n"
+        }
+      ]
+    },
+    {
       "version": "r90-e59fa2d",
       "ref": "refs/heads/master",
       "sha": "e59fa2d42b0961590a58c5fa15d159d77978f0e0",
