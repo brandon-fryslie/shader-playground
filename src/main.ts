@@ -1,6 +1,5 @@
 import '../styles/main.css';
 import type { SimMode, Simulation, AppState, Attractor, Marker, ThemeColors, RGBThemeColors, ParamDef, ParamSection, ShapeParamDef, XRCameraOverride, DepthRef, ModeParamsMap, ShapeName } from './types';
-import { maybeInitXrBridge } from './xr-bridge';
 import { bindingRegistry } from './xr-ui/bindings';
 import { evaluateAnchor, type Anchor } from './xr-ui/anchors';
 import { layout as xrUiLayout, hitTestWidgets } from './xr-ui/layout';
@@ -7434,11 +7433,6 @@ function initBindings(): void {
 
 
 async function main() {
-  // [LAW:single-enforcer] Remote-eval debug bridge is bootstrapped here, before any GPU init, so
-  // that on-device debugging (Vision Pro with no Web Inspector access) can observe the full startup
-  // sequence. It's a no-op unless the URL carries ?xrbridge=<suffix>, so there's no prod cost.
-  maybeInitXrBridge();
-
   const ok = await initWebGPU();
   if (!ok) return;
 
