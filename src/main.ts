@@ -1,5 +1,14 @@
 import '../styles/main.css';
-import type { SimMode, Simulation, AppState, Attractor, ThemeColors, RGBThemeColors, ParamDef, ParamSection, ShapeParamDef, XRCameraOverride, DepthRef, ModeParamsMap, ShapeName } from './types';
+import type { SimMode, Simulation, AppState, Attractor, Marker, ThemeColors, RGBThemeColors, ParamDef, ParamSection, ShapeParamDef, XRCameraOverride, DepthRef, ModeParamsMap, ShapeName } from './types';
+import { bindingRegistry } from './xr-ui/bindings';
+import { evaluateAnchor, type Anchor } from './xr-ui/anchors';
+import { layout as xrUiLayout, hitTestWidgets } from './xr-ui/layout';
+import {
+  xrUiStep, applySideEffects as xrUiApplyEffects, makeIdlePrev as xrUiMakeIdlePrev,
+  uiHandClaimed, type XrUiPrev, type XrUiRegistry, type RenderCommand as XrRenderCommand,
+} from './xr-ui/step';
+import { createXrWidgetRenderer, type XrWidgetRenderer } from './xr-ui/renderer';
+import { HIG_DEFAULTS } from './xr-ui/widgets';
 
 // WGSL shader imports — Vite loads these as raw strings
 import SHADER_BOIDS_COMPUTE from './shaders/boids.compute.wgsl?raw';
@@ -7,7 +16,15 @@ import SHADER_BOIDS_RENDER from './shaders/boids.render.wgsl?raw';
 import SHADER_NBODY_COMPUTE from './shaders/nbody.compute.wgsl?raw';
 import SHADER_NBODY_STATS from './shaders/nbody.stats.wgsl?raw';
 import SHADER_NBODY_RENDER from './shaders/nbody.render.wgsl?raw';
+import SHADER_MARKERS_RENDER from './shaders/markers.render.wgsl?raw';
 import SHADER_NBODY_CLASSIC_COMPUTE from './shaders/nbody.classic.compute.wgsl?raw';
+import SHADER_PM_DEPOSIT from './shaders/pm.deposit.wgsl?raw';
+import SHADER_PM_DENSITY_CONVERT from './shaders/pm.density_convert.wgsl?raw';
+import SHADER_PM_SMOOTH from './shaders/pm.smooth.wgsl?raw';
+import SHADER_PM_RESIDUAL from './shaders/pm.residual.wgsl?raw';
+import SHADER_PM_RESTRICT from './shaders/pm.restrict.wgsl?raw';
+import SHADER_PM_PROLONG from './shaders/pm.prolong.wgsl?raw';
+import SHADER_PM_INTERPOLATE from './shaders/pm.interpolate.wgsl?raw';
 import SHADER_NBODY_CLASSIC_RENDER from './shaders/nbody.classic.render.wgsl?raw';
 import SHADER_FLUID_FORCES_ADVECT from './shaders/fluid.forces.wgsl?raw';
 import SHADER_FLUID_DIFFUSE from './shaders/fluid.diffuse.wgsl?raw';
@@ -20,7 +37,6 @@ import SHADER_PARAMETRIC_RENDER from './shaders/parametric.render.wgsl?raw';
 import SHADER_REACTION_COMPUTE from './shaders/reaction.compute.wgsl?raw';
 import SHADER_REACTION_RENDER from './shaders/reaction.render.wgsl?raw';
 import SHADER_GRID from './shaders/grid.wgsl?raw';
-import SHADER_XR_UI from './shaders/xr.ui.wgsl?raw';
 import SHADER_POST_FADE from './shaders/post.fade.wgsl?raw';
 import SHADER_POST_DOWNSAMPLE from './shaders/post.downsample.wgsl?raw';
 import SHADER_POST_UPSAMPLE from './shaders/post.upsample.wgsl?raw';
@@ -144,9 +160,13 @@ const DEFAULTS: ModeParamsMap = {
     maxSpeed: 2.0, maxForce: 0.05, visualRange: 100
   },
   physics: {
-    count: 80000, G: 1.0, softening: 1.5, distribution: 'disk',
+    // G retuned for PM gravity (ticket .6). Old normalization divided G by
+    // sqrt(MASSIVE_BODY_COUNT / 1000) ≈ 2.86 for typical N; PM applies G
+    // directly with total_mass = 1.0. First-cut default; .7 handles proper
+    // tuning.
+    count: 80000, G: 0.3, softening: 1.5, distribution: 'disk',
     interactionStrength: 1.0, tidalStrength: 0.008,
-    attractorDecayRatio: 0.5, attractorDecayCap: 2.0,
+    attractorDecayTime: 2.0,
     haloMass: 5.0, haloScale: 2.0, diskMass: 3.0, diskScaleA: 1.5, diskScaleB: 0.3,
   },
   physics_classic: {
@@ -251,9 +271,8 @@ const PARAM_DEFS: Record<SimMode, ParamSection[]> = {
       { key: 'count', label: 'Bodies', min: 10, max: 150000, step: 10, requiresReset: true },
       { key: 'G', label: 'Gravity (G)', min: 0.05, max: 5.0, step: 0.01 },
       { key: 'softening', label: 'Softening', min: 0.2, max: 4.0, step: 0.05 },
-      { key: 'interactionStrength', label: 'Interaction Pull', min: 0.1, max: 3.0, step: 0.05 },
-      { key: 'attractorDecayRatio', label: 'Decay Ratio', min: 0.1, max: 4.0, step: 0.05 },
-      { key: 'attractorDecayCap', label: 'Decay Cap (s)', min: 0.5, max: 10.0, step: 0.1 },
+      { key: 'interactionStrength', label: 'Interaction Pull', min: 0.1, max: 100, step: 0.01, logScale: true },
+      { key: 'attractorDecayTime', label: 'Decay Time (s)', min: 0.1, max: 30.0, step: 0.1, maxLabel: 'Permanent' },
       { key: 'tidalStrength', label: 'Tidal Field', min: 0.0, max: 0.05, step: 0.0005 },
     ]},
     { section: 'Initial State', params: [
@@ -445,6 +464,7 @@ const state: AppState = {
   // Released attractors decay over attractorDecaySteps(a) sim steps, then get pruned from the array.
   // Max cap of 32 is a safety rail — in practice users hit 5-10 concurrent at most.
   attractors: [] as Attractor[],
+  markers: [] as Marker[],
   pointerToAttractor: new Map<number, number>() as Map<number, number>,
   fx: {
     bloomIntensity: 0.7,
@@ -457,6 +477,7 @@ const state: AppState = {
     grading: 0.5,
     timeScale: 1.0,
   },
+  debug: { xrLog: false },
 };
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -475,6 +496,9 @@ const STEPS_PER_SECOND = 1 / PHYSICS_BASE_DT; // 62.5 — matches `baseDt = 0.01
 const ATTRACTOR_CHARGE_STEPS = 90;          // ~1.5s at timeScale=1 — quadratic ramp to full strength
 const ATTRACTOR_MAX = 32;                   // hard cap; oldest evicted if exceeded
 const ATTRACTOR_MIN_DECAY_STEPS = 3;        // ~0.05s — lower bound so releases are always visible
+// Slider values at or above this threshold treat the attractor as permanent
+// (decaySteps = Infinity). Matches the PARAM_DEFS attractorDecayTime max of 30.
+const ATTRACTOR_PERMANENT_THRESHOLD = 30.0;
 
 // [LAW:single-enforcer] Sim step + time direction accessed through these helpers so attractor lifecycle
 // always agrees with the physics sim's canonical clock. Returns safe defaults when physics is inactive.
@@ -490,13 +514,15 @@ function currentTimeDirection(): number {
   return 1;
 }
 
-// [LAW:single-enforcer] Decay window in steps is computed in exactly one place, here, from user-tunable ratio/cap.
-// Slider stays in seconds for UI intuition; converted at comparison time using STEPS_PER_SECOND.
+// [LAW:single-enforcer] Decay window in steps is computed here, from the
+// attractorDecayTime slider (seconds, converted via STEPS_PER_SECOND).
+// Slider at max → Infinity (attractor never decays — "Permanent" mode).
 // Minimum floor prevents zero-duration decay on instant-release taps.
-function attractorDecaySteps(a: Attractor): number {
-  const ratio = state.physics.attractorDecayRatio ?? 0.5;
-  const capSteps = (state.physics.attractorDecayCap ?? 2.0) * STEPS_PER_SECOND;
-  return Math.max(ATTRACTOR_MIN_DECAY_STEPS, Math.min(capSteps, ratio * a.holdSteps));
+// Unused `a` kept in signature for future per-attractor decay overrides.
+function attractorDecaySteps(_a: Attractor): number {
+  const decayTime = state.physics.attractorDecayTime ?? 2.0;
+  if (decayTime >= ATTRACTOR_PERMANENT_THRESHOLD) return Number.POSITIVE_INFINITY;
+  return Math.max(ATTRACTOR_MIN_DECAY_STEPS, decayTime * STEPS_PER_SECOND);
 }
 
 // [LAW:dataflow-not-control-flow] Strength is a pure function of (attractor, currentStep). The same quadratic
@@ -546,6 +572,7 @@ function pruneAttractors(currentStep: number) {
     if (newIdx !== undefined) newMap.set(pointerId, newIdx);
   });
   state.pointerToAttractor = newMap;
+  reindexMarkers(oldToNew);
 }
 
 function createAttractor(pointerId: number, pos: number[]): void {
@@ -561,13 +588,21 @@ function createAttractor(pointerId: number, pos: number[]): void {
       if (idx > 0) rebuilt.set(pid, idx - 1);
     });
     state.pointerToAttractor = rebuilt;
+    // Marker pool mirrors the shift — markers of the evicted attractor (idx 0) drop, rest shift down.
+    const survivors: Marker[] = [];
+    for (const m of state.markers) {
+      if (m.attractorIdx > 0) { m.attractorIdx -= 1; survivors.push(m); }
+    }
+    state.markers = survivors;
   }
   const step = currentSimStep();
   state.attractors.push({
     x: pos[0], y: pos[1], z: pos[2],
     chargeStep: step, releaseStep: -1, holdSteps: -1,
   });
-  state.pointerToAttractor.set(pointerId, state.attractors.length - 1);
+  const idx = state.attractors.length - 1;
+  state.pointerToAttractor.set(pointerId, idx);
+  spawnMarkersFor(idx, pos[0], pos[1], pos[2]);
 }
 
 function moveAttractor(pointerId: number, pos: number[]): void {
@@ -587,6 +622,74 @@ function releaseAttractor(pointerId: number): void {
   const step = currentSimStep();
   a.releaseStep = step;
   a.holdSteps = Math.max(1, step - a.chargeStep); // min 1 step to avoid zero-duration divide
+}
+
+// ─── MARKER PARTICLES (diegetic attractor indicator) ────────────────────────────
+// [LAW:one-source-of-truth] Markers are a flat pool keyed by parent attractor index. Lifecycle mirrors
+// the attractor's: spawnMarkersFor on createAttractor, reindexed on pruneAttractors, integrated each
+// frame via tickMarkers. They render into the HDR scene so bloom carries them — no overlay pass.
+const MARKERS_PER_ATTRACTOR = 36;
+const MARKER_SPAWN_RADIUS = 0.22;
+const MARKER_ORBIT_SPEED = 1.1;
+
+function spawnMarkersFor(attractorIdx: number, x: number, y: number, z: number): void {
+  const tc = getThemeColors();
+  for (let i = 0; i < MARKERS_PER_ATTRACTOR; i++) {
+    // Uniform point on sphere via inverse-CDF of cos(theta).
+    const u = Math.random() * 2 - 1;
+    const phi = Math.random() * Math.PI * 2;
+    const s = Math.sqrt(1 - u * u);
+    const dx = s * Math.cos(phi), dy = u, dz = s * Math.sin(phi);
+    const r = MARKER_SPAWN_RADIUS * (0.6 + Math.random() * 0.8);
+    // Tangent vector: cross(radial, arbitrary up) then normalize. Yields orbital velocity.
+    let tx = -dz, ty = 0, tz = dx;
+    const tLen = Math.hypot(tx, ty, tz) || 1;
+    tx /= tLen; ty /= tLen; tz /= tLen;
+    const orbitSign = Math.random() < 0.5 ? -1 : 1;
+    const orbitSpeed = MARKER_ORBIT_SPEED * (0.7 + Math.random() * 0.6) * orbitSign;
+    state.markers.push({
+      x: x + dx * r, y: y + dy * r, z: z + dz * r,
+      vx: tx * orbitSpeed, vy: ty * orbitSpeed, vz: tz * orbitSpeed,
+      tintR: tc.accent[0], tintG: tc.accent[1], tintB: tc.accent[2],
+      seed: Math.random(),
+      attractorIdx,
+    });
+  }
+}
+
+function reindexMarkers(oldToNew: Map<number, number>): void {
+  const kept: Marker[] = [];
+  for (const m of state.markers) {
+    const newIdx = oldToNew.get(m.attractorIdx);
+    if (newIdx !== undefined) {
+      m.attractorIdx = newIdx;
+      kept.push(m);
+    }
+  }
+  state.markers = kept;
+}
+
+// [LAW:dataflow-not-control-flow] Marker integration is a straight-line pass: every marker gets a pull
+// from its parent attractor and a light global drag so orbits stay bounded. No branches skip work.
+function tickMarkers(dt: number): void {
+  if (state.markers.length === 0) return;
+  const attractors = state.attractors;
+  const softSq = 0.04; // softening squared — matches the visual scale of the well
+  // Drag always dissipates regardless of sign(dt) — otherwise reverse play amplifies velocity.
+  const drag = Math.exp(-0.6 * Math.abs(dt));
+  for (const m of state.markers) {
+    const a = attractors[m.attractorIdx];
+    if (!a) continue; // safety; prune should keep these in sync
+    const rx = a.x - m.x, ry = a.y - m.y, rz = a.z - m.z;
+    const r2 = rx * rx + ry * ry + rz * rz + softSq;
+    const inv = 1 / Math.sqrt(r2);
+    const pull = 3.0 * inv * inv; // ~1/r² — mild spring-ish
+    m.vx += rx * inv * pull * dt;
+    m.vy += ry * inv * pull * dt;
+    m.vz += rz * inv * pull * dt;
+    m.vx *= drag; m.vy *= drag; m.vz *= drag;
+    m.x += m.vx * dt; m.y += m.vy * dt; m.z += m.vz * dt;
+  }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -817,7 +920,7 @@ const postFx: PostFxState = {
   downsampleParams: [],
   upsampleParams: [],
   compositeBGs: [],
-  compositeParams: new Float32Array(148), // 20 header + 32 × 4 attractor slots; matches 592-byte UBO
+  compositeParams: new Float32Array(16), // 64-byte UBO: 5 fx scalars + pads + primary vec3 + accent vec3
 };
 const HDR_FORMAT: GPUTextureFormat = 'rgba16float';
 const BLOOM_LEVELS = 3; // 5 mips made the largest blur radius half-screen, fusing dense clusters into a giant white blob.
@@ -895,12 +998,12 @@ function initPostFx(): void {
     postFx.upsampleUBO.push(device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST }));
   }
   // [LAW:one-source-of-truth] Composite UBO size must match post.composite.wgsl CompositeParams:
-  // 80 bytes of header + 32 × 16-byte ReticleAttractor = 592 bytes.
-  postFx.compositeUBO = device.createBuffer({ size: 592, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+  // 5 fx scalars + 3 pads = 32 bytes, + vec3 primary + pad + vec3 accent + pad = 64 bytes total.
+  postFx.compositeUBO = device.createBuffer({ size: 64, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
 
   // Pre-allocate staging arrays — reused every frame instead of allocating new Float32Arrays.
   postFx.fadeParams = new Float32Array(4);
-  postFx.compositeParams = new Float32Array(148); // 20 header + 32 × 4 attractor slots
+  postFx.compositeParams = new Float32Array(16); // 64-byte composite UBO
   postFx.downsampleParams = [];
   postFx.upsampleParams = [];
   for (let i = 0; i < BLOOM_LEVELS; i++) {
@@ -1136,7 +1239,7 @@ async function initWebGPU(): Promise<boolean> {
   device.lost.then((info) => {
     logError('webgpu:device-lost', new Error(info.message), `reason=${info.reason}`);
     if (info.reason !== 'destroyed') {
-      initWebGPU().then(ok => { if (ok) { initGrid(); initXrUi(); ensureSimulation(); requestAnimationFrame(frame); } });
+      initWebGPU().then(ok => { if (ok) { initGrid(); ensureSimulation(); requestAnimationFrame(frame); } });
     }
   });
 
@@ -1221,211 +1324,6 @@ function renderGrid(pass: GPURenderPassEncoder, aspect: number, viewIndex = 0): 
   pass.setPipeline(gridPipeline);
   pass.setBindGroup(0, gridBGs[viewIndex]);
   pass.draw(30);
-}
-
-
-// ═══ XR UI PANEL RENDERER ═══
-// [LAW:one-source-of-truth] Panel layout constants live here; positions and widths
-// are mirrored in src/shaders/xr.ui.wgsl. Hit-test half-extents (e.g. GRAB_HALF_H)
-// are intentionally larger than the rendered SDF extents for easier targeting.
-const XR_UI_PANEL_CENTER: [number, number, number] = [0, -0.4, -3.5];
-const XR_UI_PANEL_SIZE: [number, number] = [1.2, 0.55];
-const XR_UI_BTN_Y = 0.16;
-const XR_UI_BTN_HALF_W = 0.18;  // wide enough for chevron + label side-by-side
-const XR_UI_BTN_HALF_H = 0.11;
-const XR_UI_PREV_X_FRAC = -0.30;  // aspect-relative
-const XR_UI_NEXT_X_FRAC =  0.30;
-const XR_UI_SLIDER_Y = -0.20;
-const XR_UI_SLIDER_HALF_H = 0.05;
-const XR_UI_SLIDER_HALF_W_FRAC = 0.42; // aspect-relative
-// Grab handle — thin pill at the bottom of the panel for repositioning.
-const XR_UI_GRAB_Y = -0.40;
-const XR_UI_GRAB_HALF_W = 0.10;
-const XR_UI_GRAB_HALF_H = 0.035;
-
-// Label atlas layout — single canvas with non-uniform sub-rects so each label's
-// aspect matches the panel rect it will be sampled into (no squishing):
-//   [0.00 .. 0.25] PREV   — sub-rect 256×128, aspect 2:1 (matches button label)
-//   [0.25 .. 0.50] NEXT   — sub-rect 256×128, aspect 2:1
-//   [0.50 .. 0.82] slider — sub-rect 328×128, aspect ~2.6:1 (matches slider label)
-//   [0.82 .. 1.00] FPS    — sub-rect 184×128, aspect ~1.4:1 (small stats readout)
-// u-ranges are mirrored in src/shaders/xr.ui.wgsl.
-const XR_UI_LABEL_CANVAS_W = 1024;
-const XR_UI_LABEL_CANVAS_H = 128;
-const XR_UI_LABEL_FONT_FAMILY = '-apple-system, BlinkMacSystemFont, "Segoe UI", "Helvetica Neue", sans-serif';
-
-let xrUiPipeline!: GPURenderPipeline;
-let xrUiBGs!: GPUBindGroup[];
-let xrUiCameraBuffer!: GPUBuffer;
-let xrUiParamsBuffer!: GPUBuffer;
-let xrUiLabelCanvas!: HTMLCanvasElement;
-let xrUiLabelCtx!: CanvasRenderingContext2D;
-let xrUiLabelTexture!: GPUTexture;
-let xrUiLabelSampler!: GPUSampler;
-let xrUiLabelCurrentMode: SimMode | null = null;
-
-function initXrUi() {
-  xrUiCameraBuffer?.destroy();
-  xrUiParamsBuffer?.destroy();
-  xrUiLabelTexture?.destroy();
-
-  xrUiCameraBuffer = device.createBuffer({ size: CAMERA_STRIDE * 2, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-  // UIParams layout (48 bytes): center.xyz, _pad, sizeX, sizeY, sliderValue, hover,
-  //                             hitX, hitY, hitActive, _pad2
-  xrUiParamsBuffer = device.createBuffer({ size: 48, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-
-  // Canvas used once per mode change to rasterize labels.
-  if (!xrUiLabelCanvas) {
-    xrUiLabelCanvas = document.createElement('canvas');
-    xrUiLabelCanvas.width = XR_UI_LABEL_CANVAS_W;
-    xrUiLabelCanvas.height = XR_UI_LABEL_CANVAS_H;
-    xrUiLabelCtx = xrUiLabelCanvas.getContext('2d')!;
-  }
-  xrUiLabelTexture = device.createTexture({
-    size: [XR_UI_LABEL_CANVAS_W, XR_UI_LABEL_CANVAS_H],
-    format: 'rgba8unorm',
-    usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.RENDER_ATTACHMENT,
-  });
-  xrUiLabelSampler = device.createSampler({
-    magFilter: 'linear',
-    minFilter: 'linear',
-  });
-  xrUiLabelCurrentMode = null; // force first render to upload
-
-  const uiModule = createShaderModuleChecked('xr.ui', SHADER_XR_UI);
-
-  const uiBGL = device.createBindGroupLayout({
-    entries: [
-      { binding: 0, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
-      { binding: 1, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
-      { binding: 2, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
-      { binding: 3, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'filtering' } },
-    ]
-  });
-
-  xrUiPipeline = device.createRenderPipeline({
-    layout: device.createPipelineLayout({ bindGroupLayouts: [uiBGL] }),
-    vertex: { module: uiModule, entryPoint: 'vs_main' },
-    fragment: {
-      module: uiModule, entryPoint: 'fs_main',
-      targets: [{
-        format: renderTargetFormat,
-        blend: {
-          color: { srcFactor: 'src-alpha', dstFactor: 'one-minus-src-alpha', operation: 'add' },
-          alpha: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha', operation: 'add' },
-        }
-      }]
-    },
-    primitive: { topology: 'triangle-list' },
-    // Depth-test disabled — the panel always renders on top of the sim.
-    depthStencil: { format: 'depth24plus', depthWriteEnabled: false, depthCompare: 'always' },
-    multisample: { count: renderSampleCount },
-  });
-
-  xrUiBGs = [0, 1].map(vi => device.createBindGroup({ layout: uiBGL, entries: [
-    { binding: 0, resource: { buffer: xrUiCameraBuffer, offset: vi * CAMERA_STRIDE, size: CAMERA_SIZE } },
-    { binding: 1, resource: { buffer: xrUiParamsBuffer } },
-    { binding: 2, resource: xrUiLabelTexture.createView() },
-    { binding: 3, resource: xrUiLabelSampler },
-  ]}));
-}
-
-// Draw a single label into a sub-rect, auto-shrinking the font until the text
-// fits with comfortable padding. Keeps long labels like "GRAVITY" from clipping.
-function drawXrUiLabel(
-  ctx: CanvasRenderingContext2D,
-  text: string,
-  rectX: number,
-  rectY: number,
-  rectW: number,
-  rectH: number,
-): void {
-  const maxTextW = rectW * 0.82;
-  const maxTextH = rectH * 0.75;
-  let fontPx = Math.floor(maxTextH);
-  ctx.font = `bold ${fontPx}px ${XR_UI_LABEL_FONT_FAMILY}`;
-  while (fontPx > 12 && ctx.measureText(text).width > maxTextW) {
-    fontPx -= 2;
-    ctx.font = `bold ${fontPx}px ${XR_UI_LABEL_FONT_FAMILY}`;
-  }
-  ctx.fillText(text, rectX + rectW / 2, rectY + rectH / 2);
-}
-
-// Rasterize label strings to the canvas and upload to the label texture.
-// Redraws when mode changes or FPS updates (once per second).
-let xrUiLastFps = -1;
-function updateXrUiLabels(mode: SimMode): void {
-  const fpsChanged = currentFps !== xrUiLastFps;
-  const modeChanged = xrUiLabelCurrentMode !== mode;
-  if (!modeChanged && !fpsChanged) return;
-  xrUiLabelCurrentMode = mode;
-  xrUiLastFps = currentFps;
-  const ctx = xrUiLabelCtx;
-  const w = XR_UI_LABEL_CANVAS_W;
-  const h = XR_UI_LABEL_CANVAS_H;
-  ctx.clearRect(0, 0, w, h);
-  ctx.fillStyle = 'white';
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'middle';
-
-  // Sub-rects (matching LABEL_*_U0/U1 in xr.ui.wgsl):
-  //   PREV:   [0.00w .. 0.25w]  → 256×128
-  //   NEXT:   [0.25w .. 0.50w]  → 256×128
-  //   SLIDER: [0.50w .. 0.82w]  → 328×128
-  //   FPS:    [0.82w .. 1.00w]  → 184×128
-  const quarter = w / 4;
-  const sliderEnd = Math.floor(w * 0.82);
-  const sliderW = sliderEnd - quarter * 2;
-  const fpsX = sliderEnd;
-  const fpsW = w - sliderEnd;
-  drawXrUiLabel(ctx, 'PREV', 0,             0, quarter,  h);
-  drawXrUiLabel(ctx, 'NEXT', quarter,       0, quarter,  h);
-  drawXrUiLabel(ctx, XR_UI_SLIDER_DEFS[mode].label.toUpperCase(),
-                      quarter * 2,   0, sliderW, h);
-  drawXrUiLabel(ctx, `${currentFps} FPS`, fpsX, 0, fpsW, h);
-
-  device.queue.copyExternalImageToTexture(
-    { source: xrUiLabelCanvas },
-    { texture: xrUiLabelTexture },
-    [w, h]
-  );
-}
-
-function xrUiHoverAsFloat(): number {
-  switch (xrUiState.hover) {
-    case 'prev':   return 1.0;
-    case 'next':   return 2.0;
-    case 'slider': return 3.0;
-    case 'grab':   return 4.0;
-    default:       return 0.0;
-  }
-}
-
-function renderXrUi(pass: GPURenderPassEncoder, aspect: number, viewIndex = 0): void {
-  // Rasterize labels on mode change (no-op otherwise).
-  updateXrUiLabels(state.mode);
-
-  device.queue.writeBuffer(xrUiCameraBuffer, viewIndex * CAMERA_STRIDE, getCameraUniformData(aspect));
-  // Only write params once per frame (both eyes see the same UI state).
-  if (viewIndex === 0) {
-    const data = new Float32Array(12);
-    data[0] = XR_UI_PANEL_CENTER[0];
-    data[1] = XR_UI_PANEL_CENTER[1];
-    data[2] = XR_UI_PANEL_CENTER[2];
-    data[3] = 0; // _pad1
-    data[4] = XR_UI_PANEL_SIZE[0];
-    data[5] = XR_UI_PANEL_SIZE[1];
-    data[6] = getXrSliderNormalized();
-    data[7] = xrUiHoverAsFloat();
-    data[8]  = xrUiState.lastHitPx;
-    data[9]  = xrUiState.lastHitPy;
-    data[10] = xrUiState.lastHitActive ? 1.0 : 0.0;
-    data[11] = 0; // _pad2
-    device.queue.writeBuffer(xrUiParamsBuffer, 0, data);
-  }
-  pass.setPipeline(xrUiPipeline);
-  pass.setBindGroup(0, xrUiBGs[viewIndex]);
-  pass.draw(6);
 }
 
 
@@ -1597,22 +1495,9 @@ function createPhysicsSimulation() {
   // [LAW:one-source-of-truth] N-body orbit shaping constants live together so position thickness and velocity tilt stay in sync.
   const DISK_THICKNESS = 0.2;
   const VERTICAL_DRIFT = 0.18;
-  // [LAW:one-source-of-truth] Massive-body seeding lives here so orbital structure and tracer distribution share one initialization model.
-  // Source bodies drive the O(N*S) force loop — cap S to keep high particle counts interactive.
-  const BIG_BODY_COUNT = Math.min(count, Math.max(1, Math.round(count * 0.03)));
-  const MEDIUM_BODY_COUNT = Math.min(count - BIG_BODY_COUNT, Math.max(1, Math.round(count * 0.1)));
-  const MASSIVE_BODY_COUNT = Math.min(BIG_BODY_COUNT + MEDIUM_BODY_COUNT, 8192);
-  const CORE_BODY_MASS = 2.0;
-  const BIG_BODY_MASS_MIN = 0.8;
-  const BIG_BODY_MASS_MAX = 1.8;
-  const MEDIUM_BODY_MASS_MIN = 0.3;
-  const MEDIUM_BODY_MASS_MAX = 0.9;
-  const BIG_BODY_RADIUS_MIN = 0.2;
-  const BIG_BODY_RADIUS_MAX = 2.5;
-  const MEDIUM_BODY_RADIUS_MIN = 0.5;
-  const MEDIUM_BODY_RADIUS_MAX = 4.0;
-  const BIG_BODY_HEIGHT = 0.12;
-  const MEDIUM_BODY_HEIGHT = 0.2;
+  // PM gravity is uniform across all particles — no source/tracer distinction.
+  // All particles deposit mass AND feel force from the Poisson potential, so
+  // the old "cap N² cost with 3% heavy sources" machinery is gone.
   // [LAW:one-source-of-truth] Circular velocity includes self-gravity + dark matter (halo + disk).
   // This is the single formula that determines whether particles start in equilibrium.
   const haloM = state.physics.haloMass ?? 5.0;
@@ -1635,75 +1520,22 @@ function createPhysicsSimulation() {
     const v2disk = diskM * r2 / (diskD2 * Math.sqrt(diskD2));
     return v2halo + v2disk;
   }
-  const BIG_BODY_SWIRL = 0.6;    // fallback for non-spiral distributions
-  const MEDIUM_BODY_SWIRL = 0.6;
 
   const initData = new Float32Array(count * 12);
   const dist = state.physics.distribution;
   const orbitalNormal = normalize3([0.18, 1.0, -0.12]);
   const orbitalTangent = normalize3(cross3([0, 1, 0], orbitalNormal));
   const orbitalBitangent = cross3(orbitalNormal, orbitalTangent);
+  // Uniform particle mass — total mass of the simulation = 1.0 regardless of
+  // count. Simpler and more consistent than the old 3%/10%/87% big/medium/tracer
+  // triad. Per-preset dynamics adjust via the G slider; .7 handles tuning.
+  const PARTICLE_MASS = 1.0 / count;
   for (let i = 0; i < count; i++) {
     const off = i * 12;
     let x, y, z, vx = 0, vy = 0, vz = 0;
-    let mass = 0.0;
-    const isCoreBody = i === 0;
-    const isBigBody = i < BIG_BODY_COUNT;
-    const isMediumBody = i >= BIG_BODY_COUNT && i < MASSIVE_BODY_COUNT;
-    if (isCoreBody) {
-      x = 0; y = 0; z = 0; vx = 0; vy = 0; vz = 0;
-      mass = CORE_BODY_MASS;
-    } else if (isBigBody || isMediumBody) {
-      if (dist === 'spiral') {
-        // Massive bodies follow the same exponential disk as tracers.
-        // Same profile, same circular velocities, just heavier.
-        const LAMBDA_M = 5.0;
-        const SCALE_M = 3.5;
-        const r_m = Math.exp(-LAMBDA_M * Math.random()) * SCALE_M;
-        const angle_m = Math.random() * Math.PI * 2;
-        const h_m = (Math.random() - 0.5) * 0.2;
-        x = orbitalTangent[0]*Math.cos(angle_m)*r_m + orbitalBitangent[0]*Math.sin(angle_m)*r_m + orbitalNormal[0]*h_m;
-        y = orbitalTangent[1]*Math.cos(angle_m)*r_m + orbitalBitangent[1]*Math.sin(angle_m)*r_m + orbitalNormal[1]*h_m;
-        z = orbitalTangent[2]*Math.cos(angle_m)*r_m + orbitalBitangent[2]*Math.sin(angle_m)*r_m + orbitalNormal[2]*h_m;
-        const intR_m = (-1/LAMBDA_M) * Math.exp(-LAMBDA_M * r_m / SCALE_M) + (1/LAMBDA_M);
-        const intMax_m = (-1/LAMBDA_M) * Math.exp(-LAMBDA_M) + (1/LAMBDA_M);
-        const avgM = ((BIG_BODY_MASS_MIN+BIG_BODY_MASS_MAX+MEDIUM_BODY_MASS_MIN+MEDIUM_BODY_MASS_MAX)/4);
-        const refTotalM = 1000 * avgM;
-        const Geff_m = (state.physics.G ?? 1.5) * 0.001 / Math.sqrt(Math.max(1, MASSIVE_BODY_COUNT) / 1000);
-        // Circular velocity from enclosed particle mass + dark matter potential.
-        const vC_m = Math.sqrt(Math.max(0.001, Geff_m * (intR_m/intMax_m) * refTotalM / Math.max(r_m, 0.05) + darkMatterVcirc2(r_m)));
-        vx = (-Math.sin(angle_m)*orbitalTangent[0] + Math.cos(angle_m)*orbitalBitangent[0]) * vC_m;
-        vy = (-Math.sin(angle_m)*orbitalTangent[1] + Math.cos(angle_m)*orbitalBitangent[1]) * vC_m;
-        vz = (-Math.sin(angle_m)*orbitalTangent[2] + Math.cos(angle_m)*orbitalBitangent[2]) * vC_m;
-        mass = isBigBody
-          ? BIG_BODY_MASS_MIN + Math.pow(Math.random(), 0.4) * (BIG_BODY_MASS_MAX - BIG_BODY_MASS_MIN)
-          : MEDIUM_BODY_MASS_MIN + Math.pow(Math.random(), 0.7) * (MEDIUM_BODY_MASS_MAX - MEDIUM_BODY_MASS_MIN);
-      } else {
-        // Standard massive body placement for non-spiral presets
-        const bodyIndex = isBigBody ? i - 1 : i - BIG_BODY_COUNT;
-        const bodyCount = isBigBody ? Math.max(1, BIG_BODY_COUNT - 1) : MEDIUM_BODY_COUNT;
-        const bodyProgress = bodyCount > 1 ? bodyIndex / (bodyCount - 1) : 0.5;
-        const radiusMin = isBigBody ? BIG_BODY_RADIUS_MIN : MEDIUM_BODY_RADIUS_MIN;
-        const radiusMax = isBigBody ? BIG_BODY_RADIUS_MAX : MEDIUM_BODY_RADIUS_MAX;
-        const radiusJitter = isBigBody ? 0.05 : 0.1;
-        const radius = radiusMin + (radiusMax - radiusMin) * bodyProgress + (Math.random() - 0.5) * radiusJitter;
-        const heightScale = isBigBody ? BIG_BODY_HEIGHT : MEDIUM_BODY_HEIGHT;
-        const heightOffset = (Math.random() - 0.5) * heightScale;
-        const angleOffset = isBigBody ? Math.PI * 0.18 : Math.PI / Math.max(3, MEDIUM_BODY_COUNT);
-        const angle = (bodyIndex / Math.max(1, bodyCount)) * Math.PI * 2 + angleOffset;
-        x = orbitalTangent[0]*Math.cos(angle)*radius + orbitalBitangent[0]*Math.sin(angle)*radius + orbitalNormal[0]*heightOffset;
-        y = orbitalTangent[1]*Math.cos(angle)*radius + orbitalBitangent[1]*Math.sin(angle)*radius + orbitalNormal[1]*heightOffset;
-        z = orbitalTangent[2]*Math.cos(angle)*radius + orbitalBitangent[2]*Math.sin(angle)*radius + orbitalNormal[2]*heightOffset;
-        const swirl = isBigBody ? BIG_BODY_SWIRL : MEDIUM_BODY_SWIRL;
-        const speed = swirl / Math.sqrt(radius + 0.05);
-        vx = (-Math.sin(angle)*orbitalTangent[0] + Math.cos(angle)*orbitalBitangent[0])*speed;
-        vy = (-Math.sin(angle)*orbitalTangent[1] + Math.cos(angle)*orbitalBitangent[1])*speed;
-        vz = (-Math.sin(angle)*orbitalTangent[2] + Math.cos(angle)*orbitalBitangent[2])*speed;
-        mass = isBigBody
-          ? BIG_BODY_MASS_MIN + Math.pow(Math.random(), 0.4) * (BIG_BODY_MASS_MAX - BIG_BODY_MASS_MIN)
-          : MEDIUM_BODY_MASS_MIN + Math.pow(Math.random(), 0.7) * (MEDIUM_BODY_MASS_MAX - MEDIUM_BODY_MASS_MIN);
-      }
-    } else if (dist === 'spiral') {
+    let mass = PARTICLE_MASS;
+    const tracerFrac = i / count;
+    if (dist === 'spiral') {
       // Smooth exponential disk — spiral arms emerge from N-body dynamics, not seeded.
       // Based on barnes-hut approach: exponential radial profile with enclosed-mass
       // circular velocities. Pure gravity + tidal perturbation creates arms via
@@ -1711,8 +1543,6 @@ function createPhysicsSimulation() {
       const LAMBDA = 5.0;           // exponential steepness (higher = more concentrated)
       const DISK_SCALE = 3.5;       // max radius
       const HALO_FRAC_S = 0.04;
-
-      const tracerFrac = (i - MASSIVE_BODY_COUNT) / Math.max(1, count - MASSIVE_BODY_COUNT);
 
       if (tracerFrac < HALO_FRAC_S) {
         // Spherical halo
@@ -1735,13 +1565,11 @@ function createPhysicsSimulation() {
         const intMax = (-1/LAMBDA) * Math.exp(-LAMBDA) + (1/LAMBDA);
         const massFrac = intR / intMax;
 
-        // Circular velocity from enclosed mass. Use a fixed reference mass (1000 sources * avgMass)
-        // so that vCirc is independent of particle count — the G_eff normalization already handles scaling.
-        const REF_SOURCES = 1000;
-        const avgMass = ((BIG_BODY_MASS_MIN + BIG_BODY_MASS_MAX) / 2 + (MEDIUM_BODY_MASS_MIN + MEDIUM_BODY_MASS_MAX) / 2) / 2;
-        const refTotalMass = REF_SOURCES * avgMass;
-        const enclosedMass = massFrac * refTotalMass;
-        const Geff = (state.physics.G ?? 1.5) * 0.001 / Math.sqrt(Math.max(1, MASSIVE_BODY_COUNT) / 1000);
+        // Circular velocity from enclosed mass. Reference total = 1.0 (all
+        // particles have PARTICLE_MASS = 1/count, so total mass = 1 regardless
+        // of N). PM gravity applies uniformly — no source-cap normalization.
+        const enclosedMass = massFrac * 1.0;
+        const Geff = (state.physics.G ?? 0.3) * 0.001;
         // Circular velocity from enclosed particle mass + dark matter potential.
         const vCirc = Math.sqrt(Math.max(0.001, Geff * enclosedMass / Math.max(r, 0.05) + darkMatterVcirc2(r)));
 
@@ -1763,7 +1591,6 @@ function createPhysicsSimulation() {
       const angle = Math.random() * Math.PI * 2;
       const r = Math.sqrt(Math.random()) * 4.5;
       mass = Math.pow(Math.random(), 3.0) * 0.8;
-      const tracerFrac = (i - MASSIVE_BODY_COUNT) / Math.max(1, count - MASSIVE_BODY_COUNT);
       if (tracerFrac < 0.03) {
         const h = (Math.random() - 0.5) * DISK_THICKNESS * 0.5;
         x = orbitalTangent[0]*Math.cos(angle)*r + orbitalBitangent[0]*Math.sin(angle)*r + orbitalNormal[0]*h;
@@ -1928,6 +1755,72 @@ function createPhysicsSimulation() {
     initData[off + 10] = 0;
   }
 
+  // ── PM (Particle-Mesh) gravity ──────────────────────────────────────────────
+  // Solver pipeline: CIC deposit → mean-subtract → V-cycle → CIC interpolate.
+  // [LAW:one-source-of-truth] PM_DOMAIN_HALF/SIZE must match DOMAIN_HALF/SIZE
+  // in nbody.compute.wgsl so the integrator's periodic wrap and the PM grid
+  // span the same volume.
+  //
+  // Tuning (shader-physics-brr.7):
+  //   PM_V_CYCLE_COUNT = 1
+  //     The V=4 figure assumed a cold solve (residual entering = 100%). This
+  //     simulation warm-starts: pmPotential[0] is preserved across frames
+  //     (see V-cycle loop, where only levels 1+ are zeroed each cycle), so
+  //     residual entering each frame is just the perturbation from one frame's
+  //     density change — typically ~10% since particles move <1 cell/frame at
+  //     dt≈0.016. One V-cycle then drops to ~1%, equivalent to the cold V=4
+  //     target. Vision Pro at 90 Hz has an 11 ms budget; V=4 was consuming
+  //     >50 ms by itself (~10 FPS in headset). Verify residual stays bounded
+  //     with __pmMaxResidual() and reversibility with __pmReversibilityTest().
+  //   PM_SMOOTH_PRE = PM_SMOOTH_POST = 2
+  //     Red-black GS converges ~2× faster per pass than Jacobi; 2 sweeps each
+  //     side of the V gives good damping of high-frequency error. 1 sweep is
+  //     usable but residual rises.
+  //   PM_FIXED_POINT_SCALE = 65536 (2¹⁶)
+  //     PARTICLE_MASS = 1/count ≈ 1.25e-5 at N=80k → per-particle deposit =
+  //     65536 × 1.25e-5 ≈ 0.82 integer units. Mean cell sum over all 2.1M
+  //     cells ≈ 65536 (total mass × scale) — 5 orders below u32 overflow.
+  //   DEFAULTS.physics.G = 0.3
+  //     First-cut after removing the old √(MASSIVE_BODY_COUNT/1000) ≈ 2.86
+  //     normalization. Sweep via the UI slider and __pmReversibilityTest to
+  //     verify dynamics are stable at your preferred preset.
+  //
+  // Verification: __pmReversibilityTest(1000) → maxErr < 0.01 world units.
+  // Values much larger indicate a sampling mismatch (pos vs posHalf) or a
+  // non-reversible operation slipped in somewhere.
+  const PM_GRID_RES = 128;                          // 128³ cells at level 0
+  const PM_DOMAIN_HALF = 64.0;                      // matches DOMAIN_HALF in nbody.compute.wgsl (sized to visual room)
+  const PM_DOMAIN_SIZE = PM_DOMAIN_HALF * 2;        // = 128.0
+  const PM_CELL_SIZE = PM_DOMAIN_SIZE / PM_GRID_RES; // = 1.0 world units per cell
+  const PM_FIXED_POINT_SCALE = 65536;               // 2^16 — u32 atomic mass accumulation
+  const PM_MULTIGRID_LEVELS = 6;                    // 128³, 64³, 32³, 16³, 8³, 4³
+  const PM_V_CYCLE_COUNT = 1;                       // V-cycles per Poisson solve (warm-started; see header)
+  const PM_SMOOTH_PRE = 2;                          // red-black GS passes before restriction
+  const PM_SMOOTH_POST = 2;                         // red-black GS passes after prolongation
+  // V-cycle phase split: half the work runs each frame to keep frame time
+  // even (vs. doing the full cycle every Nth frame, which produces a heavy/
+  // light alternation that misses the 90 Hz Vision Pro budget on heavy
+  // frames). One full V-cycle spans 2 simSteps:
+  //   simStep & 1 == 0 → DESCENT   (pre-smooth + residual + restrict, l=0..4)
+  //   simStep & 1 == 1 → ASCENT    (coarsest sweeps + prolong + post-smooth)
+  // Intermediate state (pmRhs[1..5], pmPotential[1..5]) naturally persists
+  // across the two halves in dedicated per-level buffers — no extra plumbing.
+  // Descent and ascent each touch ~8M level-0 cells/frame (4 smooth sweeps
+  // each side), so per-frame GPU load is ~50% of the un-split V-cycle and
+  // worst-case frame time is matched to average. Trade-off: pmPotential[0]
+  // is fully resolved only on odd simSteps; even simSteps see a partially
+  // descended (warm-start + pre-smooth) field. The interpolate pass reads it
+  // every frame — both halves are monotonically improving, so the lag is
+  // visually imperceptible. Reversibility caveat (see __pmReversibilityTest):
+  // intermediate buffers are history-dependent, so fwd/rev paths leave them
+  // in slightly different states at the same simStep; maxErr is larger than
+  // V=1 alone. Acceptable while debugging perf; revisit if rewinds drift.
+  // Silence noUnusedLocals until downstream tickets (.3 deposition, .4
+  // multigrid, .5 force sampling) reference these. Landing the canonical
+  // values now establishes the contract; later tickets only tune usage.
+  void PM_CELL_SIZE; void PM_FIXED_POINT_SCALE;
+  void PM_V_CYCLE_COUNT; void PM_SMOOTH_PRE; void PM_SMOOTH_POST;
+
   const bufferA = device.createBuffer({ size: bodyBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC, mappedAtCreation: true });
   new Float32Array(bufferA.getMappedRange()).set(initData);
   bufferA.unmap();
@@ -1937,6 +1830,295 @@ function createPhysicsSimulation() {
   // 96 bytes of header + 32 × 16-byte Attractor = 608 bytes total.
   const paramsBuffer = device.createBuffer({ size: 608, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
   const cameraBuffer = device.createBuffer({ size: CAMERA_STRIDE * 2, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+  // [LAW:one-source-of-truth] Motion-blur parameter owned by the sim. Written by setBlurTime() per frame
+  // (non-zero only during skip). The shader's capsule geometry collapses to a point when blurTime=0.
+  const blurBuffer = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+  const blurScratch = new Float32Array(4);
+  device.queue.writeBuffer(blurBuffer, 0, blurScratch); // init to 0 so the first pre-skip frames render circles
+
+  // PM grid buffers. All live at multigrid-level granularity — level 0 is the
+  // full 128³; each successive level halves the resolution. Total ~36 MB for
+  // the whole pyramid (density + potential + residual + per-particle force +
+  // mean scratch). [LAW:single-enforcer] All PM allocations go here; destroy()
+  // below is the sole cleanup site.
+  const PM_BUF_USAGE = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST;
+  const pmLevel0Cells = PM_GRID_RES * PM_GRID_RES * PM_GRID_RES;
+  const pmDensityU32 = device.createBuffer({ size: pmLevel0Cells * 4, usage: PM_BUF_USAGE });
+  const pmDensityF32 = device.createBuffer({ size: pmLevel0Cells * 4, usage: PM_BUF_USAGE });
+  const pmPotential: GPUBuffer[] = [];
+  const pmResidual: GPUBuffer[] = [];
+  for (let l = 0; l < PM_MULTIGRID_LEVELS; l++) {
+    const sizeL = PM_GRID_RES >> l;
+    const bytesL = sizeL * sizeL * sizeL * 4;
+    pmPotential.push(device.createBuffer({ size: bytesL, usage: PM_BUF_USAGE }));
+    pmResidual.push(device.createBuffer({ size: bytesL, usage: PM_BUF_USAGE }));
+  }
+  // Per-particle force buffer: vec4<f32> per particle (16-byte alignment; xyz used, w pad).
+  const pmForce = device.createBuffer({ size: count * 16, usage: PM_BUF_USAGE });
+  // Mean density scratch (single f32 + padding to 16 bytes).
+  const pmMeanScratch = device.createBuffer({ size: 16, usage: PM_BUF_USAGE });
+
+  // Coarse-level RHS buffers for the V-cycle (restricted residuals).
+  // [LAW:one-source-of-truth] pmRho[l] is the sole RHS buffer at level l.
+  // Level 0 aliases pmDensityF32 (never overwritten); levels 1..5 are fresh
+  // allocations written by restrict and read by smoother/residual.
+  const pmRho: GPUBuffer[] = [pmDensityF32];
+  for (let l = 1; l < PM_MULTIGRID_LEVELS; l++) {
+    const sizeL = PM_GRID_RES >> l;
+    pmRho.push(device.createBuffer({ size: sizeL * sizeL * sizeL * 4, usage: PM_BUF_USAGE }));
+  }
+
+  // PM uniform params — 32 bytes, shared by deposit + reduce + convert pipelines.
+  // [LAW:one-source-of-truth] Single host-side uniform; both shader structs
+  // (pm.deposit.wgsl and pm.density_convert.wgsl) declare the identical layout.
+  const pmParamsBuffer = device.createBuffer({ size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+  const pmParamsData = new ArrayBuffer(32);
+  const pmParamsF32 = new Float32Array(pmParamsData);
+  const pmParamsU32 = new Uint32Array(pmParamsData);
+  // Pack fields that don't change frame-to-frame once; dt is rewritten each frame.
+  pmParamsU32[1] = count;                  // particle count
+  pmParamsU32[2] = PM_GRID_RES;            // gridRes
+  pmParamsF32[3] = PM_DOMAIN_HALF;         // domainHalf
+  pmParamsF32[4] = PM_CELL_SIZE;           // cellSize
+  pmParamsF32[5] = PM_FIXED_POINT_SCALE;   // fixedPointScale
+  pmParamsU32[6] = pmLevel0Cells;          // cellCount = gridRes³
+
+  // PM deposit pipeline: 1 read-only particle buffer + 1 atomic-u32 density + params.
+  const pmDepositModule = createShaderModuleChecked('pm.deposit', SHADER_PM_DEPOSIT);
+  const pmDepositBGL = device.createBindGroupLayout({
+    entries: [
+      { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
+      { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
+      { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
+    ]
+  });
+  const pmDepositPipeline = device.createComputePipeline({
+    layout: device.createPipelineLayout({ bindGroupLayouts: [pmDepositBGL] }),
+    compute: { module: pmDepositModule, entryPoint: 'main' }
+  });
+
+  // PM density convert pipelines (share one BGL + module; two entry points).
+  const pmConvertModule = createShaderModuleChecked('pm.density_convert', SHADER_PM_DENSITY_CONVERT);
+  const pmConvertBGL = device.createBindGroupLayout({
+    entries: [
+      { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
+      { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
+      { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
+      { binding: 3, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
+    ]
+  });
+  const pmConvertLayout = device.createPipelineLayout({ bindGroupLayouts: [pmConvertBGL] });
+  const pmReducePipeline = device.createComputePipeline({
+    layout: pmConvertLayout,
+    compute: { module: pmConvertModule, entryPoint: 'reduce' }
+  });
+  const pmConvertPipeline = device.createComputePipeline({
+    layout: pmConvertLayout,
+    compute: { module: pmConvertModule, entryPoint: 'convert' }
+  });
+  const pmConvertBG = device.createBindGroup({
+    layout: pmConvertBGL, entries: [
+      { binding: 0, resource: { buffer: pmDensityU32 } },
+      { binding: 1, resource: { buffer: pmDensityF32 } },
+      { binding: 2, resource: { buffer: pmMeanScratch } },
+      { binding: 3, resource: { buffer: pmParamsBuffer } },
+    ]
+  });
+
+  // Per-ping-pong deposit bind group: reads whichever body buffer is the
+  // current frame's input. Index matches the main compute's pingPong value —
+  // pmDepositBG[0] reads bufferA (pingPong=0 input), pmDepositBG[1] reads bufferB.
+  const pmDepositBG = [
+    device.createBindGroup({ layout: pmDepositBGL, entries: [
+      { binding: 0, resource: { buffer: bufferA } },
+      { binding: 1, resource: { buffer: pmDensityU32 } },
+      { binding: 2, resource: { buffer: pmParamsBuffer } },
+    ]}),
+    device.createBindGroup({ layout: pmDepositBGL, entries: [
+      { binding: 0, resource: { buffer: bufferB } },
+      { binding: 1, resource: { buffer: pmDensityU32 } },
+      { binding: 2, resource: { buffer: pmParamsBuffer } },
+    ]}),
+  ];
+
+  // Dev-only staging for window.__pmDumpDensity / __pmDumpPotential. 128³ × 4
+  // = 8 MB. Persistent allocation mirrors the existing diagStaging pattern.
+  const pmDensityStaging = device.createBuffer({
+    size: pmLevel0Cells * 4,
+    usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+  });
+  let pmDiagPending = false;
+
+  // ── Multigrid V-cycle pipelines (smooth / residual / restrict / prolong) ──
+  // [LAW:single-enforcer] All Poisson-solver pipelines declared here; the
+  // V-cycle driver in compute() is the sole dispatcher.
+  const pmSmoothModule   = createShaderModuleChecked('pm.smooth',   SHADER_PM_SMOOTH);
+  const pmResidualModule = createShaderModuleChecked('pm.residual', SHADER_PM_RESIDUAL);
+  const pmRestrictModule = createShaderModuleChecked('pm.restrict', SHADER_PM_RESTRICT);
+  const pmProlongModule  = createShaderModuleChecked('pm.prolong',  SHADER_PM_PROLONG);
+
+  const pmSmoothBGL = device.createBindGroupLayout({
+    entries: [
+      { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },          // phi (rw)
+      { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },// rho
+      { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
+    ]
+  });
+  const pmResidualBGL = device.createBindGroupLayout({
+    entries: [
+      { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },// phi
+      { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },// rho
+      { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },          // residual (rw)
+      { binding: 3, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
+    ]
+  });
+  const pmRestrictBGL = device.createBindGroupLayout({
+    entries: [
+      { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },// fine
+      { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },          // coarse (rw)
+      { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
+    ]
+  });
+  const pmProlongBGL = device.createBindGroupLayout({
+    entries: [
+      { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },// coarse
+      { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },          // fine (rw, accumulates)
+      { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
+    ]
+  });
+
+  const pmSmoothPipeline   = device.createComputePipeline({ layout: device.createPipelineLayout({ bindGroupLayouts: [pmSmoothBGL] }),   compute: { module: pmSmoothModule,   entryPoint: 'main' } });
+  const pmResidualPipeline = device.createComputePipeline({ layout: device.createPipelineLayout({ bindGroupLayouts: [pmResidualBGL] }), compute: { module: pmResidualModule, entryPoint: 'main' } });
+  const pmRestrictPipeline = device.createComputePipeline({ layout: device.createPipelineLayout({ bindGroupLayouts: [pmRestrictBGL] }), compute: { module: pmRestrictModule, entryPoint: 'main' } });
+  const pmProlongPipeline  = device.createComputePipeline({ layout: device.createPipelineLayout({ bindGroupLayouts: [pmProlongBGL] }),  compute: { module: pmProlongModule,  entryPoint: 'main' } });
+
+  // PM force interpolation — reads pmPotential[0] + current bodies, writes pmForce.
+  const pmInterpolateModule = createShaderModuleChecked('pm.interpolate', SHADER_PM_INTERPOLATE);
+  const pmInterpolateBGL = device.createBindGroupLayout({
+    entries: [
+      { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
+      { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
+      { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
+      { binding: 3, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
+    ]
+  });
+  const pmInterpolatePipeline = device.createComputePipeline({
+    layout: device.createPipelineLayout({ bindGroupLayouts: [pmInterpolateBGL] }),
+    compute: { module: pmInterpolateModule, entryPoint: 'main' }
+  });
+  // Per-ping-pong interpolate bind groups — read from whichever body buffer
+  // is the current frame's input (matches pmDepositBG indexing).
+  const pmInterpolateBG = [
+    device.createBindGroup({ layout: pmInterpolateBGL, entries: [
+      { binding: 0, resource: { buffer: bufferA } },
+      { binding: 1, resource: { buffer: pmPotential[0] } },
+      { binding: 2, resource: { buffer: pmForce } },
+      { binding: 3, resource: { buffer: pmParamsBuffer } },
+    ]}),
+    device.createBindGroup({ layout: pmInterpolateBGL, entries: [
+      { binding: 0, resource: { buffer: bufferB } },
+      { binding: 1, resource: { buffer: pmPotential[0] } },
+      { binding: 2, resource: { buffer: pmForce } },
+      { binding: 3, resource: { buffer: pmParamsBuffer } },
+    ]}),
+  ];
+
+
+  // Per-level uniform buffers, pre-populated at factory init. Each holds a
+  // tiny struct (16 bytes) specific to its shader:
+  //   smoothUniform[l][parity]  → { gridRes, parity, hSquared, fourPiG }
+  //   residualUniform[l]        → { gridRes, _pad, hSquared, fourPiG }
+  //   restrictUniform[l]        → { coarseGridRes, _pad×3 }   (for transition l → l+1)
+  //   prolongUniform[l]         → { fineGridRes, _pad×3 }     (for transition l+1 → l)
+  const PM_FOUR_PI_G = 4 * Math.PI * (state.physics.G ?? 0.3) * 0.001;
+  const pmSmoothUniform: GPUBuffer[][] = [];
+  const pmResidualUniform: GPUBuffer[] = [];
+  const pmRestrictUniform: GPUBuffer[] = [];   // index l → transition l → l+1
+  const pmProlongUniform: GPUBuffer[] = [];    // index l → transition l+1 → l
+  for (let l = 0; l < PM_MULTIGRID_LEVELS; l++) {
+    const sizeL = PM_GRID_RES >> l;
+    const hL = PM_DOMAIN_SIZE / sizeL;
+    const hSqL = hL * hL;
+    pmSmoothUniform.push([0, 1].map(parity => {
+      const buf = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+      const ab = new ArrayBuffer(16);
+      new Uint32Array(ab, 0, 2).set([sizeL, parity]);
+      new Float32Array(ab, 8, 2).set([hSqL, PM_FOUR_PI_G]);
+      device.queue.writeBuffer(buf, 0, ab);
+      return buf;
+    }));
+    {
+      const buf = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+      const ab = new ArrayBuffer(16);
+      new Uint32Array(ab, 0, 2).set([sizeL, 0]);
+      new Float32Array(ab, 8, 2).set([hSqL, PM_FOUR_PI_G]);
+      device.queue.writeBuffer(buf, 0, ab);
+      pmResidualUniform.push(buf);
+    }
+    if (l + 1 < PM_MULTIGRID_LEVELS) {
+      const coarseSize = PM_GRID_RES >> (l + 1);
+      {
+        const buf = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+        const ab = new ArrayBuffer(16);
+        new Uint32Array(ab, 0, 1).set([coarseSize]);
+        device.queue.writeBuffer(buf, 0, ab);
+        pmRestrictUniform.push(buf);
+      }
+      {
+        const buf = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+        const ab = new ArrayBuffer(16);
+        new Uint32Array(ab, 0, 1).set([sizeL]);  // fineGridRes for the transition l+1 → l
+        device.queue.writeBuffer(buf, 0, ab);
+        pmProlongUniform.push(buf);
+      }
+    }
+  }
+
+  // Per-level bind groups.
+  const pmSmoothBG: GPUBindGroup[][] = [];
+  const pmResidualBG: GPUBindGroup[] = [];
+  const pmRestrictBG: GPUBindGroup[] = [];   // transition l → l+1
+  const pmProlongBG: GPUBindGroup[] = [];    // transition l+1 → l
+  for (let l = 0; l < PM_MULTIGRID_LEVELS; l++) {
+    pmSmoothBG.push([0, 1].map(parity => device.createBindGroup({
+      layout: pmSmoothBGL, entries: [
+        { binding: 0, resource: { buffer: pmPotential[l] } },
+        { binding: 1, resource: { buffer: pmRho[l] } },
+        { binding: 2, resource: { buffer: pmSmoothUniform[l][parity] } },
+      ]
+    })));
+    pmResidualBG.push(device.createBindGroup({
+      layout: pmResidualBGL, entries: [
+        { binding: 0, resource: { buffer: pmPotential[l] } },
+        { binding: 1, resource: { buffer: pmRho[l] } },
+        { binding: 2, resource: { buffer: pmResidual[l] } },
+        { binding: 3, resource: { buffer: pmResidualUniform[l] } },
+      ]
+    }));
+    if (l + 1 < PM_MULTIGRID_LEVELS) {
+      pmRestrictBG.push(device.createBindGroup({
+        layout: pmRestrictBGL, entries: [
+          { binding: 0, resource: { buffer: pmResidual[l] } },
+          { binding: 1, resource: { buffer: pmRho[l + 1] } },
+          { binding: 2, resource: { buffer: pmRestrictUniform[l] } },
+        ]
+      }));
+      pmProlongBG.push(device.createBindGroup({
+        layout: pmProlongBGL, entries: [
+          { binding: 0, resource: { buffer: pmPotential[l + 1] } },
+          { binding: 1, resource: { buffer: pmPotential[l] } },
+          { binding: 2, resource: { buffer: pmProlongUniform[l] } },
+        ]
+      }));
+    }
+  }
+
+  // Workgroup counts per level (each shader uses @workgroup_size(4,4,4)).
+  const pmWgCount: number[] = [];
+  for (let l = 0; l < PM_MULTIGRID_LEVELS; l++) {
+    pmWgCount.push(Math.max(1, (PM_GRID_RES >> l) / 4));
+  }
+
   const computeModule = createShaderModuleChecked('nbody.compute', SHADER_NBODY_COMPUTE_EDIT || SHADER_NBODY_COMPUTE);
   const renderModule = createShaderModuleChecked('nbody.render', SHADER_NBODY_RENDER_EDIT || SHADER_NBODY_RENDER);
 
@@ -1945,6 +2127,7 @@ function createPhysicsSimulation() {
       { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
       { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
       { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
+      { binding: 3, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } }, // pmForce
     ]
   });
 
@@ -1987,6 +2170,8 @@ function createPhysicsSimulation() {
     entries: [
       { binding: 0, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: 'read-only-storage' } },
       { binding: 1, visibility: GPUShaderStage.VERTEX, buffer: { type: 'uniform' } },
+      { binding: 2, visibility: GPUShaderStage.VERTEX, buffer: { type: 'uniform' } },
+      { binding: 3, visibility: GPUShaderStage.VERTEX, buffer: { type: 'uniform' } },
     ]
   });
 
@@ -2015,21 +2200,103 @@ function createPhysicsSimulation() {
       { binding: 0, resource: { buffer: bufferA } },
       { binding: 1, resource: { buffer: bufferB } },
       { binding: 2, resource: { buffer: paramsBuffer } },
+      { binding: 3, resource: { buffer: pmForce } },
     ]}),
     device.createBindGroup({ layout: computeBGL, entries: [
       { binding: 0, resource: { buffer: bufferB } },
       { binding: 1, resource: { buffer: bufferA } },
       { binding: 2, resource: { buffer: paramsBuffer } },
+      { binding: 3, resource: { buffer: pmForce } },
     ]}),
   ];
+
+  // [LAW:one-source-of-truth] Render-side attractor field for particle HDR boost + marker rendering.
+  // 16-byte header (count u32 + pad) + 32 × 16-byte FieldAttractor = 528 bytes. Packed each render
+  // with log-normalized strength so the shader just does a linear gaussian sum.
+  const attractorFieldBuffer = device.createBuffer({ size: 528, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+  const attractorFieldData = new ArrayBuffer(528);
+  const attractorFieldF32 = new Float32Array(attractorFieldData);
+  const attractorFieldU32 = new Uint32Array(attractorFieldData);
 
   // renderBGs[viewIndex][pingPong]
   const renderBGs: GPUBindGroup[][] = [0, 1].map(vi =>
     [bufferA, bufferB].map(buf => device.createBindGroup({ layout: renderBGL, entries: [
       { binding: 0, resource: { buffer: buf } },
       { binding: 1, resource: { buffer: cameraBuffer, offset: vi * CAMERA_STRIDE, size: CAMERA_SIZE } },
+      { binding: 2, resource: { buffer: blurBuffer } },
+      { binding: 3, resource: { buffer: attractorFieldBuffer } },
     ]}))
   );
+
+  // ── MARKER PARTICLES: rendered into the HDR scene so bloom carries them ──
+  // [LAW:one-source-of-truth] Per-marker payload is 32 bytes: pos(12) + strength(4) + tint(12) + seed(4).
+  // Pool is sized to the hard cap (32 attractors × 36 markers) and re-uploaded each frame from state.markers.
+  const MARKER_POOL = ATTRACTOR_MAX * MARKERS_PER_ATTRACTOR;
+  const MARKER_STRIDE = 32;
+  const markerBuffer = device.createBuffer({ size: MARKER_POOL * MARKER_STRIDE, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+  const markerData = new Float32Array(MARKER_POOL * 8);
+
+  const markerModule = createShaderModuleChecked('markers.render', SHADER_MARKERS_RENDER);
+  const markerBGL = device.createBindGroupLayout({
+    entries: [
+      { binding: 0, visibility: GPUShaderStage.VERTEX, buffer: { type: 'read-only-storage' } },
+      { binding: 1, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
+    ]
+  });
+  const markerPipeline = device.createRenderPipeline({
+    layout: device.createPipelineLayout({ bindGroupLayouts: [markerBGL] }),
+    vertex: { module: markerModule, entryPoint: 'vs_main' },
+    fragment: {
+      module: markerModule, entryPoint: 'fs_main',
+      targets: [{
+        format: renderTargetFormat,
+        blend: {
+          color: { srcFactor: 'src-alpha', dstFactor: 'one', operation: 'add' },
+          alpha: { srcFactor: 'one', dstFactor: 'one', operation: 'add' },
+        }
+      }]
+    },
+    primitive: { topology: 'triangle-list' },
+    depthStencil: { format: 'depth24plus', depthWriteEnabled: false, depthCompare: 'always' },
+    multisample: { count: renderSampleCount },
+  });
+  const markerBGs: GPUBindGroup[] = [0, 1].map(vi => device.createBindGroup({
+    layout: markerBGL, entries: [
+      { binding: 0, resource: { buffer: markerBuffer } },
+      { binding: 1, resource: { buffer: cameraBuffer, offset: vi * CAMERA_STRIDE, size: CAMERA_SIZE } },
+    ]
+  }));
+
+  function renderMarkers(pass: GPURenderPassEncoder, viewIndex: number) {
+    const markers = state.markers;
+    const n = Math.min(markers.length, MARKER_POOL);
+    if (n === 0) return;
+    // [LAW:one-source-of-truth] Parent strength drives marker brightness/size. Log-normalize against the
+    // current interaction ceiling so the visual curve matches the log slider.
+    const p = state.physics as { interactionStrength?: number };
+    const ceiling = p.interactionStrength ?? 1;
+    const step = simStep;
+    const invLogMax = 1 / Math.log(1 + Math.max(ceiling, 1));
+    for (let i = 0; i < n; i++) {
+      const m = markers[i];
+      const a = state.attractors[m.attractorIdx];
+      const s = a ? attractorStrength(a, step, ceiling) : 0;
+      const strengthNorm = Math.max(0, Math.min(1, Math.log(1 + s) * invLogMax));
+      const o = i * 8;
+      markerData[o] = m.x;
+      markerData[o + 1] = m.y;
+      markerData[o + 2] = m.z;
+      markerData[o + 3] = strengthNorm;
+      markerData[o + 4] = m.tintR;
+      markerData[o + 5] = m.tintG;
+      markerData[o + 6] = m.tintB;
+      markerData[o + 7] = m.seed;
+    }
+    device.queue.writeBuffer(markerBuffer, 0, markerData.buffer, 0, n * MARKER_STRIDE);
+    pass.setPipeline(markerPipeline);
+    pass.setBindGroup(0, markerBGs[viewIndex]);
+    pass.draw(6, n);
+  }
 
   // Diagnostic readback: sample particles from the GPU for analysis.
   const DIAG_SAMPLE = 2048;
@@ -2077,6 +2344,13 @@ function createPhysicsSimulation() {
     setTimeDirection(dir: number) { timeDirection = dir; },
     getSimStep() { return simStep; },
     getTimeDirection() { return timeDirection; },
+    // [LAW:single-enforcer] blurTime is written here, nowhere else, so the per-frame blurBuffer state
+    // is always synchronized with whatever runDebugCompute computed for this frame.
+    setBlurTime(blurTime: number) {
+      blurScratch[0] = blurTime;
+      blurScratch[1] = 0; blurScratch[2] = 0; blurScratch[3] = 0;
+      device.queue.writeBuffer(blurBuffer, 0, blurScratch);
+    },
     getJournalCapacity() { return JOURNAL_CAPACITY; },
     getJournalHighWater() { return journalHighWater; },
 
@@ -2097,13 +2371,15 @@ function createPhysicsSimulation() {
       const p = state.physics;
       const baseDt = PHYSICS_BASE_DT * state.fx.timeScale;
       const dt = baseDt * timeDirection;
-      // [LAW:one-source-of-truth] G normalized by sqrt(sourceCount) so gravity scales sub-linearly with particle count.
+      // PM gravity is uniform across all particles — no sqrt(sourceCount)
+      // normalization. Total mass is now 1.0 (PARTICLE_MASS = 1/count) so
+      // the effective gravity strength is set purely by G.
       f32[0] = dt;
-      f32[1] = p.G * 0.001 / Math.sqrt(Math.max(1, MASSIVE_BODY_COUNT) / 1000);
+      f32[1] = p.G * 0.001;
       f32[2] = p.softening;
       f32[3] = p.haloMass ?? 5.0;
       u32[4] = count;
-      u32[5] = MASSIVE_BODY_COUNT;
+      u32[5] = 0;  // was sourceCount; tile-pair gravity removed in ticket .6
       f32[6] = p.haloScale ?? 2.0;
       // [LAW:one-source-of-truth] Simulation clock: simStep × baseDt gives deterministic tidal angle.
       f32[7] = simStep * baseDt;
@@ -2112,7 +2388,8 @@ function createPhysicsSimulation() {
       f32[16] = p.diskMass ?? 3.0;
       f32[17] = p.diskScaleA ?? 1.5;
       f32[18] = p.diskScaleB ?? 0.3;
-      f32[19] = 0; f32[20] = 0; f32[21] = 0; f32[22] = 0;
+      f32[19] = 0;  // was pmBlend; tile-pair gravity removed in ticket .6
+      f32[20] = 0; f32[21] = 0; f32[22] = 0;
       f32[23] = p.tidalStrength ?? 0.005;
 
       // ── ATTRACTOR DATA: forward computes + journals; reverse reads from journal ──
@@ -2154,6 +2431,95 @@ function createPhysicsSimulation() {
       }
       device.queue.writeBuffer(paramsBuffer, 0, paramsBytes);
 
+      // ── PM density field (CIC deposition → mean reduction → subtract/convert) ──
+      // Produces pmDensityF32 (mean-zero density) for the Poisson solver in .4.
+      // No force yet — this shader's output is not read by any other stage in
+      // this ticket. Once .5 lands, PM force adds alongside tile-pair gravity.
+      // [LAW:dataflow-not-control-flow] Runs every frame; same code path whether
+      // or not the density is consumed downstream.
+      pmParamsF32[0] = dt;  // only field that varies per-frame
+      device.queue.writeBuffer(pmParamsBuffer, 0, pmParamsData);
+      encoder.clearBuffer(pmDensityU32);
+      encoder.clearBuffer(pmMeanScratch);
+      const pmPass = encoder.beginComputePass();
+      pmPass.setPipeline(pmDepositPipeline);
+      pmPass.setBindGroup(0, pmDepositBG[pingPong]);
+      pmPass.dispatchWorkgroups(Math.ceil(count / 256));
+      pmPass.setPipeline(pmReducePipeline);
+      pmPass.setBindGroup(0, pmConvertBG);
+      pmPass.dispatchWorkgroups(Math.ceil(pmLevel0Cells / 256));
+      pmPass.setPipeline(pmConvertPipeline);
+      pmPass.dispatchWorkgroups(Math.ceil(pmLevel0Cells / 256));
+      pmPass.end();
+
+      // ── Multigrid V-cycle Poisson solver (phase-split across 2 frames) ────
+      // Input:  pmDensityF32 (mean-zero RHS at level 0)
+      // Output: pmPotential[0] (φ satisfying ∇²φ = 4πGρ on the 3-torus)
+      // [LAW:dataflow-not-control-flow] Phase is a deterministic function of
+      // simStep (parity), so the same dispatch sequence runs in fwd and rev.
+      // Phase A (descent) and Phase B (ascent + coarsest) each do roughly
+      // 8M level-0 cell-updates — half the un-split V-cycle, matched per
+      // frame so the worst frame fits the 90 Hz budget.
+      const pmMaxLevel = PM_MULTIGRID_LEVELS - 1;
+      const PM_COARSEST_SWEEPS = 16;
+      const pmDescent = (simStep & 1) === 0;
+      const vPass = encoder.beginComputePass();
+      if (pmDescent) {
+        // Phase A: zero coarse correction state (start of new V-cycle), then
+        // pre-smooth → residual → restrict down to the coarsest grid. Level 0
+        // is NOT cleared — it carries the warm-start from the previous V-cycle.
+        for (let l = 1; l < PM_MULTIGRID_LEVELS; l++) encoder.clearBuffer(pmPotential[l]);
+        for (let l = 0; l < pmMaxLevel; l++) {
+          vPass.setPipeline(pmSmoothPipeline);
+          for (let s = 0; s < PM_SMOOTH_PRE; s++) {
+            vPass.setBindGroup(0, pmSmoothBG[l][0]);
+            vPass.dispatchWorkgroups(pmWgCount[l], pmWgCount[l], pmWgCount[l]);
+            vPass.setBindGroup(0, pmSmoothBG[l][1]);
+            vPass.dispatchWorkgroups(pmWgCount[l], pmWgCount[l], pmWgCount[l]);
+          }
+          vPass.setPipeline(pmResidualPipeline);
+          vPass.setBindGroup(0, pmResidualBG[l]);
+          vPass.dispatchWorkgroups(pmWgCount[l], pmWgCount[l], pmWgCount[l]);
+          vPass.setPipeline(pmRestrictPipeline);
+          vPass.setBindGroup(0, pmRestrictBG[l]);
+          vPass.dispatchWorkgroups(pmWgCount[l + 1], pmWgCount[l + 1], pmWgCount[l + 1]);
+        }
+      } else {
+        // Phase B: coarsest exact-ish solve, then prolong + post-smooth back
+        // up to level 0. Reads pmRhs[1..5] and pmPotential[1..5] left by the
+        // previous frame's Phase A; writes the final solution into pmPotential[0].
+        vPass.setPipeline(pmSmoothPipeline);
+        for (let s = 0; s < PM_COARSEST_SWEEPS; s++) {
+          vPass.setBindGroup(0, pmSmoothBG[pmMaxLevel][0]);
+          vPass.dispatchWorkgroups(pmWgCount[pmMaxLevel], pmWgCount[pmMaxLevel], pmWgCount[pmMaxLevel]);
+          vPass.setBindGroup(0, pmSmoothBG[pmMaxLevel][1]);
+          vPass.dispatchWorkgroups(pmWgCount[pmMaxLevel], pmWgCount[pmMaxLevel], pmWgCount[pmMaxLevel]);
+        }
+        for (let l = pmMaxLevel - 1; l >= 0; l--) {
+          vPass.setPipeline(pmProlongPipeline);
+          vPass.setBindGroup(0, pmProlongBG[l]);
+          vPass.dispatchWorkgroups(pmWgCount[l], pmWgCount[l], pmWgCount[l]);
+          vPass.setPipeline(pmSmoothPipeline);
+          for (let s = 0; s < PM_SMOOTH_POST; s++) {
+            vPass.setBindGroup(0, pmSmoothBG[l][0]);
+            vPass.dispatchWorkgroups(pmWgCount[l], pmWgCount[l], pmWgCount[l]);
+            vPass.setBindGroup(0, pmSmoothBG[l][1]);
+            vPass.dispatchWorkgroups(pmWgCount[l], pmWgCount[l], pmWgCount[l]);
+          }
+        }
+      }
+      vPass.end();
+
+      // ── PM force interpolation ─────────────────────────────────────────
+      // Sample the freshly-solved pmPotential[0] at each particle via the CIC
+      // transpose kernel; write vec4 force to pmForce. Dispatched AFTER the
+      // V-cycle (reads phi) and BEFORE the main n-body compute (reads pmForce).
+      const iPass = encoder.beginComputePass();
+      iPass.setPipeline(pmInterpolatePipeline);
+      iPass.setBindGroup(0, pmInterpolateBG[pingPong]);
+      iPass.dispatchWorkgroups(Math.ceil(count / 256));
+      iPass.end();
+
       const cTsw = tsWrites(0);
       const pass = encoder.beginComputePass(cTsw ? { timestampWrites: cTsw } : undefined);
       pass.setPipeline(computePipeline);
@@ -2169,11 +2535,11 @@ function createPhysicsSimulation() {
       const now = performance.now();
       if (!statsPendingMap && now - lastStatsTime > STATS_INTERVAL_MS) {
         lastStatsTime = now;
-        const Geff = (p.G ?? 1.5) * 0.001 / Math.sqrt(Math.max(1, MASSIVE_BODY_COUNT) / 1000);
+        const Geff = (p.G ?? 0.3) * 0.001;
         const statsParamsData = new Float32Array(4);
         const statsParamsU32 = new Uint32Array(statsParamsData.buffer);
         statsParamsU32[0] = count;
-        statsParamsU32[1] = MASSIVE_BODY_COUNT;
+        statsParamsU32[1] = count;  // was MASSIVE_BODY_COUNT; every particle is a source now
         statsParamsData[2] = (p.softening ?? 0.15) * (p.softening ?? 0.15);
         statsParamsData[3] = Geff;
         device.queue.writeBuffer(statsParamsBuffer, 0, statsParamsData);
@@ -2208,6 +2574,37 @@ function createPhysicsSimulation() {
       const aspect = viewport ? (viewport[2] / viewport[3]) : (canvas.width / canvas.height);
       device.queue.writeBuffer(cameraBuffer, viewIndex * CAMERA_STRIDE, getCameraUniformData(aspect));
 
+      // [LAW:one-source-of-truth] Pack render-side attractor field from the same lifecycle state the
+      // compute pass reads. Strength is log-normalized to [0,1] so the shader's gaussian sum is stable
+      // across the 0.1..100 interaction slider range.
+      {
+        const p = state.physics as { interactionStrength?: number };
+        const ceiling = p.interactionStrength ?? 1;
+        const step = simStep;
+        const attractors = state.attractors;
+        const n = Math.min(attractors.length, ATTRACTOR_MAX);
+        const invLogMax = 1 / Math.log(1 + Math.max(ceiling, 1));
+        attractorFieldU32[0] = n;
+        attractorFieldU32[1] = 0; attractorFieldU32[2] = 0; attractorFieldU32[3] = 0;
+        for (let i = 0; i < n; i++) {
+          const a = attractors[i];
+          const s = attractorStrength(a, step, ceiling);
+          const base = 4 + i * 4;
+          attractorFieldF32[base] = a.x;
+          attractorFieldF32[base + 1] = a.y;
+          attractorFieldF32[base + 2] = a.z;
+          attractorFieldF32[base + 3] = Math.max(0, Math.min(1, Math.log(1 + s) * invLogMax));
+        }
+        for (let i = n; i < ATTRACTOR_MAX; i++) {
+          const base = 4 + i * 4;
+          attractorFieldF32[base] = 0;
+          attractorFieldF32[base + 1] = 0;
+          attractorFieldF32[base + 2] = 0;
+          attractorFieldF32[base + 3] = 0;
+        }
+        device.queue.writeBuffer(attractorFieldBuffer, 0, attractorFieldData);
+      }
+
       const rTsw = tsWrites(1);
       const pass = encoder.beginRenderPass({
         colorAttachments: [getColorAttachment(depthRef, textureView, viewport)],
@@ -2225,6 +2622,8 @@ function createPhysicsSimulation() {
       pass.setPipeline(renderPipeline);
       pass.setBindGroup(0, renderBGs[viewIndex][pingPong]);
       pass.draw(6, count);
+
+      renderMarkers(pass, viewIndex);
       pass.end();
     },
 
@@ -2235,16 +2634,16 @@ function createPhysicsSimulation() {
     async diagnose(): Promise<Record<string, number | number[]>> {
       if (diagPending) return { error: 1 };
       diagPending = true;
-      // Copy several large chunks from evenly-spaced regions across the tracer population.
-      const tracerCount = count - MASSIVE_BODY_COUNT;
-      const sampleCount = Math.min(tracerCount, DIAG_SAMPLE);
+      // Copy several large chunks from evenly-spaced regions across the population.
+      // No source/tracer distinction — every particle is a sample candidate.
+      const sampleCount = Math.min(count, DIAG_SAMPLE);
       const NUM_CHUNKS = 8;
       const chunkBodies = Math.floor(sampleCount / NUM_CHUNKS);
-      const regionSize = Math.floor(tracerCount / NUM_CHUNKS);
+      const regionSize = Math.floor(count / NUM_CHUNKS);
       const srcBuf = pingPong === 0 ? bufferA : bufferB;
       const encoder = device.createCommandEncoder();
       for (let c = 0; c < NUM_CHUNKS; c++) {
-        const srcIdx = MASSIVE_BODY_COUNT + c * regionSize;
+        const srcIdx = c * regionSize;
         encoder.copyBufferToBuffer(srcBuf, srcIdx * 48, diagStaging, c * chunkBodies * 48, chunkBodies * 48);
       }
       device.queue.submit([encoder.finish()]);
@@ -2338,13 +2737,164 @@ function createPhysicsSimulation() {
       };
     },
 
+    // Dev diagnostic: copy pmDensityF32 → staging → host, return as Float32Array.
+    // Mirrors the diagnose() pattern: gated by a pending flag so overlapping
+    // calls return null rather than tangle the staging buffer. 128³ ≈ 2.1M
+    // floats returned per call.
+    async dumpDensity(): Promise<Float32Array | null> {
+      if (pmDiagPending) return null;
+      pmDiagPending = true;
+      const enc = device.createCommandEncoder();
+      enc.copyBufferToBuffer(pmDensityF32, 0, pmDensityStaging, 0, pmLevel0Cells * 4);
+      device.queue.submit([enc.finish()]);
+      await device.queue.onSubmittedWorkDone();
+      await pmDensityStaging.mapAsync(GPUMapMode.READ);
+      const out = new Float32Array(pmDensityStaging.getMappedRange().slice(0));
+      pmDensityStaging.unmap();
+      pmDiagPending = false;
+      return out;
+    },
+
+    // Dumps level-0 potential φ (128³ f32). Reuses pmDensityStaging since the
+    // buffer sizes match; diagPending flag serializes access.
+    async dumpPotential(): Promise<Float32Array | null> {
+      if (pmDiagPending) return null;
+      pmDiagPending = true;
+      const enc = device.createCommandEncoder();
+      enc.copyBufferToBuffer(pmPotential[0], 0, pmDensityStaging, 0, pmLevel0Cells * 4);
+      device.queue.submit([enc.finish()]);
+      await device.queue.onSubmittedWorkDone();
+      await pmDensityStaging.mapAsync(GPUMapMode.READ);
+      const out = new Float32Array(pmDensityStaging.getMappedRange().slice(0));
+      pmDensityStaging.unmap();
+      pmDiagPending = false;
+      return out;
+    },
+
+    // Max |residual| at level 0 — the convergence metric for the V-cycle.
+    // Below ~1% of peak density value after 4 V-cycles indicates good solve.
+    async maxResidual(): Promise<number | null> {
+      if (pmDiagPending) return null;
+      pmDiagPending = true;
+      const enc = device.createCommandEncoder();
+      enc.copyBufferToBuffer(pmResidual[0], 0, pmDensityStaging, 0, pmLevel0Cells * 4);
+      device.queue.submit([enc.finish()]);
+      await device.queue.onSubmittedWorkDone();
+      await pmDensityStaging.mapAsync(GPUMapMode.READ);
+      const arr = new Float32Array(pmDensityStaging.getMappedRange());
+      let maxAbs = 0;
+      for (let i = 0; i < arr.length; i++) {
+        const a = Math.abs(arr[i]);
+        if (a > maxAbs) maxAbs = a;
+      }
+      pmDensityStaging.unmap();
+      pmDiagPending = false;
+      return maxAbs;
+    },
+
+    // PM reversibility harness. Snapshots particle positions, runs N forward
+    // steps, then N reverse steps, then compares. A sound PM implementation
+    // should return particles to within ~1e-3 world units for N=1000 thanks
+    // to the fixed-point u32 atomic deposit (order-independent) + DKD
+    // half-step symmetry. Values much larger indicate a bug:
+    //   • Deposition/interpolation sampling at pos (not posHalf)
+    //   • f32 atomics (non-associative)
+    //   • State-dependent iteration count in the multigrid
+    //
+    // Pauses the sim for the test duration and restores on exit. Shares
+    // pmDiagPending with other PM dumps — no concurrent use.
+    async reversibilityTest(nSteps: number): Promise<{ maxErr: number; meanErr: number; count: number } | null> {
+      if (pmDiagPending) return null;
+      const particleBytes = count * 48;
+      if (particleBytes > pmDensityStaging.size) return null;
+      pmDiagPending = true;
+      const wasPaused = state.paused;
+      const savedDir = timeDirection;
+      state.paused = true;
+
+      const snapshotPositions = async (): Promise<Float32Array> => {
+        const e = device.createCommandEncoder();
+        const src = pingPong === 0 ? bufferA : bufferB;
+        e.copyBufferToBuffer(src, 0, pmDensityStaging, 0, particleBytes);
+        device.queue.submit([e.finish()]);
+        await device.queue.onSubmittedWorkDone();
+        await pmDensityStaging.mapAsync(GPUMapMode.READ);
+        const out = new Float32Array(pmDensityStaging.getMappedRange(0, particleBytes).slice(0));
+        pmDensityStaging.unmap();
+        return out;
+      };
+
+      const startPos = await snapshotPositions();
+
+      // Forward N, then reverse N. One submit per step — simple and unambiguous
+      // ordering relative to each step's params writeBuffer.
+      timeDirection = 1;
+      for (let i = 0; i < nSteps; i++) {
+        const e = device.createCommandEncoder();
+        // eslint-disable-next-line @typescript-eslint/no-use-before-define
+        this.compute(e);
+        device.queue.submit([e.finish()]);
+      }
+      timeDirection = -1;
+      for (let i = 0; i < nSteps; i++) {
+        const e = device.createCommandEncoder();
+        // eslint-disable-next-line @typescript-eslint/no-use-before-define
+        this.compute(e);
+        device.queue.submit([e.finish()]);
+      }
+      timeDirection = savedDir;
+      state.paused = wasPaused;
+
+      const endPos = await snapshotPositions();
+
+      // Body layout: pos(3) mass(1) vel(3) pad(1) home(3) pad(1) = 12 floats.
+      // Compare the position triplet per body.
+      let maxErr = 0;
+      let sumErr = 0;
+      for (let i = 0; i < count; i++) {
+        const o = i * 12;
+        const dx = endPos[o]     - startPos[o];
+        const dy = endPos[o + 1] - startPos[o + 1];
+        const dz = endPos[o + 2] - startPos[o + 2];
+        const err = Math.sqrt(dx * dx + dy * dy + dz * dz);
+        if (err > maxErr) maxErr = err;
+        sumErr += err;
+      }
+      pmDiagPending = false;
+      return { maxErr, meanErr: sumErr / count, count };
+    },
+
     destroy() {
       bufferA.destroy(); bufferB.destroy();
-      paramsBuffer.destroy(); cameraBuffer.destroy();
+      paramsBuffer.destroy(); cameraBuffer.destroy(); blurBuffer.destroy();
+      attractorFieldBuffer.destroy(); markerBuffer.destroy();
       statsOutBuffer.destroy(); statsStaging.destroy(); statsParamsBuffer.destroy();
       diagStaging.destroy();
+      // PM scaffolding cleanup. Every buffer allocated in the PM block above
+      // is released here. [LAW:single-enforcer] No other destroy site exists.
+      pmDensityU32.destroy(); pmDensityF32.destroy();
+      for (const b of pmPotential) b.destroy();
+      for (const b of pmResidual) b.destroy();
+      pmForce.destroy(); pmMeanScratch.destroy();
+      pmParamsBuffer.destroy(); pmDensityStaging.destroy();
+      // V-cycle: coarse-level RHS buffers (pmRho[0] aliases pmDensityF32, skip).
+      for (let l = 1; l < pmRho.length; l++) pmRho[l].destroy();
+      // V-cycle: per-level uniforms.
+      for (const pair of pmSmoothUniform) for (const b of pair) b.destroy();
+      for (const b of pmResidualUniform) b.destroy();
+      for (const b of pmRestrictUniform) b.destroy();
+      for (const b of pmProlongUniform) b.destroy();
       destroyDepthRef(depthRef);
-    }
+    },
+    // PM internal state — not read by external callers today. Future tickets
+    // (CIC deposition .3, Poisson solver .4, force sampling .5) will dispatch
+    // compute work against these from inside this factory's closure.
+    pmDensityU32,
+    pmDensityF32,
+    pmPotential,
+    pmResidual,
+    pmForce,
+    pmMeanScratch,
   };
 }
 
@@ -3375,21 +3925,34 @@ function buildParamRow(container: HTMLElement, mode: SimMode, param: ParamDef) {
   } else {
     const input = document.createElement('input');
     input.type = 'range';
-    input.min = String(param.min);
-    input.max = String(param.max);
-    input.step = String(param.step);
-    input.value = String(modeParams(mode)[param.key]);
+    // [LAW:dataflow-not-control-flow] logScale shapes the slider's tick-space
+    // vs. real-value-space mapping. Dataset flags let sync code (applyPreset,
+    // syncUIFromState) do the same mapping without re-reading PARAM_DEFS.
+    if (param.logScale && param.min !== undefined && param.max !== undefined) {
+      input.min = '0';
+      input.max = String(LOG_SLIDER_TICKS);
+      input.step = '1';
+      input.value = String(realToLogTick(Number(modeParams(mode)[param.key]), param.min, param.max));
+      input.dataset.logScale = '1';
+    } else {
+      input.min = String(param.min);
+      input.max = String(param.max);
+      input.step = String(param.step);
+      input.value = String(modeParams(mode)[param.key]);
+    }
     input.dataset.mode = mode;
     input.dataset.key = param.key;
 
     const valueSpan = document.createElement('span');
     valueSpan.className = 'control-value';
-    valueSpan.textContent = formatValue(Number(modeParams(mode)[param.key]), param.step ?? 1);
+    valueSpan.textContent = formatValueWithMax(Number(modeParams(mode)[param.key]), param);
 
     input.addEventListener('input', () => {
-      const val = Number(input.value);
+      const val = (param.logScale && param.min !== undefined && param.max !== undefined)
+        ? logTickToReal(Number(input.value), param.min, param.max)
+        : Number(input.value);
       modeParams(mode)[param.key] = val;
-      valueSpan.textContent = formatValue(val, param.step ?? 1);
+      valueSpan.textContent = formatValueWithMax(val, param);
       if (param.requiresReset) {
         input.dataset.needsReset = '1';
       }
@@ -3449,6 +4012,30 @@ function formatValue(val: number, step: number) {
   return val.toFixed(decimals);
 }
 
+// [LAW:single-enforcer] All slider value readouts flow through this so the
+// "Permanent"-at-max behavior (and any future label overrides) never drifts
+// between buildParamRow, applyPreset, and syncUIFromState.
+function formatValueWithMax(val: number, def: ParamDef | null): string {
+  const step = def?.step ?? 0.01;
+  if (def?.maxLabel !== undefined && def.max !== undefined && val >= def.max - step / 2) {
+    return def.maxLabel;
+  }
+  return formatValue(val, step);
+}
+
+// Linear-to-log tick mapping: slider position lives in [0, 1000] tick space,
+// real values span [min, max] logarithmically. Kept here (not inlined) so the
+// three slider touchpoints (build, preset apply, load sync) agree exactly.
+const LOG_SLIDER_TICKS = 1000;
+function realToLogTick(real: number, min: number, max: number): number {
+  const t = (Math.log(real) - Math.log(min)) / (Math.log(max) - Math.log(min));
+  return Math.round(LOG_SLIDER_TICKS * Math.max(0, Math.min(1, t)));
+}
+function logTickToReal(tick: number, min: number, max: number): number {
+  const t = tick / LOG_SLIDER_TICKS;
+  return Math.exp(Math.log(min) + t * (Math.log(max) - Math.log(min)));
+}
+
 function applyPreset(mode: SimMode, presetName: string) {
   const preset = PRESETS[mode][presetName];
   Object.assign(modeParams(mode), preset);
@@ -3458,12 +4045,13 @@ function applyPreset(mode: SimMode, presetName: string) {
   container.querySelectorAll<HTMLInputElement>('input[type="range"]').forEach(input => {
     const key = input.dataset.key!;
     if (key in preset) {
-      input.value = String(preset[key]);
+      const paramDef = findParamDef(mode, key);
+      const realVal = Number(preset[key]);
+      input.value = (paramDef?.logScale && paramDef.min !== undefined && paramDef.max !== undefined)
+        ? String(realToLogTick(realVal, paramDef.min, paramDef.max))
+        : String(preset[key]);
       const valueSpan = input.parentElement?.querySelector('.control-value');
-      if (valueSpan) {
-        const paramDef = findParamDef(mode, key);
-        valueSpan.textContent = formatValue(Number(preset[key]), paramDef ? paramDef.step ?? 1 : 1);
-      }
+      if (valueSpan) valueSpan.textContent = formatValueWithMax(realVal, paramDef);
     }
   });
   container.querySelectorAll<HTMLSelectElement>('select').forEach(sel => {
@@ -3569,8 +4157,92 @@ function setupGlobalControls() {
     location.reload();
   });
 
+  setupRecordButton();
+
+  // XR debug-log toggle: subscribes/unsubscribes the live console consumer.
+  // [LAW:single-enforcer] Single site that flips state.debug.xrLog + the
+  // metrics subscription in lockstep so the two cannot disagree.
+  const xrLogToggle = document.getElementById('toggle-xr-log') as HTMLInputElement;
+  xrLogToggle.addEventListener('change', () => {
+    state.debug.xrLog = xrLogToggle.checked;
+    setXrDebugLogging(state.debug.xrLog);
+    saveState();
+  });
+
   // XR button setup
   setupXRButton();
+}
+
+// One-click XR record button: enter XR and begin an unbounded recording;
+// the recording terminates when the XR session ends (user exits). Samples
+// publish to console + window.__xrLastRecording on stop.
+function setupRecordButton(): void {
+  const btn = document.getElementById('btn-xr-record') as HTMLButtonElement | null;
+  if (!btn) return;
+  const idleLabel = 'Record XR Session';
+  const tick = () => {
+    const s = metrics.status();
+    if (s.phase === 'idle') {
+      btn.textContent = idleLabel;
+      btn.disabled = !!xrSession;  // also disabled while XR session alive
+      return;
+    }
+    btn.textContent = 'Recording — exit XR to stop';
+    btn.disabled = true;
+    requestAnimationFrame(tick);
+  };
+  btn.addEventListener('click', async () => {
+    if (metrics.status().phase !== 'idle' || xrSession) return;
+    // Start the recording before the session so we capture session-setup
+    // signals too. Producers are dormant until xrInputStep runs, so no
+    // samples actually arrive until the first XR frame — this just ensures
+    // subscribers are live when they do.
+    metrics.record({}).then((samples) => {
+      // Full sample array on window for programmatic inspection. Console only
+      // shows edge events (gestures + state transitions) to avoid 90 Hz × 2-hand
+      // snap spam. To walk snaps yourself: __xrLastRecording.filter(s => s.channel === 'xr.snap').
+      (window as unknown as { __xrLastRecording?: MetricSample[] }).__xrLastRecording = samples;
+      const counts: Record<string, number> = {};
+      for (const s of samples) counts[s.channel] = (counts[s.channel] ?? 0) + 1;
+      const summary = Object.entries(counts).map(([c, n]) => `${c}: ${n}`).join(', ');
+      // eslint-disable-next-line no-console
+      console.group(`[xr] recording — ${samples.length} samples (${summary})`);
+      for (const s of samples) {
+        if (s.channel === 'xr.snap') continue;  // bulk data; inspect via __xrLastRecording
+        // pinch-hold fires every frame during a pinch — also bulk; skip from console.
+        if (s.channel === 'xr.gesture'
+          && (s.payload as XrGestureEvent).gesture.kind === 'pinch-hold') continue;
+        // Inline kind/transition into the prefix so Safari doesn't collapse nested
+        // objects to "Object" — the string prefix always prints fully.
+        let label = s.channel;
+        if (s.channel === 'xr.gesture') {
+          const p = s.payload as XrGestureEvent;
+          label = `xr.gesture:${p.gesture.kind}${p.hand ? `(${p.hand})` : ''}`;
+        } else if (s.channel === 'xr.state') {
+          const p = s.payload as XrStateEvent;
+          label = `xr.state:${p.hand} ${p.from}→${p.to}`;
+        }
+        // eslint-disable-next-line no-console
+        console.log(`[t=${s.t.toFixed(0).padStart(5)}ms] ${label}`, s.payload);
+      }
+      // eslint-disable-next-line no-console
+      console.groupEnd();
+    });
+    requestAnimationFrame(tick);
+    await toggleXR();
+    // toggleXR assigns the module-level xrSession during the await — but the
+    // early guard's narrowing of that variable persists past the await in TS,
+    // so we un-narrow via an explicit cast to read the live value.
+    const session = xrSession as unknown as XRSession | null;
+    if (!session) {
+      // Session failed to start — end the recording with whatever we have.
+      metrics.stop();
+      return;
+    }
+    // [LAW:single-enforcer] Our listener only calls metrics.stop(); the
+    // existing session-end handler in toggleXR owns the XR-side cleanup.
+    session.addEventListener('end', () => metrics.stop(), { once: true });
+  });
 }
 
 // [LAW:single-enforcer] Time-reverse input is owned here. Desktop: hold R. Mobile: hold rewind FAB.
@@ -3617,32 +4289,63 @@ function setupTimeReverseControls() {
 
 interface DebugState {
   skipTarget: number | null;          // step we're seeking toward (null = not skipping)
-  skipChunk: number;                  // max compute dispatches per frame while skipping/stepping
+  targetStepsPerSec: number;          // "Target speed" selector: desired sim steps per wall-second (nominal)
+  adaptiveChunk: number;              // current budget-adapted per-frame chunk, updated from rAF-delta feedback
   breakAtStep: number | null;         // auto-pause when simStep reaches this (null = no breakpoint)
   manualStepsRemaining: number;       // discrete-step requests pending (from ±1 / ±10 / ±60 buttons)
   manualDirection: number;            // +1 or -1 for the manual-step queue
+  lastSkipDispatches: number;         // dispatches run in the most recent skip frame (for the feedback loop)
 }
 
+// Base dt nominal = 0.016s (matches nbody compute). At timeScale=1 → 60 sim-steps per second of live play.
+// targetStepsPerSec labels in UI: 60=1x, 600=10x, 6000=100x, 60000=1000x, 1e9=Max (GPU-capped).
 const debugState: DebugState = {
   skipTarget: null,
-  skipChunk: 200,
+  targetStepsPerSec: 6000,            // default 100x — visible time-lapse, smooth on typical hardware
+  adaptiveChunk: 8,                   // conservative start; rAF-delta feedback grows it quickly
   breakAtStep: null,
   manualStepsRemaining: 0,
   manualDirection: 1,
+  lastSkipDispatches: 0,
 };
+
+// rAF-delta thresholds for the adaptive-chunk feedback loop. 60fps target = 16.7ms/frame;
+// we grow the chunk below 14ms (genuine headroom) and shrink above 20ms (missed a frame).
+const DEBUG_FRAME_OVER_MS = 20.0;
+const DEBUG_FRAME_UNDER_MS = 14.0;
+const DEBUG_ADAPTIVE_GROW = 1.3;
+const DEBUG_ADAPTIVE_SHRINK = 0.7;
+const DEBUG_ADAPTIVE_MIN = 1;
+const DEBUG_ADAPTIVE_MAX = 5000;      // hard ceiling so runaway growth can't starve render
+
+// [LAW:single-enforcer] Adaptive chunk feedback is updated in exactly one place per frame so the
+// "what chunk should I use next" decision is authoritative. Call after each frame with rAF delta.
+function updateAdaptiveChunk(frameDeltaMs: number): void {
+  if (debugState.lastSkipDispatches <= 0) return; // only adapt during actual skip activity
+  const targetPerFrame = Math.max(1, Math.ceil(debugState.targetStepsPerSec / 60));
+  if (frameDeltaMs > DEBUG_FRAME_OVER_MS) {
+    debugState.adaptiveChunk = Math.max(DEBUG_ADAPTIVE_MIN, Math.floor(debugState.adaptiveChunk * DEBUG_ADAPTIVE_SHRINK));
+  } else if (frameDeltaMs < DEBUG_FRAME_UNDER_MS && debugState.adaptiveChunk < targetPerFrame) {
+    debugState.adaptiveChunk = Math.min(DEBUG_ADAPTIVE_MAX, Math.ceil(debugState.adaptiveChunk * DEBUG_ADAPTIVE_GROW));
+  }
+}
 
 // [LAW:single-enforcer] Clearing pending movement happens in exactly one place so "user pressed pause"
 // and "user pressed anything else that cancels" produce identical internal state.
 function cancelDebugMovement() {
   debugState.skipTarget = null;
   debugState.manualStepsRemaining = 0;
+  debugState.lastSkipDispatches = 0;
 }
 
 // [LAW:dataflow-not-control-flow] Same dispatch every frame — runDebugCompute always runs on physics mode.
-// What varies is (a) how many steps, (b) which direction — both pure functions of debugState + pause state.
-// Non-physics modes fall through to the simple "compute iff not paused" behavior.
+// What varies is (a) how many steps, (b) which direction, (c) whether motion blur is engaged — all pure
+// functions of debugState + pause state. Non-physics modes fall through to simple "compute iff not paused".
 function runDebugCompute(sim: Simulation, encoder: GPUCommandEncoder): void {
   if (state.mode !== 'physics' || !('getSimStep' in sim)) {
+    // Non-physics modes: no skip/step state applies; keep the adaptive-chunk feedback quiet so
+    // mode-switch-during-skip doesn't leave a stale lastSkipDispatches value driving adjustments.
+    debugState.lastSkipDispatches = 0;
     if (!state.paused) sim.compute(encoder);
     return;
   }
@@ -3650,34 +4353,57 @@ function runDebugCompute(sim: Simulation, encoder: GPUCommandEncoder): void {
     getSimStep(): number;
     getTimeDirection(): number;
     setTimeDirection(d: number): void;
+    setBlurTime(t: number): void;
   };
 
   let stepCount = 0;
   let overrideDir: number | null = null;
+  let skipActiveThisFrame = false;
 
   if (debugState.skipTarget !== null) {
     const delta = debugState.skipTarget - pSim.getSimStep();
     if (delta === 0) {
       debugState.skipTarget = null;
+      debugState.lastSkipDispatches = 0;
+      pSim.setBlurTime(0);  // clean frame at the target
       state.paused = true;
       syncPauseButtons();
       return;
     }
     overrideDir = delta > 0 ? 1 : -1;
-    stepCount = Math.min(debugState.skipChunk, Math.abs(delta));
+    // Chunk capped by: user's target-rate ceiling, GPU-budget feedback, and remaining distance.
+    const targetPerFrame = Math.max(1, Math.ceil(debugState.targetStepsPerSec / 60));
+    stepCount = Math.min(targetPerFrame, debugState.adaptiveChunk, Math.abs(delta));
+    skipActiveThisFrame = true;
   } else if (debugState.manualStepsRemaining > 0) {
     overrideDir = debugState.manualDirection;
-    stepCount = Math.min(debugState.skipChunk, debugState.manualStepsRemaining);
+    // Manual step buttons don't engage motion blur (plan: crisp frame-by-frame debugging).
+    // They still respect the adaptive chunk cap so clicking +60 doesn't stall the UI.
+    stepCount = Math.min(debugState.adaptiveChunk, debugState.manualStepsRemaining);
     debugState.manualStepsRemaining -= stepCount;
   } else if (!state.paused) {
-    stepCount = 1; // normal play respects whatever time direction the R-key has set
+    stepCount = 1;
   }
 
-  if (stepCount === 0) return;
+  if (stepCount === 0) {
+    // Not running compute this frame — ensure blurTime is 0 so a leftover skip value doesn't linger.
+    pSim.setBlurTime(0);
+    debugState.lastSkipDispatches = 0;
+    return;
+  }
 
   const savedDir = pSim.getTimeDirection();
   const needRestore = overrideDir !== null && overrideDir !== savedDir;
   if (needRestore) pSim.setTimeDirection(overrideDir!);
+
+  // Motion-blur time = world-time span of this frame's worth of steps, signed by direction.
+  // Reverse (overrideDir=-1 or savedDir=-1) produces negative blurTime; the shader's
+  // tail = pos - vel*blurTime then places the trail on the correct side.
+  const dirForBlur = overrideDir !== null ? overrideDir : savedDir;
+  const baseDt = 0.016 * state.fx.timeScale;
+  const blurTime = skipActiveThisFrame ? (stepCount * baseDt * dirForBlur) : 0;
+  pSim.setBlurTime(blurTime);
+  debugState.lastSkipDispatches = skipActiveThisFrame ? stepCount : 0;
 
   // NOTE: we do NOT check `state.paused` inside this loop. stepBy/initiateSkip deliberately
   // set state.paused=true to freeze normal play while the chunk executes, so a `paused` check
@@ -3693,6 +4419,8 @@ function runDebugCompute(sim: Simulation, encoder: GPUCommandEncoder): void {
       state.paused = true;
       syncPauseButtons();
       refreshBreakpointUI();
+      // Force clean final frame even if we hit the breakpoint mid-skip.
+      pSim.setBlurTime(0);
       break;
     }
     // Skip target: finish when we hit it.
@@ -3700,6 +4428,8 @@ function runDebugCompute(sim: Simulation, encoder: GPUCommandEncoder): void {
       debugState.skipTarget = null;
       state.paused = true;
       syncPauseButtons();
+      pSim.setBlurTime(0);
+      debugState.lastSkipDispatches = 0;
       break;
     }
   }
@@ -3740,9 +4470,12 @@ function setupDebugControls() {
 
   const chunkSelect = byId<HTMLSelectElement>('debug-skip-chunk');
   if (chunkSelect) {
+    // Initialize debugState from the rendered <select>'s selected option (keeps HTML + JS synced).
+    const initial = parseInt(chunkSelect.value, 10);
+    if (Number.isFinite(initial) && initial > 0) debugState.targetStepsPerSec = initial;
     chunkSelect.addEventListener('change', () => {
       const n = parseInt(chunkSelect.value, 10);
-      if (Number.isFinite(n) && n > 0) debugState.skipChunk = n;
+      if (Number.isFinite(n) && n > 0) debugState.targetStepsPerSec = n;
     });
   }
 
@@ -4242,10 +4975,10 @@ function setupMobileFab() {
     resetCurrentSim();
   });
 
-  // Mode stepper prev/next — reuse XR_UI_MODE_ORDER for consistent ordering
+  const modeOrder: SimMode[] = ['physics', 'boids', 'physics_classic', 'fluid', 'parametric', 'reaction'];
   const stepMode = (delta: number) => {
-    const idx = XR_UI_MODE_ORDER.indexOf(state.mode);
-    const next = XR_UI_MODE_ORDER[(idx + delta + XR_UI_MODE_ORDER.length) % XR_UI_MODE_ORDER.length];
+    const idx = modeOrder.indexOf(state.mode);
+    const next = modeOrder[(idx + delta + modeOrder.length) % modeOrder.length];
     selectMode(next);
   };
   document.getElementById('mode-prev')!.addEventListener('click', () => stepMode(-1));
@@ -4627,6 +5360,145 @@ let SHADER_REACTION_RENDER_EDIT: string | null = null;
 
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// METRICS BUS
+// ═══════════════════════════════════════════════════════════════════════════════
+// Typed pub/sub channels with first-class burst-capture recording. Producers
+// guard emit with `chan.subscribers.size > 0` for zero-cost-when-idle — no
+// payload is constructed when nobody is listening. All consumers (console
+// loggers, HUDs, the burst recorder) subscribe the same way; adding a new
+// consumer is free at producer sites. [LAW:one-source-of-truth] One registry
+// of channels and one recorder state.
+
+interface MetricChannel<T> {
+  readonly name: string;
+  readonly subscribers: Set<(payload: T) => void>;
+}
+interface MetricSample {
+  t: number;             // ms since recording-window start (pre-delay is invisible)
+  channel: string;
+  payload: unknown;
+}
+type RecordPhase = 'idle' | 'pre-delay' | 'recording';
+interface RecordOptions {
+  preDelayMs?: number;   // default 0: skip pre-delay, go straight to recording
+  durationMs?: number;   // omit = unbounded; caller must call metrics.stop()
+  channels?: MetricChannel<unknown>[];  // omit = all registered channels
+}
+interface RecordStatus {
+  phase: RecordPhase;
+  remainingMs: number;   // 0 when unbounded or idle
+  bounded: boolean;      // false for open-ended sessions (no durationMs)
+}
+
+const metricsChannels = new Map<string, MetricChannel<unknown>>();
+const metricsRecord = {
+  phase: 'idle' as RecordPhase,
+  phaseDeadline: 0,       // 0 when unbounded or idle
+  bounded: false,
+  samples: [] as MetricSample[],
+  startedAt: 0,
+  unsubs: [] as Array<() => void>,
+  preDelayTimer: null as ReturnType<typeof setTimeout> | null,
+  stopTimer: null as ReturnType<typeof setTimeout> | null,
+  resolve: null as ((samples: MetricSample[]) => void) | null,
+};
+
+const metrics = {
+  channel<T>(name: string): MetricChannel<T> {
+    const existing = metricsChannels.get(name);
+    if (existing) return existing as MetricChannel<T>;
+    const chan: MetricChannel<T> = { name, subscribers: new Set() };
+    metricsChannels.set(name, chan as unknown as MetricChannel<unknown>);
+    return chan;
+  },
+  subscribe<T>(chan: MetricChannel<T>, fn: (p: T) => void): () => void {
+    chan.subscribers.add(fn);
+    return () => { chan.subscribers.delete(fn); };
+  },
+  emit<T>(chan: MetricChannel<T>, payload: T): void {
+    for (const fn of chan.subscribers) fn(payload);
+  },
+  // Begin a recording. Returns a Promise that resolves with the collected
+  // samples when the recording ends — either via the duration timer (bounded)
+  // or via metrics.stop() (unbounded).
+  record(opts: RecordOptions): Promise<MetricSample[]> {
+    if (metricsRecord.phase !== 'idle') {
+      return Promise.reject(new Error('metrics.record: recording already in progress'));
+    }
+    const preDelayMs = opts.preDelayMs ?? 0;
+    metricsRecord.samples = [];
+    metricsRecord.bounded = opts.durationMs !== undefined;
+    return new Promise<MetricSample[]>((resolve) => {
+      metricsRecord.resolve = resolve;
+      const begin = () => {
+        const targets = opts.channels ?? Array.from(metricsChannels.values());
+        metricsRecord.startedAt = performance.now();
+        metricsRecord.phase = 'recording';
+        metricsRecord.phaseDeadline = opts.durationMs !== undefined
+          ? metricsRecord.startedAt + opts.durationMs
+          : 0;
+        metricsRecord.preDelayTimer = null;
+        for (const chan of targets) {
+          const chanName = chan.name;
+          metricsRecord.unsubs.push(metrics.subscribe(chan, (payload) => {
+            metricsRecord.samples.push({
+              t: performance.now() - metricsRecord.startedAt,
+              channel: chanName,
+              payload,
+            });
+          }));
+        }
+        if (opts.durationMs !== undefined) {
+          metricsRecord.stopTimer = setTimeout(() => metrics.stop(), opts.durationMs);
+        }
+      };
+      if (preDelayMs > 0) {
+        metricsRecord.phase = 'pre-delay';
+        metricsRecord.phaseDeadline = performance.now() + preDelayMs;
+        metricsRecord.preDelayTimer = setTimeout(begin, preDelayMs);
+      } else {
+        begin();
+      }
+    });
+  },
+  // End the current recording (bounded or unbounded). Cancels any pending
+  // timers, unsubscribes, resolves the promise with the collected samples.
+  // No-op when idle. [LAW:single-enforcer] Sole cleanup path for recordings.
+  stop(): void {
+    if (metricsRecord.phase === 'idle') return;
+    if (metricsRecord.preDelayTimer) {
+      clearTimeout(metricsRecord.preDelayTimer);
+      metricsRecord.preDelayTimer = null;
+    }
+    if (metricsRecord.stopTimer) {
+      clearTimeout(metricsRecord.stopTimer);
+      metricsRecord.stopTimer = null;
+    }
+    for (const u of metricsRecord.unsubs) u();
+    metricsRecord.unsubs = [];
+    const samples = metricsRecord.samples;
+    metricsRecord.samples = [];
+    metricsRecord.phase = 'idle';
+    metricsRecord.phaseDeadline = 0;
+    metricsRecord.bounded = false;
+    const res = metricsRecord.resolve;
+    metricsRecord.resolve = null;
+    if (res) res(samples);
+  },
+  status(): RecordStatus {
+    if (metricsRecord.phase === 'idle') return { phase: 'idle', remainingMs: 0, bounded: false };
+    return {
+      phase: metricsRecord.phase,
+      remainingMs: metricsRecord.phaseDeadline === 0
+        ? 0
+        : Math.max(0, metricsRecord.phaseDeadline - performance.now()),
+      bounded: metricsRecord.bounded,
+    };
+  },
+};
+
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // SECTION 8: WEBXR
 // ═══════════════════════════════════════════════════════════════════════════════
 
@@ -4635,6 +5507,13 @@ let xrRefSpace: XRReferenceSpace | null = null;
 let xrBaseRefSpace: XRReferenceSpace | null = null; // pre-gesture reference space
 let xrBinding: XRGPUBinding | null = null;
 let xrLayer: XRProjectionLayer | null = null;
+// Diagnostic only: logged at session acquisition so the acquired-session log
+// line records whether the runtime granted hand-tracking. The hot path does
+// NOT consult this flag — per-source `source.hand` is the canonical truth
+// (xrUpdateHandFrames already gates joint queries on it). Mirroring that into
+// a session-level boolean and reading both would be a [LAW:one-source-of-truth]
+// violation. Reset on session end so a re-acquisition doesn't read stale state.
+let xrHandTrackingAvailable = false;
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // XR INPUT PIPELINE
@@ -4667,17 +5546,59 @@ interface XrHandFrame {
   gazeRay: XrRay | null;
   // Hand-steered ray: updated each frame during pinch. Drives drag/scrub.
   currentRay: XrRay | null;
-  // Stubs for future hand-tracking features:
+  // Advisory hover laser ray. Synthesized from joints every frame when
+  // tracked. NEVER used for selection — that is gazeRay at pinch-start.
+  ray: XrRay | null;
+  // Hand-tracking data: populated each frame when the XR runtime grants
+  // hand-tracking and this handedness has an input source with `.hand`.
+  // joints is null ONLY when no hand data is available at all; when non-null
+  // it has all 25 keys but individual entries may be null (joint occluded,
+  // off-sensor, not yet converged). palmNormal and grip are derived from
+  // joints and synchronized atomically by xrUpdateHandFrames.
   palmNormal: number[] | null;
-  joints: null;
-  grip: null;
+  joints: XrJoints | null;
+  grip: XrGripState | null;
+}
+
+// 25 hand joints per WebXR spec. Ordered canonically for readability.
+const XR_JOINT_NAMES = [
+  'wrist',
+  'thumb-metacarpal', 'thumb-phalanx-proximal', 'thumb-phalanx-distal', 'thumb-tip',
+  'index-finger-metacarpal', 'index-finger-phalanx-proximal', 'index-finger-phalanx-intermediate', 'index-finger-phalanx-distal', 'index-finger-tip',
+  'middle-finger-metacarpal', 'middle-finger-phalanx-proximal', 'middle-finger-phalanx-intermediate', 'middle-finger-phalanx-distal', 'middle-finger-tip',
+  'ring-finger-metacarpal', 'ring-finger-phalanx-proximal', 'ring-finger-phalanx-intermediate', 'ring-finger-phalanx-distal', 'ring-finger-tip',
+  'pinky-finger-metacarpal', 'pinky-finger-phalanx-proximal', 'pinky-finger-phalanx-intermediate', 'pinky-finger-phalanx-distal', 'pinky-finger-tip',
+] as const satisfies readonly XRHandJoint[];
+type XrJointName = typeof XR_JOINT_NAMES[number];
+
+interface XrJointPose {
+  position: number[];      // 3 floats, in xrRefSpace
+  orientation: number[];   // 4 floats (xyzw quaternion)
+  radius: number;          // meters
+}
+
+// [LAW:dataflow-not-control-flow] When non-null, the record always has all 25
+// keys; individual entries are null when a joint is momentarily un-tracked.
+// Consumers branch on null per-joint via data, not by skipping updates.
+type XrJoints = Record<XrJointName, XrJointPose | null>;
+
+// Thumb-tip-to-fingertip geometric contact flags. NOT authoritative for
+// selection — pinch.active (from XR selectstart/selectend) is the authoritative
+// pinch signal. grip.* exists to represent compound / geometric gestures that
+// can't be expressed by the system-recognized pinch alone. Per-flag nullability
+// so a single occluded finger-tip doesn't null unrelated flags.
+interface XrGripState {
+  thumbIndex:  boolean | null;
+  thumbMiddle: boolean | null;
+  thumbRing:   boolean | null;
+  thumbPinky:  boolean | null;
 }
 
 function makeIdleHandFrame(hand: XrHand): XrHandFrame {
   return {
     hand, tracked: false, source: null,
     pinch: { active: false, startTime: 0, origin: [0, 0, 0], current: [0, 0, 0] },
-    gazeRay: null, currentRay: null,
+    gazeRay: null, currentRay: null, ray: null,
     palmNormal: null, joints: null, grip: null,
   };
 }
@@ -4699,19 +5620,18 @@ type XrGesture =
 
 // Per-hand interaction state machine.
 // [LAW:one-source-of-truth] At most one interaction per hand.
-// Selection transitions (idle → pressing/dragging) use gazeRay at pinch-start.
-// Hover transitions (idle ↔ hovering) use currentRay (advisory).
+// [LAW:one-type-per-behavior] Single-hand dragging always means sim interaction.
+// Widget/UI interactions will add their own variants when the new panel lands.
 type XrInteraction =
   | { kind: 'idle' }
-  | { kind: 'hovering'; target: string }
-  | { kind: 'pressing'; target: string; element: XrUiElement; startedAt: number }
-  | { kind: 'dragging'; target: string;
+  // Pinch-start arrived but we haven't committed yet. If the other hand
+  // pinch-starts before deadline, both convert to two-hand-scale (simultaneous
+  // = zoom). If deadline passes alone, commit to single-hand dragging (sequential
+  // = independent attractor). [LAW:dataflow-not-control-flow] The variant encodes
+  // the "waiting to decide" state explicitly instead of branching on timestamps.
+  | { kind: 'pending'; deadline: number }
+  | { kind: 'dragging';
       handOrigin: number[];      // hand position at drag start
-      dragType: 'slider' | 'panel-grab' | 'sim';
-      // Panel grab extras:
-      panelOriginWorld: [number, number, number] | null;
-      panelOriginCenter: [number, number, number] | null;
-      // Sim interaction extras:
       hasSample: boolean;
     }
   | { kind: 'two-hand-scale' };
@@ -4739,6 +5659,31 @@ const xrTuning = {
   gainMultiplier: 1.0,  // 0.1 when fine-modifier active (future)
 };
 
+// Which hand carries the bimanual clipboard panel. The other hand is free to
+// pinch widgets on the panel. [LAW:one-source-of-truth] One constant; don't
+// hardcode 'left' anywhere else in the XR code.
+const XR_PANEL_HAND: XrHand = 'left';
+
+// XR-UI module state. Single source of truth for the new widget pipeline:
+// - xrUiRegistry holds bindings + named layouts. Empty layouts map until ticket .13
+//   registers the first panel. xrUiStep returns idle/empty in that state.
+// - xrUiPrev is threaded into xrUiStep each frame and rebuilt from its result.
+// - xrUiClaimed mirrors uiHandClaimed(prev.states[hand]) so xrTransitionInteractions
+//   can short-circuit the pending→dragging sim promotion when UI owns the pinch.
+//   [LAW:single-enforcer] xrUiStep is the only writer of this flag.
+const xrUiRegistry: XrUiRegistry = {
+  bindings: bindingRegistry,
+  layouts: new Map(),
+  activeLayoutId: null,
+};
+let xrUiPrev: XrUiPrev = xrUiMakeIdlePrev();
+let xrUiRenderList: XrRenderCommand[] = [];
+const xrUiClaimed: Record<XrHand, boolean> = { left: false, right: false };
+// Created lazily on first XR frame (needs device + camera buffer). Empty render list
+// produces zero draw calls, so guarding the call site keeps desktop frames cheap.
+let xrWidgetRenderer: XrWidgetRenderer | null = null;
+let xrWidgetCameraBuffer: GPUBuffer | null = null;
+
 // View offset (modified by two-hand scale).
 // [LAW:one-source-of-truth] xrViewOffset is the single source for the user's
 // virtual viewpoint position relative to the simulation.
@@ -4754,99 +5699,115 @@ const twoHandState = {
 // Previous frame's pinch state for edge detection (gesture events).
 const xrPrevPinch: Record<XrHand, boolean> = { left: false, right: false };
 
-// ─── LEGACY UI STATE (bridges to current panel renderer until binding system lands) ──
-
-type XrUiElement = 'none' | 'prev' | 'next' | 'slider' | 'grab';
-
-interface XrUiSliderDef { key: string; label: string; min: number; max: number; }
-const XR_UI_SLIDER_DEFS: Record<SimMode, XrUiSliderDef> = {
-  boids:           { key: 'maxSpeed',      label: 'Speed',   min: 0.1,  max: 10  },
-  physics:         { key: 'G',             label: 'Gravity', min: 0.05, max: 5.0 },
-  physics_classic: { key: 'G',             label: 'Gravity', min: 0.01, max: 100 },
-  fluid:           { key: 'forceStrength', label: 'Force',   min: 1,    max: 500 },
-  parametric:      { key: 'scale',         label: 'Scale',   min: 0.1,  max: 5   },
-  reaction:        { key: 'feed',          label: 'Feed',    min: 0.0,  max: 0.1 },
-};
-const XR_UI_MODE_ORDER: SimMode[] = ['physics', 'boids', 'physics_classic', 'fluid', 'parametric', 'reaction'];
-
-// Reticle/hover state consumed by the XR UI shader.
-const xrUiState = {
-  hover:              'none' as XrUiElement,
-  pressed:            'none' as XrUiElement,
-  lastHitPx:          0,
-  lastHitPy:          0,
-  lastHitActive:      false,
+// Previous-frame snapshot for joint-derived gesture detection. Parallel to
+// xrPrevPinch. [LAW:one-source-of-truth] Sole previous-state store for the
+// fine-modifier / palm-up / wrist-flick detectors.
+interface XrGestureSnapshot {
+  fineModifier: boolean;        // thumb-ring contact state last frame
+  palmUp: boolean;              // palm-up state last frame (post-hysteresis)
+  wristOrient: number[] | null; // wrist quaternion last frame (null when untracked)
+  wristTime: number;            // performance.now() when wristOrient was captured
+  flickArmed: boolean;          // last frame's angular speed above threshold
+  lastFlickAt: number;          // performance.now() of last emitted flick (refractory)
+}
+function makeGestureSnapshot(): XrGestureSnapshot {
+  return { fineModifier: false, palmUp: false, wristOrient: null, wristTime: 0, flickArmed: false, lastFlickAt: 0 };
+}
+const xrPrevGestureSnap: Record<XrHand, XrGestureSnapshot> = {
+  left: makeGestureSnapshot(),
+  right: makeGestureSnapshot(),
 };
 
-function getXrSliderNormalized(): number {
-  const def = XR_UI_SLIDER_DEFS[state.mode];
-  const modeParamsObj = state[state.mode] as unknown as Record<string, number>;
-  const v = modeParamsObj[def.key];
-  if (typeof v !== 'number') return 0;
-  return Math.max(0, Math.min(1, (v - def.min) / (def.max - def.min)));
+// Palm-up hysteresis on palmNormal·worldUp. Enter >0.7 (~45° of vertical),
+// exit <0.4 (~65°). The dead zone absorbs frame-to-frame noise when the palm
+// is held vertical.
+const XR_PALM_UP_ENTER = 0.7;
+const XR_PALM_UP_EXIT = 0.4;
+
+// Wrist-flick thresholds. 4 rad/s ≈ 230°/s — a deliberate snap, not casual
+// motion. 2-frame consensus (flickArmed) plus 300ms refractory suppresses
+// ringing and oscillation on the flick peak.
+const XR_FLICK_SPEED_RAD_S = 4.0;
+const XR_FLICK_REFRACTORY_MS = 300;
+
+// ── METRIC CHANNELS ────────────────────────────────────────────────────────────
+// Declared once; producers below guard emit with `chan.subscribers.size > 0`.
+// Payload shapes are typed here and flow through subscribers unchanged.
+interface XrGestureEvent { hand: XrHand | null; gesture: XrGesture }
+interface XrStateEvent { hand: XrHand; from: XrInteraction['kind']; to: XrInteraction['kind'] }
+interface XrSnapEvent {
+  hand: XrHand;
+  handTracked: boolean;      // hand-tracking is producing joints this frame
+  pinching: boolean;         // a pinch source is currently active (system gesture)
+  palmDot: number | null;    // palmNormal · worldUp
+  palmUp: boolean;
+  fineModifier: boolean;
+  flickSpeed: number;        // rad/s, 0 when no prior orientation
+  grip: XrGripState | null;
+}
+const chanXrGesture = metrics.channel<XrGestureEvent>('xr.gesture');
+const chanXrState   = metrics.channel<XrStateEvent>('xr.state');
+const chanXrSnap    = metrics.channel<XrSnapEvent>('xr.snap');
+
+// Live console logger — a consumer of the three XR channels. Toggled on/off
+// from the UI + persisted via state.debug.xrLog. [LAW:single-enforcer] This is
+// the sole wiring for console output; the XR recording feature (one-shot dump at
+// session end) keeps its own independent subscription lifecycle. Snap events
+// are rate-limited here so the 180 Hz raw stream doesn't flood the console —
+// the producer still emits every frame, each consumer samples at its cadence.
+const xrLogState = {
+  unsubs: [] as Array<() => void>,
+  lastSnapMs: { left: 0, right: 0 } as Record<XrHand, number>,
+};
+const XR_LOG_SNAP_INTERVAL_MS = 200;  // 5 Hz console cadence for snap stream
+
+function setXrDebugLogging(on: boolean): void {
+  for (const u of xrLogState.unsubs) u();
+  xrLogState.unsubs.length = 0;
+  xrLogState.lastSnapMs.left = 0;
+  xrLogState.lastSnapMs.right = 0;
+  if (!on) return;
+  xrLogState.unsubs.push(metrics.subscribe(chanXrGesture, (p) => {
+    if (p.gesture.kind === 'pinch-hold') return;  // per-frame noise
+    const h = p.hand ? `(${p.hand})` : '';
+    // eslint-disable-next-line no-console
+    console.log(`[xr] gesture:${p.gesture.kind}${h}`, p.gesture);
+  }));
+  xrLogState.unsubs.push(metrics.subscribe(chanXrState, (p) => {
+    // eslint-disable-next-line no-console
+    console.log(`[xr] state:${p.hand} ${p.from}→${p.to}`);
+  }));
+  xrLogState.unsubs.push(metrics.subscribe(chanXrSnap, (p) => {
+    const now = performance.now();
+    if (now - xrLogState.lastSnapMs[p.hand] < XR_LOG_SNAP_INTERVAL_MS) return;
+    xrLogState.lastSnapMs[p.hand] = now;
+    const palm = p.palmDot !== null ? p.palmDot.toFixed(2) : '—';
+    // eslint-disable-next-line no-console
+    console.log(`[xr] snap:${p.hand} tracked=${p.handTracked} pinch=${p.pinching} palm=${palm} palmUp=${p.palmUp} fine=${p.fineModifier} flick=${p.flickSpeed.toFixed(2)}`);
+  }));
 }
 
-// Ray-plane intersection against the panel (plane at z = center[2], normal = +Z).
-// Returns panel-local (px, py) in aspect-corrected coords and the element under the hit.
-function hitTestXrUi(origin: number[], dir: number[]): { px: number; py: number; element: XrUiElement } | null {
-  const [cx, cy, cz] = XR_UI_PANEL_CENTER;
-  const [sx, sy] = XR_UI_PANEL_SIZE;
-  if (Math.abs(dir[2]) < 1e-6) return null;
-  const t = (cz - origin[2]) / dir[2];
-  if (t < 0) return null;
-  const hitX = origin[0] + dir[0] * t;
-  const hitY = origin[1] + dir[1] * t;
-  const u = (hitX - cx) / sx + 0.5;
-  const v = (hitY - cy) / sy + 0.5;
-  if (u < 0 || u > 1 || v < 0 || v > 1) return null;
-
-  const aspect = sx / sy;
-  const px = (u - 0.5) * aspect;
-  const py = v - 0.5;
-
-  // Classify — box tests matching the shader's element placements.
-  let element: XrUiElement = 'none';
-  if (Math.abs(px - XR_UI_PREV_X_FRAC * aspect) < XR_UI_BTN_HALF_W && Math.abs(py - XR_UI_BTN_Y) < XR_UI_BTN_HALF_H) {
-    element = 'prev';
-  } else if (Math.abs(px - XR_UI_NEXT_X_FRAC * aspect) < XR_UI_BTN_HALF_W && Math.abs(py - XR_UI_BTN_Y) < XR_UI_BTN_HALF_H) {
-    element = 'next';
-  } else if (Math.abs(py - XR_UI_GRAB_Y) < XR_UI_GRAB_HALF_H && Math.abs(px) < XR_UI_GRAB_HALF_W) {
-    element = 'grab';
-  } else {
-    const trackHalfW = aspect * XR_UI_SLIDER_HALF_W_FRAC;
-    if (Math.abs(py - XR_UI_SLIDER_Y) < XR_UI_SLIDER_HALF_H && Math.abs(px) < trackHalfW + 0.04) {
-      element = 'slider';
-    }
+// State-transition helper: routes every xrInteractions[hand] assignment so the
+// change emits on xr.state exactly once per kind-change. Kind-identical writes
+// (e.g. re-entering pending with a fresh deadline) do not emit.
+function xrSetInteraction(hand: XrHand, next: XrInteraction): void {
+  const prev = xrInteractions[hand];
+  xrInteractions[hand] = next;
+  if (chanXrState.subscribers.size > 0 && prev.kind !== next.kind) {
+    metrics.emit(chanXrState, { hand, from: prev.kind, to: next.kind });
   }
-  return { px, py, element };
 }
 
-// Intersect a ray with a Z-plane, returning the world-space hit point.
-function xrRayPlaneHitWorld(origin: number[], dir: number[], planeZ: number): [number, number, number] | null {
-  if (Math.abs(dir[2]) < 1e-6) return null;
-  const t = (planeZ - origin[2]) / dir[2];
-  if (t < 0) return null;
-  return [origin[0] + dir[0] * t, origin[1] + dir[1] * t, planeZ];
-}
+// Synthetic pointer ids for XR attractors — one per hand so left and right
+// create independent concurrent attractors. [LAW:one-source-of-truth] Each hand
+// owns exactly one slot in the attractor system's pointer-id map.
+const XR_ATTRACTOR_POINTER_ID: Record<XrHand, number> = { left: -1, right: -2 };
 
-function setXrSliderFromHit(px: number): void {
-  const aspect = XR_UI_PANEL_SIZE[0] / XR_UI_PANEL_SIZE[1];
-  const trackHalfW = aspect * XR_UI_SLIDER_HALF_W_FRAC;
-  const t = Math.max(0, Math.min(1, (px + trackHalfW) / (2 * trackHalfW)));
-  const def = XR_UI_SLIDER_DEFS[state.mode];
-  const modeParamsObj = state[state.mode] as unknown as Record<string, number>;
-  modeParamsObj[def.key] = def.min + (def.max - def.min) * t;
-}
-
-function cycleXrUiMode(delta: number): void {
-  const idx = XR_UI_MODE_ORDER.indexOf(state.mode);
-  const next = XR_UI_MODE_ORDER[(idx + delta + XR_UI_MODE_ORDER.length) % XR_UI_MODE_ORDER.length];
-  selectMode(next);
-}
-
-// Synthetic pointer id for the single XR interaction channel — keeps the attractor
-// system's per-pointer-id contract uniform across desktop/mobile/XR.
-const XR_ATTRACTOR_POINTER_ID = -1;
+// Pinch-start simultaneity window. Two pinch-starts within this window are
+// treated as "both at once" → two-hand zoom. Outside the window, sequential
+// pinches each commit to their own attractor. First attractor carries this
+// latency — the tradeoff for disambiguating zoom from sequential-attractor.
+const XR_SIMUL_WINDOW_MS = 150;
 
 // ─── LOW-LEVEL HELPERS ───────────────────────────────────────────────────────
 
@@ -4891,14 +5852,85 @@ function findHandForSource(source: XRInputSource): XrHand | null {
   return null;
 }
 
-function applyHitToUiState(hit: { px: number; py: number; element: XrUiElement } | null): void {
-  if (hit) {
-    xrUiState.lastHitPx = hit.px;
-    xrUiState.lastHitPy = hit.py;
-    xrUiState.lastHitActive = true;
-  } else {
-    xrUiState.lastHitActive = false;
+// ── HAND-TRACKING HELPERS ──────────────────────────────────────────────────────
+// Thumb-tip-to-fingertip squared-distance threshold for grip.* flags. 3cm is
+// the common visionOS pinch-contact heuristic; squared so we skip the sqrt.
+const XR_GRIP_THRESHOLD_M = 0.03;
+const XR_GRIP_THRESHOLD_SQ = XR_GRIP_THRESHOLD_M * XR_GRIP_THRESHOLD_M;
+
+// Quaternion helpers (xyzw convention, matching XRJointPose.orientation).
+function quatConj(q: number[]): number[] { return [-q[0], -q[1], -q[2], q[3]]; }
+function quatMul(a: number[], b: number[]): number[] {
+  return [
+    a[3]*b[0] + a[0]*b[3] + a[1]*b[2] - a[2]*b[1],
+    a[3]*b[1] - a[0]*b[2] + a[1]*b[3] + a[2]*b[0],
+    a[3]*b[2] + a[0]*b[1] - a[1]*b[0] + a[2]*b[3],
+    a[3]*b[3] - a[0]*b[0] - a[1]*b[1] - a[2]*b[2],
+  ];
+}
+
+// Always returns a fully-populated record (all 25 keys). Entries are null when
+// `XRHand.get(name)` is missing or `frame.getJointPose` returns null for that
+// joint. [LAW:no-defensive-null-guards] The nulls here represent data state
+// ("joint not tracked right now"), not defensive guards around bugs.
+function queryHandJoints(frame: XRFrame, xrHand: XRHand, refSpace: XRReferenceSpace): XrJoints {
+  const joints = {} as XrJoints;
+  for (const name of XR_JOINT_NAMES) {
+    const space = xrHand.get(name);
+    const pose = space ? frame.getJointPose(space, refSpace) : null;
+    if (!pose) { joints[name] = null; continue; }
+    const p = pose.transform.position;
+    const o = pose.transform.orientation;
+    joints[name] = {
+      position: [p.x, p.y, p.z],
+      orientation: [o.x, o.y, o.z, o.w],
+      radius: pose.radius,
+    };
   }
+  return joints;
+}
+
+// Palm normal points OUT of the palm (away from the back of the hand).
+// Derived from wrist, index-finger-metacarpal, pinky-finger-metacarpal.
+// Sign convention differs by handedness: the same cross-product ordering
+// gives opposite normals for left vs right because the hands are mirrored.
+// Null ⟺ any of the three source joints is currently untracked OR the
+// metacarpals are collinear with the wrist (degenerate cross product).
+function computePalmNormal(joints: XrJoints, hand: XrHand): number[] | null {
+  const wrist = joints['wrist'];
+  const indexMeta = joints['index-finger-metacarpal'];
+  const pinkyMeta = joints['pinky-finger-metacarpal'];
+  if (!wrist || !indexMeta || !pinkyMeta) return null;
+  const toIndex = sub3(indexMeta.position, wrist.position);
+  const toPinky = sub3(pinkyMeta.position, wrist.position);
+  // Right hand: cross(toPinky, toIndex) points out of palm.
+  // Left  hand: cross(toIndex, toPinky) points out of palm (mirror).
+  const raw = hand === 'right' ? cross3(toPinky, toIndex) : cross3(toIndex, toPinky);
+  // Reject near-collinear metacarpals: a healthy cross product has |raw|² on
+  // the order of (5cm × 5cm)² ≈ 6e-6 m⁴; floor at 1e-12 catches both exact
+  // zeros and the noisy unit vectors normalize3 would produce from tiny inputs.
+  const lenSq = raw[0]*raw[0] + raw[1]*raw[1] + raw[2]*raw[2];
+  if (lenSq < 1e-12) return null;
+  return normalize3(raw);
+}
+
+// Thumb-tip-to-fingertip geometric grip flags. Outer null ⟺ thumb-tip is
+// untracked (no anchor for any distance). Per-flag null ⟺ that specific
+// finger-tip is untracked. A tracked finger-tip → boolean contact flag.
+function computeGripState(joints: XrJoints): XrGripState | null {
+  const thumb = joints['thumb-tip'];
+  if (!thumb) return null;
+  const flag = (tip: XrJointPose | null): boolean | null => {
+    if (!tip) return null;
+    const d = sub3(thumb.position, tip.position);
+    return dot3(d, d) < XR_GRIP_THRESHOLD_SQ;
+  };
+  return {
+    thumbIndex:  flag(joints['index-finger-tip']),
+    thumbMiddle: flag(joints['middle-finger-tip']),
+    thumbRing:   flag(joints['ring-finger-tip']),
+    thumbPinky:  flag(joints['pinky-finger-tip']),
+  };
 }
 
 // ── REFERENCE SPACE MANAGEMENT ─────────────────────────────────────────────────
@@ -4951,6 +5983,52 @@ function xrUpdateHandFrames(frame: XRFrame): void {
     const pos = getXrHandPosition(frame, hf.source);
     if (pos) hf.pinch.current = pos;
   }
+
+  // Hand-tracking update. Independent of pinch state — a visible, non-pinching
+  // hand still produces joint poses. Clear-then-populate: the clear guarantees
+  // that when a hand disappears from inputSources, its joint fields become null
+  // on the next frame, so stale data can't linger. [LAW:one-source-of-truth]
+  // xrHandFrames[hand].joints is the sole store of per-frame joint data;
+  // palmNormal and grip are derived here and written atomically with joints.
+  for (const hand of ['left', 'right'] as XrHand[]) {
+    const hf = xrHandFrames[hand];
+    hf.joints = null;
+    hf.palmNormal = null;
+    hf.grip = null;
+    hf.ray = null;
+  }
+  if (xrRefSpace) {
+    for (const source of frame.session.inputSources) {
+      // 'none' handedness (e.g. transient gaze input) has no left/right slot.
+      // !source.hand means the runtime didn't expose hand tracking for this
+      // source — the per-source data itself tells us to skip, no need to
+      // consult the session-level xrHandTrackingAvailable flag.
+      if (source.handedness === 'none' || !source.hand) continue;
+      const hand: XrHand = source.handedness;
+      const hf = xrHandFrames[hand];
+      const joints = queryHandJoints(frame, source.hand, xrRefSpace);
+      hf.joints = joints;
+      hf.palmNormal = computePalmNormal(joints, hand);
+      hf.grip = computeGripState(joints);
+      // [LAW:one-source-of-truth] Advisory hover ray — synthesized always when
+      // the two source joints are present. NEVER drives selection (that's
+      // gazeRay) and NEVER drives drag (that's currentRay).
+      hf.ray = computeAdvisoryRay(joints);
+    }
+  }
+}
+
+// Advisory hand ray from joints. Origin at the index knuckle (feels natural
+// in VR — ray emanates from the pointing hand, not the wrist). Direction
+// along knuckle−wrist, so the ray points forward past the knuckle and
+// rotates with the hand independently of index-finger curl.
+function computeAdvisoryRay(joints: XrJoints): XrRay | null {
+  const wrist = joints['wrist'];
+  const knuckle = joints['index-finger-metacarpal'];
+  if (!wrist || !knuckle) return null;
+  const dir = normalize3(sub3(knuckle.position, wrist.position));
+  if (dir[0] === 0 && dir[1] === 0 && dir[2] === 0) return null;
+  return { origin: [...knuckle.position], dir };
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -4966,6 +6044,7 @@ function xrDetectGestures(): XrGesture[] {
   const bothActive = leftActive && rightActive;
   const prevBoth = xrPrevPinch.left && xrPrevPinch.right;
 
+  const now = performance.now();
   for (const hand of ['left', 'right'] as XrHand[]) {
     const hf = xrHandFrames[hand];
     const wasActive = xrPrevPinch[hand];
@@ -4974,9 +6053,84 @@ function xrDetectGestures(): XrGesture[] {
     if (isActive && !wasActive && hf.gazeRay) {
       gestures.push({ kind: 'pinch-start', hand, gazeRay: hf.gazeRay });
     } else if (isActive && wasActive) {
-      gestures.push({ kind: 'pinch-hold', hand, dur: performance.now() - hf.pinch.startTime });
+      gestures.push({ kind: 'pinch-hold', hand, dur: now - hf.pinch.startTime });
     } else if (!isActive && wasActive) {
-      gestures.push({ kind: 'pinch-end', hand, dur: performance.now() - hf.pinch.startTime });
+      gestures.push({ kind: 'pinch-end', hand, dur: now - hf.pinch.startTime });
+    }
+
+    const prev = xrPrevGestureSnap[hand];
+
+    // Fine-modifier: thumb-to-ring-finger contact edge. grip is null when the
+    // thumb-tip or all finger-tips are untracked — skip detection but keep prev
+    // so we don't spuriously re-fire 'off' when tracking returns.
+    if (hf.grip) {
+      const active = hf.grip.thumbRing === true;
+      if (active && !prev.fineModifier) gestures.push({ kind: 'fine-modifier-on', hand });
+      else if (!active && prev.fineModifier) gestures.push({ kind: 'fine-modifier-off', hand });
+      prev.fineModifier = active;
+    }
+
+    // Palm orientation: palmNormal · worldUp. Hysteresis band ENTER>0.7, EXIT<0.4
+    // prevents flicker when the palm is held near vertical.
+    if (hf.palmNormal) {
+      const upDot = hf.palmNormal[1];
+      const isUp = prev.palmUp ? (upDot > XR_PALM_UP_EXIT) : (upDot > XR_PALM_UP_ENTER);
+      if (isUp && !prev.palmUp) gestures.push({ kind: 'palm-up', hand });
+      else if (!isUp && prev.palmUp) gestures.push({ kind: 'palm-down', hand });
+      prev.palmUp = isUp;
+    }
+
+    // Wrist-flick: angular speed of wrist-quaternion delta. Dominant world axis
+    // → roll/pitch/yaw bucket (approximation; refine to forearm basis if needed).
+    // 2-frame consensus (flickArmed) + 300ms refractory suppresses ringing at
+    // the flick peak and prevents a single quick motion firing twice.
+    // Gated on !pinch.active — during a drag, rotational motion is a side
+    // effect of positioning the attractor, not an intentional flick gesture.
+    const wristQuat = hf.joints?.['wrist']?.orientation ?? null;
+    let flickSpeed = 0;
+    if (wristQuat && prev.wristOrient && !hf.pinch.active) {
+      const dtSec = Math.max(0.001, (now - prev.wristTime) / 1000);
+      const delta = quatMul(wristQuat, quatConj(prev.wristOrient));
+      const w = Math.min(1, Math.abs(delta[3]));
+      const angle = 2 * Math.acos(w);
+      const sinHalf = Math.sqrt(Math.max(0, 1 - w * w));
+      const s = delta[3] < 0 ? -1 : 1;
+      const ax = sinHalf > 1e-6 ? (delta[0] * s) / sinHalf : 0;
+      const ay = sinHalf > 1e-6 ? (delta[1] * s) / sinHalf : 0;
+      const az = sinHalf > 1e-6 ? (delta[2] * s) / sinHalf : 0;
+      flickSpeed = angle / dtSec;
+      const armed = flickSpeed > XR_FLICK_SPEED_RAD_S;
+      if (armed && prev.flickArmed && (now - prev.lastFlickAt) > XR_FLICK_REFRACTORY_MS) {
+        const absX = Math.abs(ax), absY = Math.abs(ay), absZ = Math.abs(az);
+        const axis: 'roll' | 'pitch' | 'yaw' =
+          absX >= absY && absX >= absZ ? 'pitch' :
+          absY >= absZ                 ? 'yaw'   :
+                                         'roll';
+        const comp = axis === 'pitch' ? ax : axis === 'yaw' ? ay : az;
+        const sign: 1 | -1 = comp >= 0 ? 1 : -1;
+        gestures.push({ kind: 'wrist-flick', hand, axis, sign });
+        prev.lastFlickAt = now;
+      }
+      prev.flickArmed = armed;
+    } else {
+      prev.flickArmed = false;
+    }
+    prev.wristOrient = wristQuat ? [...wristQuat] : null;
+    prev.wristTime = now;
+
+    // Per-hand per-frame snapshot. Zero-cost when no subscriber — the recorder
+    // (or any future HUD / chart) subscribes only while active.
+    if (chanXrSnap.subscribers.size > 0) {
+      metrics.emit(chanXrSnap, {
+        hand,
+        handTracked: hf.joints !== null,
+        pinching: hf.pinch.active,
+        palmDot: hf.palmNormal ? hf.palmNormal[1] : null,
+        palmUp: prev.palmUp,
+        fineModifier: prev.fineModifier,
+        flickSpeed,
+        grip: hf.grip,
+      });
     }
   }
 
@@ -4991,6 +6145,15 @@ function xrDetectGestures(): XrGesture[] {
   xrPrevPinch.left = leftActive;
   xrPrevPinch.right = rightActive;
 
+  // Emit each gesture on the metrics bus. Guarded so no payloads or per-event
+  // property reads happen when nobody is subscribed. Two-hand gestures have no
+  // hand field — encode as null.
+  if (chanXrGesture.subscribers.size > 0) {
+    for (const g of gestures) {
+      metrics.emit(chanXrGesture, { hand: 'hand' in g ? g.hand : null, gesture: g });
+    }
+  }
+
   return gestures;
 }
 
@@ -4999,51 +6162,47 @@ function xrDetectGestures(): XrGesture[] {
 // ═══════════════════════════════════════════════════════════════════════════════
 // Consumes gesture events and transitions per-hand InteractionState.
 
-function xrTransitionInteractions(gestures: XrGesture[], frame: XRFrame): void {
+function xrTransitionInteractions(gestures: XrGesture[], _frame: XRFrame): void {
   for (const g of gestures) {
     switch (g.kind) {
+      case 'pinch-start': {
+        // Enter pending window. Commit happens via two-hand-pinch-start
+        // (simultaneous → zoom) OR via the deadline pass below (sequential →
+        // single-hand attractor). No immediate dragging start.
+        xrSetInteraction(g.hand, {
+          kind: 'pending',
+          deadline: performance.now() + XR_SIMUL_WINDOW_MS,
+        });
+        break;
+      }
       case 'two-hand-pinch-start': {
-        // End any single-hand interactions to enter two-hand scale.
-        xrEndInteraction('left');
-        xrEndInteraction('right');
-        const leftPos = xrHandFrames.left.pinch.current;
-        const rightPos = xrHandFrames.right.pinch.current;
-        const d = sub3(leftPos, rightPos);
-        twoHandState.startDistance = Math.max(0.01, Math.sqrt(dot3(d, d)));
-        twoHandState.startOffset = { ...xrViewOffset };
-        xrInteractions.left = { kind: 'two-hand-scale' };
-        xrInteractions.right = { kind: 'two-hand-scale' };
+        // Simultaneous pinch-start detected (both pinches within window →
+        // both hands are still 'pending'). Convert both to two-hand-scale.
+        // If either hand has already committed to 'dragging', the pinches
+        // were sequential — leave the committed hand alone and let the newly
+        // pending hand deadline-commit to its own attractor.
+        if (xrInteractions.left.kind === 'pending' && xrInteractions.right.kind === 'pending') {
+          const d = sub3(xrHandFrames.left.pinch.current, xrHandFrames.right.pinch.current);
+          twoHandState.startDistance = Math.max(0.01, Math.sqrt(dot3(d, d)));
+          twoHandState.startOffset = { ...xrViewOffset };
+          xrSetInteraction('left', { kind: 'two-hand-scale' });
+          xrSetInteraction('right', { kind: 'two-hand-scale' });
+        }
         break;
       }
       case 'two-hand-pinch-end': {
-        // End scale on both hands — remaining single hand may start a new
-        // interaction on next frame's pinch-hold.
-        if (xrInteractions.left.kind === 'two-hand-scale') xrInteractions.left = { kind: 'idle' };
-        if (xrInteractions.right.kind === 'two-hand-scale') xrInteractions.right = { kind: 'idle' };
-        break;
-      }
-      case 'pinch-start': {
-        // Two-hand scale is already handled above; don't start single-hand
-        // interactions if both hands are pinching.
-        if (xrHandFrames.left.pinch.active && xrHandFrames.right.pinch.active) break;
-        xrBeginSingleHandInteraction(g.hand, g.gazeRay, frame);
-        break;
-      }
-      case 'pinch-hold': {
-        // If idle (e.g. was in two-hand-scale, partner released, we're still pinching),
-        // start a single-hand interaction now.
-        if (xrInteractions[g.hand].kind === 'idle' && xrHandFrames[g.hand].gazeRay) {
-          const otherHand: XrHand = g.hand === 'left' ? 'right' : 'left';
-          if (!xrHandFrames[otherHand].pinch.active) {
-            xrBeginSingleHandInteraction(g.hand, xrHandFrames[g.hand].gazeRay!, frame);
-          }
-        }
+        // End scale on both hands. No auto-promote of the remaining pinching
+        // hand — user must release and re-pinch to create an attractor.
+        if (xrInteractions.left.kind === 'two-hand-scale') xrSetInteraction('left', { kind: 'idle' });
+        if (xrInteractions.right.kind === 'two-hand-scale') xrSetInteraction('right', { kind: 'idle' });
         break;
       }
       case 'pinch-end': {
         xrEndInteraction(g.hand);
         break;
       }
+      case 'pinch-hold':
+        break;
       // Stubs — consumed when hand-tracking features land:
       case 'fine-modifier-on':  xrTuning.gainMultiplier = 0.1; break;
       case 'fine-modifier-off': xrTuning.gainMultiplier = 1.0; break;
@@ -5053,48 +6212,29 @@ function xrTransitionInteractions(gestures: XrGesture[], frame: XRFrame): void {
         break;
     }
   }
-}
 
-// Resolve a single-hand pinch-start into a concrete interaction.
-// [LAW:one-source-of-truth] gazeRay (frozen at pinch-start) is the sole authority for selection.
-function xrBeginSingleHandInteraction(hand: XrHand, gazeRay: XrRay, _frame: XRFrame): void {
-  const hit = hitTestXrUi(gazeRay.origin, gazeRay.dir);
-  if (hit && hit.element !== 'none') {
-    // UI interaction — pressing or dragging depending on element type.
-    if (hit.element === 'slider') {
-      setXrSliderFromHit(hit.px);
-      xrInteractions[hand] = {
-        kind: 'dragging', target: 'ui:slider', dragType: 'slider',
-        handOrigin: xrHandFrames[hand].pinch.origin,
-        panelOriginWorld: null, panelOriginCenter: null, hasSample: false,
-      };
-    } else if (hit.element === 'grab') {
-      const source = xrHandFrames[hand].source;
-      const worldHit = source ? xrRayPlaneHitWorld(gazeRay.origin, gazeRay.dir, XR_UI_PANEL_CENTER[2]) : null;
-      xrInteractions[hand] = {
-        kind: 'dragging', target: 'ui:grab', dragType: 'panel-grab',
-        handOrigin: xrHandFrames[hand].pinch.origin,
-        panelOriginWorld: worldHit ?? [0, 0, 0],
-        panelOriginCenter: [XR_UI_PANEL_CENTER[0], XR_UI_PANEL_CENTER[1], XR_UI_PANEL_CENTER[2]],
-        hasSample: false,
-      };
-    } else {
-      // prev/next button — pressing, commit on release.
-      xrInteractions[hand] = {
-        kind: 'pressing', target: `ui:${hit.element}`, element: hit.element,
-        startedAt: performance.now(),
-      };
+  // Deadline pass: any hand still 'pending' whose window has elapsed commits
+  // to single-hand dragging. Runs every frame — same code path whether the
+  // hand is fresh-pending (stays pending) or past-deadline (promotes).
+  // [LAW:dataflow-not-control-flow] Same work every frame; the state decides.
+  const now = performance.now();
+  for (const hand of ['left', 'right'] as XrHand[]) {
+    const ix = xrInteractions[hand];
+    if (ix.kind === 'pending' && now >= ix.deadline) {
+      // [LAW:single-enforcer] UI selection wins over sim attractor on the same
+      // pinch. xrUiStep set xrUiClaimed[hand] at the pinch-start frame; if true,
+      // drop the pending pinch instead of starting a sim drag. The pinch will
+      // continue feeding xrUiStep until pinch-end.
+      if (xrUiClaimed[hand]) {
+        xrSetInteraction(hand, { kind: 'idle' });
+      } else {
+        xrSetInteraction(hand, {
+          kind: 'dragging',
+          handOrigin: [...xrHandFrames[hand].pinch.origin],
+          hasSample: false,
+        });
+      }
     }
-    xrUiState.pressed = hit.element;
-    xrUiState.hover = hit.element;
-    applyHitToUiState(hit);
-  } else {
-    // Space interaction — sim attractor/fluid.
-    xrInteractions[hand] = {
-      kind: 'dragging', target: 'sim', dragType: 'sim',
-      handOrigin: xrHandFrames[hand].pinch.origin,
-      panelOriginWorld: null, panelOriginCenter: null, hasSample: false,
-    };
   }
 }
 
@@ -5102,40 +6242,16 @@ function xrBeginSingleHandInteraction(hand: XrHand, gazeRay: XrRay, _frame: XRFr
 function xrEndInteraction(hand: XrHand): void {
   const ix = xrInteractions[hand];
   switch (ix.kind) {
-    case 'pressing': {
-      // Commit button action if still hovering over it.
-      const hf = xrHandFrames[hand];
-      const ray = hf.currentRay;
-      const stillOnTarget = ray ? hitTestXrUi(ray.origin, ray.dir) : null;
-      if (stillOnTarget?.element === ix.element) {
-        if (ix.element === 'prev') cycleXrUiMode(-1);
-        else if (ix.element === 'next') cycleXrUiMode(1);
-      }
-      xrUiState.pressed = 'none';
-      xrUiState.hover = 'none';
-      xrUiState.lastHitActive = false;
+    case 'dragging':
+      setSimulationInteractionInactive();
+      releaseAttractor(XR_ATTRACTOR_POINTER_ID[hand]);
       break;
-    }
-    case 'dragging': {
-      if (ix.dragType === 'slider') {
-        syncUIFromState();
-        saveState();
-      }
-      if (ix.dragType === 'sim') {
-        setSimulationInteractionInactive();
-        releaseAttractor(XR_ATTRACTOR_POINTER_ID);
-      }
-      xrUiState.pressed = 'none';
-      xrUiState.hover = 'none';
-      xrUiState.lastHitActive = false;
-      break;
-    }
+    case 'pending':
     case 'two-hand-scale':
-    case 'hovering':
     case 'idle':
       break;
   }
-  xrInteractions[hand] = { kind: 'idle' };
+  xrSetInteraction(hand, { kind: 'idle' });
   // [LAW:one-source-of-truth] Release ray has now been consumed (if needed by
   // the 'pressing' case above). Final hand-frame cleanup here — guarded on
   // !pinch.active so two-hand-pinch-start (which calls xrEndInteraction with
@@ -5167,7 +6283,7 @@ function xrApplyInteractions(_frame: XRFrame): void {
     return;
   }
 
-  // Per-hand effects.
+  // Per-hand sim interaction — attractor (physics) / force injection (fluid).
   let anySimDrag = false;
   for (const hand of ['left', 'right'] as XrHand[]) {
     const ix = xrInteractions[hand];
@@ -5176,90 +6292,46 @@ function xrApplyInteractions(_frame: XRFrame): void {
     const ray = hf.currentRay;
     if (!ray) continue;
 
-    switch (ix.dragType) {
-      case 'slider': {
-        const hit = hitTestXrUi(ray.origin, ray.dir);
-        applyHitToUiState(hit);
-        xrUiState.hover = hit ? hit.element : 'none';
-        if (hit) setXrSliderFromHit(hit.px);
-        break;
-      }
-      case 'panel-grab': {
-        if (ix.panelOriginWorld && ix.panelOriginCenter) {
-          const worldHit = xrRayPlaneHitWorld(ray.origin, ray.dir, ix.panelOriginCenter[2]);
-          if (worldHit) {
-            XR_UI_PANEL_CENTER[0] = ix.panelOriginCenter[0] + (worldHit[0] - ix.panelOriginWorld[0]);
-            XR_UI_PANEL_CENTER[1] = ix.panelOriginCenter[1] + (worldHit[1] - ix.panelOriginWorld[1]);
-          }
-        }
-        xrUiState.lastHitPx = 0;
-        xrUiState.lastHitPy = XR_UI_GRAB_Y;
-        xrUiState.lastHitActive = true;
-        xrUiState.hover = 'grab';
-        break;
-      }
-      case 'sim': {
-        anySimDrag = true;
-        const worldPoint = state.mode === 'fluid'
-          ? intersectRayWithPlane(ray.origin, ray.dir, 0)
-          : closestPointOnRayToOrigin(ray.origin, ray.dir);
-        if (!worldPoint) {
-          setSimulationInteractionInactive();
-          ix.hasSample = false;
-          break;
-        }
-        state.mouse.down = true;
-        state.mouse.worldX = worldPoint[0];
-        state.mouse.worldY = worldPoint[1];
-        state.mouse.worldZ = worldPoint[2];
-        if (state.mode === 'fluid') {
-          const uv = worldToFluidUV(worldPoint);
-          if (!uv) { setSimulationInteractionInactive(); ix.hasSample = false; break; }
-          state.mouse.dx = ix.hasSample ? (uv[0] - state.mouse.x) * 10 : 0;
-          state.mouse.dy = ix.hasSample ? (uv[1] - state.mouse.y) * 10 : 0;
-          state.mouse.x = uv[0];
-          state.mouse.y = uv[1];
-        } else {
-          state.mouse.dx = 0; state.mouse.dy = 0;
-          state.mouse.x = worldPoint[0]; state.mouse.y = worldPoint[1];
-        }
-        if (state.mode === 'physics') {
-          if (state.pointerToAttractor.has(XR_ATTRACTOR_POINTER_ID)) {
-            moveAttractor(XR_ATTRACTOR_POINTER_ID, worldPoint);
-          } else {
-            createAttractor(XR_ATTRACTOR_POINTER_ID, worldPoint);
-          }
-        }
-        ix.hasSample = true;
-        break;
+    anySimDrag = true;
+    const worldPoint = state.mode === 'fluid'
+      ? intersectRayWithPlane(ray.origin, ray.dir, 0)
+      : closestPointOnRayToOrigin(ray.origin, ray.dir);
+    if (!worldPoint) {
+      setSimulationInteractionInactive();
+      ix.hasSample = false;
+      continue;
+    }
+    state.mouse.down = true;
+    state.mouse.worldX = worldPoint[0];
+    state.mouse.worldY = worldPoint[1];
+    state.mouse.worldZ = worldPoint[2];
+    if (state.mode === 'fluid') {
+      const uv = worldToFluidUV(worldPoint);
+      if (!uv) { setSimulationInteractionInactive(); ix.hasSample = false; continue; }
+      state.mouse.dx = ix.hasSample ? (uv[0] - state.mouse.x) * 10 : 0;
+      state.mouse.dy = ix.hasSample ? (uv[1] - state.mouse.y) * 10 : 0;
+      state.mouse.x = uv[0];
+      state.mouse.y = uv[1];
+    } else {
+      state.mouse.dx = 0; state.mouse.dy = 0;
+      state.mouse.x = worldPoint[0]; state.mouse.y = worldPoint[1];
+    }
+    if (state.mode === 'physics') {
+      const pid = XR_ATTRACTOR_POINTER_ID[hand];
+      if (state.pointerToAttractor.has(pid)) {
+        moveAttractor(pid, worldPoint);
+      } else {
+        createAttractor(pid, worldPoint);
       }
     }
+    ix.hasSample = true;
   }
 
-  // If no sim drag is active, ensure sim interaction state is clean.
+  // [LAW:single-enforcer] If no sim drag is active, ensure sim interaction state is clean.
   if (!anySimDrag) {
     // Only deactivate if we were previously active (avoid clobbering desktop mouse).
     if (state.xrEnabled && state.mouse.down) setSimulationInteractionInactive();
   }
-
-  // [LAW:dataflow-not-control-flow] Passive UI reticle: recompute fresh each
-  // frame so a previous hit never lingers when the pinch sweeps off-panel.
-  // uiOwns guards against stomping reticle state set by slider/panel-grab/pressing.
-  let uiOwns = false;
-  let passiveHit: { px: number; py: number; element: XrUiElement } | null = null;
-  for (const hand of ['left', 'right'] as XrHand[]) {
-    const ix = xrInteractions[hand];
-    if (ix.kind === 'pressing' ||
-        (ix.kind === 'dragging' && (ix.dragType === 'slider' || ix.dragType === 'panel-grab'))) {
-      uiOwns = true;
-      continue;
-    }
-    const hf = xrHandFrames[hand];
-    if (hf.pinch.active && hf.currentRay && !passiveHit) {
-      passiveHit = hitTestXrUi(hf.currentRay.origin, hf.currentRay.dir);
-    }
-  }
-  if (!uiOwns || passiveHit) applyHitToUiState(passiveHit);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -5267,8 +6339,34 @@ function xrApplyInteractions(_frame: XRFrame): void {
 // ═══════════════════════════════════════════════════════════════════════════════
 // Called once per XR frame. Runs all four stages in order.
 
+// Extract head pose in current xrRefSpace as the AnchorContext shape.
+// Returns null while the viewer pose is unavailable (e.g. tracking dropouts).
+function extractXrHeadPose(frame: XRFrame): { position: [number, number, number]; orientation: [number, number, number, number] } | null {
+  if (!xrRefSpace) return null;
+  const pose = frame.getViewerPose(xrRefSpace);
+  if (!pose) return null;
+  const t = pose.transform;
+  return {
+    position: [t.position.x, t.position.y, t.position.z],
+    orientation: [t.orientation.x, t.orientation.y, t.orientation.z, t.orientation.w],
+  };
+}
+
 function xrInputStep(frame: XRFrame): void {
   xrUpdateHandFrames(frame);
+  // [LAW:single-enforcer] xrUiStep runs BEFORE gesture/transition stages so
+  // its claim flag is current by the time xrTransitionInteractions's deadline
+  // pass decides whether to promote a pending pinch to a sim attractor drag.
+  // [LAW:dataflow-not-control-flow] Always called; with no active layout it
+  // returns idle/empty. No "if UI active" branch around it.
+  const headPose = extractXrHeadPose(frame);
+  const uiResult = xrUiStep(xrUiRegistry, xrHandFrames, xrUiPrev, { hands: xrHandFrames, headPose }, xrTuning, 16);
+  xrUiApplyEffects(uiResult.sideEffects, xrUiRegistry);
+  xrUiPrev = uiResult.next;
+  xrUiRenderList = uiResult.renderList;
+  xrUiClaimed.left  = uiHandClaimed(uiResult.next.states.left);
+  xrUiClaimed.right = uiHandClaimed(uiResult.next.states.right);
+
   const gestures = xrDetectGestures();
   xrTransitionInteractions(gestures, frame);
   xrApplyInteractions(frame);
@@ -5296,13 +6394,20 @@ function xrResetInputState(): void {
   xrPendingSources.length = 0;
   xrHandFrames.left = makeIdleHandFrame('left');
   xrHandFrames.right = makeIdleHandFrame('right');
-  xrInteractions.left = { kind: 'idle' };
-  xrInteractions.right = { kind: 'idle' };
+  xrSetInteraction('left', { kind: 'idle' });
+  xrSetInteraction('right', { kind: 'idle' });
   xrPrevPinch.left = false;
   xrPrevPinch.right = false;
+  xrPrevGestureSnap.left = makeGestureSnapshot();
+  xrPrevGestureSnap.right = makeGestureSnapshot();
   xrTuning.gainMultiplier = 1.0;
+  xrUiPrev = xrUiMakeIdlePrev();
+  xrUiRenderList = [];
+  xrUiClaimed.left = false;
+  xrUiClaimed.right = false;
   setSimulationInteractionInactive();
-  releaseAttractor(XR_ATTRACTOR_POINTER_ID);
+  releaseAttractor(XR_ATTRACTOR_POINTER_ID.left);
+  releaseAttractor(XR_ATTRACTOR_POINTER_ID.right);
 }
 
 function setupXRButton() {
@@ -5345,12 +6450,19 @@ async function toggleXR() {
     currentGpuPhase = 'xr:requestSession';
     xrSession = await navigator.xr!.requestSession('immersive-vr', {
       requiredFeatures: ['webgpu'],
-      optionalFeatures: ['layers', 'local-floor'],
+      optionalFeatures: ['layers', 'local-floor', 'hand-tracking'],
     });
+    // [LAW:one-source-of-truth] enabledFeatures is the WebXR-spec synchronous report
+    // of which optional features the runtime granted. Missing/empty → false, which
+    // is the correct conservative default ([LAW:no-defensive-null-guards]).
+    const enabledFeatures = xrSession.enabledFeatures;
+    xrHandTrackingAvailable = !!enabledFeatures && enabledFeatures.includes('hand-tracking');
     logInfo('xr', 'session acquired', {
       environmentBlendMode: (xrSession as unknown as { environmentBlendMode?: string }).environmentBlendMode,
       interactionMode: (xrSession as unknown as { interactionMode?: string }).interactionMode,
       visibilityState: (xrSession as unknown as { visibilityState?: string }).visibilityState,
+      handTracking: xrHandTrackingAvailable,
+      enabledFeatures,
     });
     let gotFloor = false;
     try {
@@ -5474,6 +6586,109 @@ async function toggleXR() {
     state.xrEnabled = true;
     currentGpuPhase = 'xr:awaiting first frame';
 
+    // Auto-register debug widget fixture so the renderer always has something
+    // visible without a console snippet. Expanded for ticket .19 to cover all
+    // 9 widget kinds — two rows, the new kinds in the second row. Remove when
+    // ticket .13 lands the real clipboard.
+    const idQuat: [number, number, number, number] = [0, 0, 0, 1];
+    const widgetSize = { x: 0.16, y: 0.06 };
+    const widgetPad  = { x: 0.02, y: 0.02 };
+    xrUiRegistry.layouts.set('debug', {
+      id: 'debug-panel', kind: 'panel',
+      // head-hud anchor pins the debug fixture ~70cm in front of the user's
+      // face so it stays interactive regardless of xrViewOffset (the
+      // simulation pan/zoom). World-anchored at z=-0.6 it appeared 4.4m
+      // away because the default xrViewOffset.z = -5 puts the camera 5m
+      // back from world origin — widgets shrunk to pixel-sized squares
+      // (per first XR session screenshots). Offset y=-0.15 drops the panel
+      // below eye-line so it doesn't block the simulation.
+      anchor: { kind: 'head-hud', distance: 0.7,
+                offset: { position: [0, -0.15, 0], orientation: idQuat } },
+      size: { x: 1.1, y: 0.5 },
+      children: [
+        {
+          id: 'debug-row-1', kind: 'group', layout: 'row',
+          children: [
+            { id: 'debug-s1', kind: 'slider', binding: 'physics.G',
+              orientation: 'horizontal', interaction: { kind: 'direct-drag', axis: 'x' },
+              visualSize: widgetSize, hitPadding: widgetPad },
+            { id: 'debug-b1', kind: 'button', binding: 'preset.physics.Default',
+              style: 'primary', visualSize: widgetSize, hitPadding: widgetPad },
+            { id: 'debug-r1', kind: 'readout', binding: 'physics.G',
+              visualSize: widgetSize, hitPadding: widgetPad },
+            { id: 'debug-d1', kind: 'dial', binding: 'physics.softening',
+              interaction: { kind: 'direct-drag', axis: 'x' },
+              visualSize: widgetSize, hitPadding: widgetPad },
+          ],
+        },
+        {
+          id: 'debug-row-2', kind: 'group', layout: 'row',
+          children: [
+            { id: 'debug-tg1', kind: 'toggle', binding: 'app.paused', style: 'switch',
+              visualSize: widgetSize, hitPadding: widgetPad },
+            { id: 'debug-st1', kind: 'stepper', binding: 'physics.count', step: 1000,
+              visualSize: widgetSize, hitPadding: widgetPad },
+            { id: 'debug-en1', kind: 'enum-chips', binding: 'physics.distribution',
+              visualSize: widgetSize, hitPadding: widgetPad },
+            { id: 'debug-pt1', kind: 'preset-tile', binding: 'preset.physics.Spiral Galaxy',
+              visualSize: widgetSize, hitPadding: widgetPad },
+            { id: 'debug-ct1', kind: 'category-tile', targetTabId: 'physics',
+              summary: {},
+              visualSize: widgetSize, hitPadding: widgetPad },
+          ],
+        },
+      ],
+    });
+
+    // Bimanual clipboard — first real XR panel (ticket .13). Held on the non-
+    // dominant hand; the dominant hand pinches widgets.
+    //
+    // The anchor is stored by reference in clipboardAnchor so the offset can
+    // be live-tweaked from DevTools (window.__xrUi.registry.layouts.get('clipboard').anchor)
+    // without re-deploying. Expect several iterations of on-headset tuning
+    // before these values feel right.
+    //
+    // Position: +0.15m "up" in wrist frame to lift the panel above the arm,
+    // -0.10m along wrist-local Z so it's on the palm side.
+    // Orientation: ~60° rotation around wrist-local X so the panel tilts up
+    // toward the user instead of lying flat along the forearm.
+    const tiltX = Math.sin(Math.PI * 0.33);
+    const tiltW = Math.cos(Math.PI * 0.33);
+    const clipboardOffset = {
+      position: [0.00, 0.15, -0.10] as [number, number, number],
+      orientation: [tiltX, 0, 0, tiltW] as [number, number, number, number],
+    };
+    const clipboardAnchor: Anchor = { kind: 'held', hand: XR_PANEL_HAND, offset: clipboardOffset };
+    const sliderSize = { x: 0.17, y: 0.030 };
+    const readoutSize = { x: 0.18, y: 0.025 };
+    xrUiRegistry.layouts.set('clipboard', {
+      id: 'clipboard-panel', kind: 'panel',
+      anchor: clipboardAnchor,
+      size: { x: 0.20, y: 0.28 },
+      children: [{
+        id: 'clipboard-col', kind: 'group', layout: 'column', gap: 0.015,
+        children: [
+          // Title readout uses a concrete continuous binding. app.mode is an
+          // EnumBinding and the MVP readout renderer formats continuous values.
+          { id: 'clipboard-title', kind: 'readout', binding: 'physics.G',
+            visualSize: readoutSize, hitPadding: { x: 0, y: 0 } },
+          { id: 'clipboard-G', kind: 'slider', binding: 'physics.G',
+            orientation: 'horizontal', interaction: { kind: 'direct-drag', axis: 'x' },
+            visualSize: sliderSize, hitPadding: HIG_DEFAULTS.defaultHitPadding },
+          { id: 'clipboard-soft', kind: 'slider', binding: 'physics.softening',
+            orientation: 'horizontal', interaction: { kind: 'direct-drag', axis: 'x' },
+            visualSize: sliderSize, hitPadding: HIG_DEFAULTS.defaultHitPadding },
+          { id: 'clipboard-int', kind: 'slider', binding: 'physics.interactionStrength',
+            orientation: 'horizontal', interaction: { kind: 'direct-drag', axis: 'x' },
+            visualSize: sliderSize, hitPadding: HIG_DEFAULTS.defaultHitPadding },
+        ],
+      }],
+    });
+    // Default to the clipboard. The 'debug' layout remains registered — switch
+    // via window.__xrUi-style inspection tools when the renderer test fixture
+    // is needed.
+    xrUiRegistry.activeLayoutId = 'clipboard';
+
     xrSession.addEventListener('visibilitychange', () => {
       logInfo('xr', 'visibilitychange', {
         visibilityState: (xrSession as unknown as { visibilityState?: string } | null)?.visibilityState,
@@ -5490,6 +6705,7 @@ async function toggleXR() {
       xrBaseRefSpace = null;
       xrBinding = null;
       xrLayer = null;
+      xrHandTrackingAvailable = false;
       state.xrEnabled = false;
       xrFrameCount = 0;
       currentGpuPhase = 'desktop';
@@ -5517,8 +6733,11 @@ function xrFrame(time: DOMHighResTimeStamp, xrFrameData: XRFrame) {
   refreshThemeColors(time);
   const isEarlyFrame = xrFrameCount < XR_FIRST_FRAMES_TO_LOG;
   if (isEarlyFrame) logInfo('xr:frame', `xrFrame #${xrFrameCount} entered`, { mode: state.mode });
-  // [LAW:single-enforcer] Same prune call as desktop frame loop — keeps the attractor array clean in XR too.
+  // [LAW:single-enforcer] Same prune + marker tick as the desktop loop — XR must see the same visual state.
   pruneAttractors(currentSimStep());
+  const xrFrameDeltaMs = lastFrameTimestamp >= 0 ? time - lastFrameTimestamp : 16.7;
+  lastFrameTimestamp = time;
+  tickMarkers(Math.min(0.05, xrFrameDeltaMs * 0.001) * state.fx.timeScale * currentTimeDirection());
 
   // FPS counter for XR — same logic as desktop frame loop
   frameCount++;
@@ -5629,26 +6848,25 @@ function xrFrame(time: DOMHighResTimeStamp, xrFrameData: XRFrame) {
       postFx.needsClear = true; // force loadOp:clear; no XR trails
       const sceneIdx = postFx.sceneIdx;
       currentGpuPhase = `xr:frame:${xrFrameCount}:sim.render(${state.mode},eye=${viewIndex})`;
-      sim.render(encoder, postFx.scene[sceneIdx].createView(), null, viewIndex);
+      const sceneView = postFx.scene[sceneIdx].createView();
+      sim.render(encoder, sceneView, null, viewIndex);
 
-      // Overlay the XR UI panel into the HDR scene so it picks up tonemap + bloom.
-      // Reuse the same depth view so UI z-tests against scene depth and the stored
-      // depth going to the compositor reflects the final pixel occlusion.
-      const uiPass = encoder.beginRenderPass({
-        colorAttachments: [{
-          view: postFx.scene[sceneIdx].createView(),
-          loadOp: 'load',
-          storeOp: 'store',
-        }],
-        depthStencilAttachment: {
-          view: xrDepthOverride ?? postFx.depth!.createView(),
-          depthLoadOp: 'load',
-          depthStoreOp: 'store',
-        },
-      });
-      currentGpuPhase = `xr:frame:${xrFrameCount}:xr-ui(eye=${viewIndex})`;
-      renderXrUi(uiPass, width / height, viewIndex);
-      uiPass.end();
+      // [LAW:dataflow-not-control-flow] Always run the UI render pass — empty
+      // render list → zero draw calls → effectively a no-op. Lazy-init the
+      // renderer on first frame so it doesn't allocate when XR is never used.
+      if (!xrWidgetRenderer) {
+        xrWidgetCameraBuffer = device.createBuffer({
+          label: 'xr-widgets-camera',
+          size: CAMERA_STRIDE * 2,
+          usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+        });
+        xrWidgetRenderer = createXrWidgetRenderer(device, xrWidgetCameraBuffer, () => {
+          const aspect = width / height;
+          return getCameraUniformData(aspect);
+        });
+      }
+      currentGpuPhase = `xr:frame:${xrFrameCount}:xr-widgets(eye=${viewIndex})`;
+      xrWidgetRenderer.draw(encoder, sceneView, postFx.scene[sceneIdx].format, viewIndex, xrUiRenderList);
 
       currentGpuPhase = `xr:frame:${xrFrameCount}:bloom(eye=${viewIndex})`;
       runBloomChain(encoder);
@@ -5685,6 +6903,9 @@ function xrFrame(time: DOMHighResTimeStamp, xrFrameData: XRFrame) {
 let frameCount = 0;
 let fpsTime = 0;
 let currentFps = 0;
+// Last rAF timestamp — drives the adaptive-chunk feedback in debug skip. Seeded to -1 so the first
+// frame's delta isn't a garbage huge number that would shrink the chunk unnecessarily.
+let lastFrameTimestamp = -1;
 
 // --- GPU profiling ---
 // Two paths: GPU timestamp queries (Safari/Metal) give per-pass C/R/P breakdown.
@@ -5942,65 +7163,16 @@ function runComposite(encoder: GPUCommandEncoder, finalView: GPUTextureView, fin
   const fx = state.fx;
   const tc = getThemeColors();
   const buf = postFx.compositeParams;
-  const u32buf = new Uint32Array(buf.buffer);
   buf[0] = fx.bloomIntensity;
   buf[1] = fx.exposure;
   buf[2] = fx.vignette;
   buf[3] = fx.chromaticAberration;
   buf[4] = fx.grading;
-
-  // [LAW:single-enforcer] One matrix setup, reused for every attractor projection below.
-  const aspect = viewport ? (viewport[2] / viewport[3]) : (canvas.width / canvas.height);
-  const fovRad = state.camera.fov * Math.PI / 180;
-  const orbitCam = getOrbitCamera();
-  const viewMat = xrCameraOverride ? xrCameraOverride.viewMatrix : orbitCam.view;
-  const projMat = xrCameraOverride ? xrCameraOverride.projMatrix : mat4.perspective(fovRad, aspect, 0.01, DESKTOP_CAMERA_FAR);
-
-  // [LAW:one-source-of-truth] Attractor strengths re-derived from the same state.attractors array the compute
-  // shader reads (via the N-body param packing). Projection from world-space to screen UV happens once per
-  // attractor, per frame — ~32 matrix ops max, dwarfed by the render pass itself.
-  // nowSec is only used for reticle pulsing (sin(time*5)); strength uses the last-packed sim step so the
-  // composite overlay stays aligned with the shader params. Forward increments simStep at the end of compute,
-  // so the just-run step is simStep-1; reverse decrements at the top of compute, so the just-run step is simStep.
-  const nowSec = performance.now() * 0.001;
-  const strengthStep = Math.max(0, currentSimStep() - (currentTimeDirection() > 0 ? 1 : 0));
-  const ceiling = (state.physics as { interactionStrength?: number }).interactionStrength ?? 1;
-  const attractors = state.attractors;
-  const attractorN = Math.min(attractors.length, ATTRACTOR_MAX);
-  u32buf[5] = attractorN; // attractorCount as u32
-  buf[6] = 0; buf[7] = 0; // pad slots
-
+  // f32 5..7 are padding.
   buf[8] = tc.primary[0]; buf[9] = tc.primary[1]; buf[10] = tc.primary[2];
   // pad 11
   buf[12] = tc.accent[0]; buf[13] = tc.accent[1]; buf[14] = tc.accent[2];
   // pad 15
-  buf[16] = nowSec;
-  // pad 17..19
-
-  // Attractor array at byte offset 80 = f32 index 20. Each entry: (screenX, screenY, strength, pad) = 4 floats.
-  for (let i = 0; i < attractorN; i++) {
-    const a = attractors[i];
-    const wx = a.x, wy = a.y, wz = a.z;
-    const vx = viewMat[0]*wx + viewMat[4]*wy + viewMat[8]*wz + viewMat[12];
-    const vy = viewMat[1]*wx + viewMat[5]*wy + viewMat[9]*wz + viewMat[13];
-    const vz = viewMat[2]*wx + viewMat[6]*wy + viewMat[10]*wz + viewMat[14];
-    const vw = viewMat[3]*wx + viewMat[7]*wy + viewMat[11]*wz + viewMat[15];
-    const cx = projMat[0]*vx + projMat[4]*vy + projMat[8]*vz + projMat[12]*vw;
-    const cy = projMat[1]*vx + projMat[5]*vy + projMat[9]*vz + projMat[13]*vw;
-    const cw = projMat[3]*vx + projMat[7]*vy + projMat[11]*vz + projMat[15]*vw;
-    const ndcX = cw !== 0 ? cx / cw : 0;
-    const ndcY = cw !== 0 ? cy / cw : 0;
-    const base = 20 + i * 4;
-    buf[base] = ndcX * 0.5 + 0.5;
-    buf[base + 1] = 1.0 - (ndcY * 0.5 + 0.5);
-    buf[base + 2] = attractorStrength(a, strengthStep, ceiling);
-    buf[base + 3] = 0;
-  }
-  // Zero any trailing slots beyond active count (strength=0 is inert anyway, but keeps the buffer clean).
-  for (let i = attractorN; i < ATTRACTOR_MAX; i++) {
-    const base = 20 + i * 4;
-    buf[base] = 0; buf[base + 1] = 0; buf[base + 2] = 0; buf[base + 3] = 0;
-  }
   device.queue.writeBuffer(postFx.compositeUBO!, 0, buf);
 
   const pipeline = ensureCompositePipeline(finalFormat);
@@ -6027,11 +7199,26 @@ function frame(now: DOMHighResTimeStamp) {
   if (state.xrEnabled) return; // XR has its own loop
 
   requestAnimationFrame(frame);
+
+  // Adaptive-chunk feedback: use the gap since the previous rAF as a proxy for "is the GPU keeping up?"
+  // When a heavy frame pushes delta over ~20ms, the adaptive chunk shrinks next frame; when we have
+  // headroom (delta < 14ms), it grows. This is the only place we measure frame pacing, so the feedback
+  // decision stays in one place (single-enforcer).
+  const frameDeltaMs = lastFrameTimestamp >= 0 ? now - lastFrameTimestamp : 16.7;
+  if (lastFrameTimestamp >= 0) {
+    updateAdaptiveChunk(frameDeltaMs);
+  }
+  lastFrameTimestamp = now;
+
   refreshThemeColors(now);
   resizeCanvas();
   // [LAW:single-enforcer] Attractor lifecycle is updated here, before any sim/compute/composite runs,
   // so mode switches can't leak dead attractors into the array or render loop.
   pruneAttractors(currentSimStep());
+
+  // [LAW:single-enforcer] Markers tick once per visual frame, with dt bounded to kill lag-spike
+  // teleports. timeScale + timeDirection make the swarm track the simulation's sense of time.
+  tickMarkers(Math.min(0.05, frameDeltaMs * 0.001) * state.fx.timeScale * currentTimeDirection());
 
   // FPS calculation
   frameCount++;
@@ -6099,7 +7286,7 @@ function saveState() {
     for (const mode of Object.keys(DEFAULTS) as SimMode[]) {
       modeSnapshot[mode] = modeParams(mode);
     }
-    const toSave = { mode: state.mode, colorTheme: state.colorTheme, camera: state.camera, fx: state.fx, ...modeSnapshot };
+    const toSave = { mode: state.mode, colorTheme: state.colorTheme, camera: state.camera, fx: state.fx, debug: state.debug, ...modeSnapshot };
     localStorage.setItem(STORAGE_KEY, JSON.stringify(toSave));
   } catch (e) { /* ignore quota errors */ }
 }
@@ -6117,6 +7304,7 @@ function loadState() {
     }
     if (parsed.camera) Object.assign(state.camera, parsed.camera);
     if (parsed.fx) Object.assign(state.fx, parsed.fx);
+    if (parsed.debug) Object.assign(state.debug, parsed.debug);
     syncThemeTransition(state.colorTheme);
   } catch (e) { /* ignore parse errors — start fresh */ }
 }
@@ -6138,12 +7326,13 @@ function syncUIFromState() {
     container.querySelectorAll<HTMLInputElement>('input[type="range"]').forEach(input => {
       const key = input.dataset.key!;
       if (key && key in params) {
-        input.value = String(params[key]);
+        const paramDef = findParamDef(mode, key);
+        const realVal = Number(params[key]);
+        input.value = (paramDef?.logScale && paramDef.min !== undefined && paramDef.max !== undefined)
+          ? String(realToLogTick(realVal, paramDef.min, paramDef.max))
+          : String(params[key]);
         const valueSpan = input.parentElement?.querySelector('.control-value');
-        if (valueSpan) {
-          const paramDef = findParamDef(mode, key);
-          valueSpan.textContent = formatValue(Number(params[key]), paramDef ? paramDef.step ?? 0.01 : 0.01);
-        }
+        if (valueSpan) valueSpan.textContent = formatValueWithMax(realVal, paramDef);
       }
     });
     container.querySelectorAll<HTMLSelectElement>('select').forEach(sel => {
@@ -6156,8 +7345,108 @@ function syncUIFromState() {
   document.querySelectorAll<HTMLButtonElement>('#theme-presets .preset-btn').forEach(btn =>
     btn.classList.toggle('active', btn.dataset.theme === state.colorTheme));
 
+  // Sync XR debug-log checkbox + subscription to loaded state.
+  const xrLogToggle = document.getElementById('toggle-xr-log') as HTMLInputElement | null;
+  if (xrLogToggle) xrLogToggle.checked = state.debug.xrLog;
+  setXrDebugLogging(state.debug.xrLog);
+
   // Rebuild shape params for current parametric shape
   rebuildShapeParams();
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// BINDING REGISTRATION (parallel data source for the new XR widget system)
+// ═══════════════════════════════════════════════════════════════════════════════
+// [LAW:one-source-of-truth] Each Binding read/writes the canonical state field directly.
+// The DOM controls also write the same fields — both paths converge on the same state.
+// No widget consumes these bindings yet (that lands in ticket .10+); for now this is a
+// parallel descriptor tree the future widget layer will compose against.
+// [LAW:one-way-deps] bindings.ts knows nothing about main.ts; we register from here
+// using closures that capture state and mode-helper functions.
+function initBindings(): void {
+  // Continuous + enum bindings derived from PARAM_DEFS. id = `${mode}.${key}`.
+  for (const mode of Object.keys(PARAM_DEFS) as SimMode[]) {
+    for (const section of PARAM_DEFS[mode]) {
+      // Dynamic sections (parametric shape params) are rebuilt at runtime; skip them
+      // here — a follow-up ticket can register them from SHAPE_PARAMS metadata.
+      if (section.dynamic) continue;
+      for (const param of section.params) {
+        if (param.type === 'dropdown') {
+          bindingRegistry.register({
+            kind: 'enum',
+            id: `${mode}.${param.key}`,
+            label: param.label,
+            group: mode,
+            get: () => String(modeParams(mode)[param.key]),
+            set: (v) => {
+              const target = modeParams(mode);
+              const current = target[param.key];
+              target[param.key] = typeof current === 'number' ? Number(v) : v;
+            },
+            options: (param.options ?? []).map(o => ({ value: String(o), label: String(o) })),
+          });
+        } else if (param.min !== undefined && param.max !== undefined) {
+          bindingRegistry.register({
+            kind: 'continuous',
+            id: `${mode}.${param.key}`,
+            label: param.label,
+            group: mode,
+            get: () => Number(modeParams(mode)[param.key]),
+            set: (v) => { modeParams(mode)[param.key] = v; },
+            range: { min: param.min, max: param.max },
+            step: param.step,
+            scale: param.logScale ? 'log' : 'linear',
+          });
+        }
+      }
+    }
+  }
+
+  // Preset actions. id = `preset.${mode}.${name}`. group = 'presets'.
+  for (const mode of Object.keys(PRESETS) as SimMode[]) {
+    for (const presetName of Object.keys(PRESETS[mode])) {
+      bindingRegistry.register({
+        kind: 'action',
+        id: `preset.${mode}.${presetName}`,
+        label: presetName,
+        group: 'presets',
+        invoke: () => applyPreset(mode, presetName),
+      });
+    }
+  }
+
+  // Mode + theme enums. group = 'app'. set() routes through the canonical helpers
+  // (selectMode, startThemeTransition) so DOM tabs and theme buttons stay in sync.
+  bindingRegistry.register({
+    kind: 'enum',
+    id: 'app.mode',
+    label: 'Mode',
+    group: 'app',
+    get: () => state.mode,
+    set: (v) => selectMode(v as SimMode),
+    options: (Object.keys(MODE_TAB_LABELS) as SimMode[])
+      .map(m => ({ value: m, label: MODE_TAB_LABELS[m] })),
+  });
+  bindingRegistry.register({
+    kind: 'enum',
+    id: 'app.theme',
+    label: 'Theme',
+    group: 'app',
+    get: () => state.colorTheme,
+    set: (v) => { state.colorTheme = v; startThemeTransition(v); },
+    options: Object.keys(COLOR_THEMES).map(name => ({ value: name, label: name })),
+  });
+
+  // Boolean toggles. PARAM_DEFS doesn't carry boolean params today; the
+  // app-level state has a few (paused) that the XR toggle widget can flip.
+  bindingRegistry.register({
+    kind: 'toggle',
+    id: 'app.paused',
+    label: 'Pause',
+    group: 'app',
+    get: () => state.paused,
+    set: (v) => { state.paused = v; syncPauseButtons(); },
+  });
 }
 
 
@@ -6181,10 +7470,10 @@ async function main() {
   });
 
   initGrid();
-  initXrUi();
   loadState();
   if (isMobile) applyMobileDefaults();
   syncThemeTransition(state.colorTheme);
+  initBindings();
   buildControls();
   buildThemeSelector();
   setupTabs();
@@ -6220,6 +7509,44 @@ async function main() {
     return 'preset not found';
   };
   (window as any).__simState = () => ({ mode: state.mode, ...state[state.mode] as any, fps: currentFps, gpuMs: gpuFrameMs, gpuDetail: gpuTimingDetail });
+  // PM diagnostics — only wired for the physics sim (other modes don't have
+  // the PM pipeline). Each returns null if a prior dump is still in flight or
+  // if the active mode lacks the diagnostic.
+  type PmDiag = {
+    dumpDensity?: () => Promise<Float32Array | null>,
+    dumpPotential?: () => Promise<Float32Array | null>,
+    maxResidual?: () => Promise<number | null>,
+    reversibilityTest?: (n: number) => Promise<{ maxErr: number; meanErr: number; count: number } | null>,
+  };
+  (window as any).__pmDumpDensity = () => {
+    const sim = simulations[state.mode] as unknown as PmDiag;
+    return sim?.dumpDensity ? sim.dumpDensity() : Promise.resolve(null);
+  };
+  (window as any).__pmDumpPotential = () => {
+    const sim = simulations[state.mode] as unknown as PmDiag;
+    return sim?.dumpPotential ? sim.dumpPotential() : Promise.resolve(null);
+  };
+  (window as any).__pmMaxResidual = () => {
+    const sim = simulations[state.mode] as unknown as PmDiag;
+    return sim?.maxResidual ? sim.maxResidual() : Promise.resolve(null);
+  };
+  // Reversibility harness. Runs N forward + N reverse compute() steps and
+  // returns per-particle position error vs the starting state. Pauses the
+  // sim for the duration; restores on exit. Expected: maxErr < 1e-3 for N=1000.
+  (window as any).__pmReversibilityTest = (n = 1000) => {
+    const sim = simulations[state.mode] as unknown as PmDiag;
+    return sim?.reversibilityTest ? sim.reversibilityTest(n) : Promise.resolve(null);
+  };
+  (window as any).__bindings = bindingRegistry;
+  (window as any).__anchors = { evaluateAnchor, handFrames: xrHandFrames };
+  (window as any).__xrUi = {
+    layout: xrUiLayout, hitTestWidgets,
+    step: xrUiStep, applyEffects: xrUiApplyEffects,
+    registry: xrUiRegistry, makeIdlePrev: xrUiMakeIdlePrev,
+    getRenderList: () => xrUiRenderList,
+    getPrev: () => xrUiPrev,
+    getClaimed: () => ({ ...xrUiClaimed }),
+  };
   (window as any).__simStats = () => {
     const sim = simulations[state.mode];
     const stats = (sim as any)?.getStats ? (sim as any).getStats() : { error: 'no stats on this sim' };

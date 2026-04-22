@@ -1,6 +1,8 @@
 *.pem
+.claude/
 .firecrawl/
 .idea/
+.tmp-*
 node_modules/
 dist/
 index.html.bak

@@ -14,6 +14,15 @@ openssl req -x509 -newkey rsa:2048 -keyout key.pem -out cert.pem -days 365 -node
 ```
 Then `npm run dev` auto-detects the cert and serves HTTPS.
 
+## Deployment
+
+GitHub Pages, multiplexed by version slot via `.github/workflows/deploy.yml`:
+- **PR previews**: `https://brandon-fryslie.github.io/shader-playground/pr-<PR-number>/` (auto-deployed on every PR push; concurrency-grouped, no cancel)
+- **master commits**: `https://brandon-fryslie.github.io/shader-playground/r<count>-<short-sha>/`
+- **tags `v*`**: `https://brandon-fryslie.github.io/shader-playground/<tag>/`
+
+The Vision Pro user tests against PR previews — they do **not** run `npm run dev` locally for review. After pushing to a PR branch, the deploy completes in ~1–2 minutes; verify with `gh run list --workflow deploy.yml --limit 1`. The user reloads the PR preview URL; no local dev server involved.
+
 ## Architecture
 
 WebGPU compute shader playground with 4 simulation modes (boids, N-body physics, fluid dynamics, parametric shapes), a color theme system, shader debug editor, and WebXR stereo rendering for Apple Vision Pro.
@@ -86,7 +95,7 @@ The integration scheme per step (single GPU dispatch):
 | Miyamoto-Nagai disk | Axisymmetric vertical confinement | `params.diskMass`, `params.diskScaleA`, `params.diskScaleB` |
 | Attractor wells | Per-attractor 1/r² well + repulsive core (up to 32) | `INTERACTION_WELL_STRENGTH`, `INTERACTION_CORE_*` |
 | Tidal quadrupole | Rotating quadrupole seeds spiral arms | `params.tidalStrength`, rate 0.15 rad/s |
-| Soft boundary | Containment at r > 15 | `N_BODY_OUTER_RADIUS = 15`, `N_BODY_BOUNDARY_PULL` |
+| Soft boundary | Containment at r > 60 | `N_BODY_OUTER_RADIUS = 60`, `N_BODY_BOUNDARY_PULL` |
 
 **No velocity-dependent forces exist.** All dissipative forces (damping, friction, disk recovery) were removed and replaced with the dark matter potentials. The virial controller is removed — dark matter provides structural stability.
 

@@ -30,8 +30,7 @@ export interface PhysicsParams {
   distribution: Distribution;
   interactionStrength: number;
   tidalStrength: number;
-  attractorDecayRatio: number;  // decay duration (in steps) = this × holdSteps, capped by attractorDecayCap
-  attractorDecayCap: number;    // seconds — upper bound on decay duration (converted via STEPS_PER_SECOND)
+  attractorDecayTime: number;   // seconds. Slider max is treated as "Permanent" (never decays).
   // Dark matter potential — conservative forces replacing dissipative disk recovery.
   haloMass: number;       // Plummer halo gravitational mass
   haloScale: number;      // Plummer halo softening radius
@@ -128,6 +127,16 @@ export interface Attractor {
   holdSteps: number;     // releaseStep - chargeStep (at release); -1 while still held
 }
 
+// CPU-animated tracer particle tied to an attractor. Feeds a dedicated render pipeline so the swarm
+// lives in the HDR scene and blooms naturally — the "cursor is a comet swarm" approach.
+export interface Marker {
+  x: number; y: number; z: number;
+  vx: number; vy: number; vz: number;
+  tintR: number; tintG: number; tintB: number;
+  seed: number;          // per-marker phase for subtle visual variety
+  attractorIdx: number;  // index into state.attractors; re-synced on prune
+}
+
 export interface AppState {
   mode: SimMode;
   colorTheme: string;
@@ -142,8 +151,14 @@ export interface AppState {
   camera: CameraState;
   mouse: MouseState;
   attractors: Attractor[];
+  markers: Marker[];
   pointerToAttractor: Map<number, number>;
   fx: FxParams;
+  debug: DebugSettings;
+}
+
+export interface DebugSettings {
+  xrLog: boolean;   // console-log XR gesture / state / snapshot metrics
 }
 
 export interface ThemeColors {
@@ -172,6 +187,14 @@ export interface ParamDef {
   type?: string;
   options?: (string | number)[];
   requiresReset?: boolean;
+  // Logarithmic-ticking slider — large dynamic ranges (e.g., 0.1..100) need this
+  // so the low end stays navigable. HTML <input type=range> is linear, so the
+  // DOM layer maps position in tick-space back to real value on every change.
+  logScale?: boolean;
+  // Label shown in the slider value readout when the slider is at param.max.
+  // Used by "Decay Time" to render the top-of-range as "Permanent" rather
+  // than a number, signalling that the attractor never decays.
+  maxLabel?: string;
 }
 
 export interface ParamSection {
