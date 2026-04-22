@@ -99,6 +99,18 @@ The integration scheme per step (single GPU dispatch):
 
 **No velocity-dependent forces exist.** All dissipative forces (damping, friction, disk recovery) were removed and replaced with the dark matter potentials. The virial controller is removed — dark matter provides structural stability.
 
+### Nested PM Grids (cosmic-weaving-flask, Phase A)
+
+N-body gravity above is powered by a **two-grid nested Particle-Mesh solver**:
+
+- **Inner grid**: 128³ covering ±16 world units (cell size 0.25). Sharp central gravity where particles actually live.
+- **Outer grid**: 64³ covering the full ±64 periodic domain (cell size 2.0). Cheap long-range coupling for particles that escape the inner domain.
+- Both solves use the existing multigrid V-cycle with red-black Gauss-Seidel; inner phase-splits the V across 2 frames (the existing Vision Pro 11 ms budget discipline), outer runs a full V-cycle per frame (~0.6 ms on M2).
+- `pm.interpolate_nested.wgsl` samples both grids per particle and smoothstep-blends force across the [±14, ±16] transition shell. No branches — the blend weight decides which contribution survives.
+- `pm.deposit.wgsl` filters particles outside each grid's `domainHalf`, so inner gets only particles inside ±16 while outer gets everyone. Nbody.compute's periodic wrap at ±64 keeps the outer grid's periodic BC consistent.
+
+Diagnostics: `__pmMaxResidual()` returns `{ inner, outer }`. `__pmDumpOuterDensity()` / `__pmDumpOuterPotential()` dump the outer grid. `__pmReversibilityTest(1000)` exercises both grids in the full fwd/rev pass.
+
 ### Simulation Clock
 
 `simStep` is the canonical step index of the simulation state currently in the particle buffer. It advances by `timeDirection` each compute dispatch — forward (`+1` after journal write) or reverse (`−1` at the top of `compute()` before param packing). Tidal angle = `simStep × dt × 0.15`. Attractor timing uses `simStep × dt`. No `performance.now()` in the simulation path — fully deterministic.
