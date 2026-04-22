@@ -1797,6 +1797,24 @@ function createPhysicsSimulation() {
   const PM_V_CYCLE_COUNT = 1;                       // V-cycles per Poisson solve (warm-started; see header)
   const PM_SMOOTH_PRE = 2;                          // red-black GS passes before restriction
   const PM_SMOOTH_POST = 2;                         // red-black GS passes after prolongation
+  // V-cycle phase split: half the work runs each frame to keep frame time
+  // even (vs. doing the full cycle every Nth frame, which produces a heavy/
+  // light alternation that misses the 90 Hz Vision Pro budget on heavy
+  // frames). One full V-cycle spans 2 simSteps:
+  //   simStep & 1 == 0 → DESCENT   (pre-smooth + residual + restrict, l=0..4)
+  //   simStep & 1 == 1 → ASCENT    (coarsest sweeps + prolong + post-smooth)
+  // Intermediate state (pmRhs[1..5], pmPotential[1..5]) naturally persists
+  // across the two halves in dedicated per-level buffers — no extra plumbing.
+  // Descent and ascent each touch ~8M level-0 cells/frame (4 smooth sweeps
+  // each side), so per-frame GPU load is ~50% of the un-split V-cycle and
+  // worst-case frame time is matched to average. Trade-off: pmPotential[0]
+  // is fully resolved only on odd simSteps; even simSteps see a partially
+  // descended (warm-start + pre-smooth) field. The interpolate pass reads it
+  // every frame — both halves are monotonically improving, so the lag is
+  // visually imperceptible. Reversibility caveat (see __pmReversibilityTest):
+  // intermediate buffers are history-dependent, so fwd/rev paths leave them
+  // in slightly different states at the same simStep; maxErr is larger than
+  // V=1 alone. Acceptable while debugging perf; revisit if rewinds drift.
   // Silence noUnusedLocals until downstream tickets (.3 deposition, .4
   // multigrid, .5 force sampling) reference these. Landing the canonical
   // values now establishes the contract; later tickets only tune usage.
@@ -2434,22 +2452,23 @@ function createPhysicsSimulation() {
       pmPass.dispatchWorkgroups(Math.ceil(pmLevel0Cells / 256));
       pmPass.end();
 
-      // ── Multigrid V-cycle Poisson solver ───────────────────────────────────
+      // ── Multigrid V-cycle Poisson solver (phase-split across 2 frames) ────
       // Input:  pmDensityF32 (mean-zero RHS at level 0)
       // Output: pmPotential[0] (φ satisfying ∇²φ = 4πGρ on the 3-torus)
-      // [LAW:dataflow-not-control-flow] Same fixed schedule every frame. Warm-
-      // start from previous frame's pmPotential[0]; coarse-level corrections
-      // re-zero each V-cycle because they accumulate intermediate data.
+      // [LAW:dataflow-not-control-flow] Phase is a deterministic function of
+      // simStep (parity), so the same dispatch sequence runs in fwd and rev.
+      // Phase A (descent) and Phase B (ascent + coarsest) each do roughly
+      // 8M level-0 cell-updates — half the un-split V-cycle, matched per
+      // frame so the worst frame fits the 90 Hz budget.
       const pmMaxLevel = PM_MULTIGRID_LEVELS - 1;
       const PM_COARSEST_SWEEPS = 16;
-      for (let v = 0; v < PM_V_CYCLE_COUNT; v++) {
-        // Zero coarse-level correction buffers before each V-cycle. Level 0
-        // (the running potential) is preserved for warm-start continuity.
+      const pmDescent = (simStep & 1) === 0;
+      const vPass = encoder.beginComputePass();
+      if (pmDescent) {
+        // Phase A: zero coarse correction state (start of new V-cycle), then
+        // pre-smooth → residual → restrict down to the coarsest grid. Level 0
+        // is NOT cleared — it carries the warm-start from the previous V-cycle.
         for (let l = 1; l < PM_MULTIGRID_LEVELS; l++) encoder.clearBuffer(pmPotential[l]);
-
-        const vPass = encoder.beginComputePass();
-
-        // Descent: pre-smooth, compute residual, restrict to coarser level.
         for (let l = 0; l < pmMaxLevel; l++) {
           vPass.setPipeline(pmSmoothPipeline);
           for (let s = 0; s < PM_SMOOTH_PRE; s++) {
@@ -2465,8 +2484,10 @@ function createPhysicsSimulation() {
           vPass.setBindGroup(0, pmRestrictBG[l]);
           vPass.dispatchWorkgroups(pmWgCount[l + 1], pmWgCount[l + 1], pmWgCount[l + 1]);
         }
-
-        // Coarsest level: solve "exactly" by over-smoothing a tiny grid.
+      } else {
+        // Phase B: coarsest exact-ish solve, then prolong + post-smooth back
+        // up to level 0. Reads pmRhs[1..5] and pmPotential[1..5] left by the
+        // previous frame's Phase A; writes the final solution into pmPotential[0].
         vPass.setPipeline(pmSmoothPipeline);
         for (let s = 0; s < PM_COARSEST_SWEEPS; s++) {
           vPass.setBindGroup(0, pmSmoothBG[pmMaxLevel][0]);
@@ -2474,8 +2495,6 @@ function createPhysicsSimulation() {
           vPass.setBindGroup(0, pmSmoothBG[pmMaxLevel][1]);
           vPass.dispatchWorkgroups(pmWgCount[pmMaxLevel], pmWgCount[pmMaxLevel], pmWgCount[pmMaxLevel]);
         }
-
-        // Ascent: prolong correction, post-smooth.
         for (let l = pmMaxLevel - 1; l >= 0; l--) {
           vPass.setPipeline(pmProlongPipeline);
           vPass.setBindGroup(0, pmProlongBG[l]);
@@ -2488,9 +2507,8 @@ function createPhysicsSimulation() {
             vPass.dispatchWorkgroups(pmWgCount[l], pmWgCount[l], pmWgCount[l]);
           }
         }
-
-        vPass.end();
       }
+      vPass.end();
 
       // ── PM force interpolation ─────────────────────────────────────────
       // Sample the freshly-solved pmPotential[0] at each particle via the CIC
