@@ -2119,6 +2119,163 @@ function createPhysicsSimulation() {
     pmWgCount.push(Math.max(1, (PM_GRID_RES >> l) / 4));
   }
 
+  // ── OUTER PM GRID (Phase A — nested zoom-in scheme) ──────────────────────
+  // Second grid at 1/2 linear resolution covering the full periodic domain.
+  // Together with the inner grid (above), delivers sharp central gravity +
+  // cheap long-range coupling. Pipelines are reused from the inner grid —
+  // only buffers, uniforms, and bind groups are outer-specific.
+  // See /Users/bmf/.claude/plans/cosmic-weaving-flask.md.
+  //
+  // Scaffolding-only in this commit (A2). Outer grid's potential is written
+  // each frame but not yet read by force interpolation — that arrives in
+  // the blended-force commit (A6) once the inner grid is shrunk to ±16 (A4)
+  // and Dirichlet BC plumbing is in place (A5).
+  const PM_OUTER_GRID_RES = 64;
+  const PM_OUTER_DOMAIN_HALF = 64.0;
+  const PM_OUTER_DOMAIN_SIZE = PM_OUTER_DOMAIN_HALF * 2;  // 128
+  const PM_OUTER_CELL_SIZE = PM_OUTER_DOMAIN_SIZE / PM_OUTER_GRID_RES;  // 2.0
+  const PM_OUTER_LEVELS = 5;  // 64³, 32³, 16³, 8³, 4³
+
+  const pmOuterLevel0Cells = PM_OUTER_GRID_RES * PM_OUTER_GRID_RES * PM_OUTER_GRID_RES;
+  const pmOuterDensityU32 = device.createBuffer({ size: pmOuterLevel0Cells * 4, usage: PM_BUF_USAGE });
+  const pmOuterDensityF32 = device.createBuffer({ size: pmOuterLevel0Cells * 4, usage: PM_BUF_USAGE });
+  const pmOuterPotential: GPUBuffer[] = [];
+  const pmOuterResidual: GPUBuffer[] = [];
+  for (let l = 0; l < PM_OUTER_LEVELS; l++) {
+    const sizeL = PM_OUTER_GRID_RES >> l;
+    const bytesL = sizeL * sizeL * sizeL * 4;
+    pmOuterPotential.push(device.createBuffer({ size: bytesL, usage: PM_BUF_USAGE }));
+    pmOuterResidual.push(device.createBuffer({ size: bytesL, usage: PM_BUF_USAGE }));
+  }
+  const pmOuterRho: GPUBuffer[] = [pmOuterDensityF32];
+  for (let l = 1; l < PM_OUTER_LEVELS; l++) {
+    const sizeL = PM_OUTER_GRID_RES >> l;
+    pmOuterRho.push(device.createBuffer({ size: sizeL * sizeL * sizeL * 4, usage: PM_BUF_USAGE }));
+  }
+  const pmOuterMeanScratch = device.createBuffer({ size: 16, usage: PM_BUF_USAGE });
+
+  // Outer deposit/convert/interpolate params (same 32-byte struct as inner).
+  const pmOuterParamsBuffer = device.createBuffer({ size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+  const pmOuterParamsData = new ArrayBuffer(32);
+  const pmOuterParamsF32 = new Float32Array(pmOuterParamsData);
+  const pmOuterParamsU32 = new Uint32Array(pmOuterParamsData);
+  pmOuterParamsU32[1] = count;
+  pmOuterParamsU32[2] = PM_OUTER_GRID_RES;
+  pmOuterParamsF32[3] = PM_OUTER_DOMAIN_HALF;
+  pmOuterParamsF32[4] = PM_OUTER_CELL_SIZE;
+  pmOuterParamsF32[5] = PM_FIXED_POINT_SCALE;
+  pmOuterParamsU32[6] = pmOuterLevel0Cells;
+
+  // Per-level uniform buffers for the outer multigrid (matches inner pattern).
+  const pmOuterSmoothUniform: GPUBuffer[][] = [];
+  const pmOuterResidualUniform: GPUBuffer[] = [];
+  const pmOuterRestrictUniform: GPUBuffer[] = [];
+  const pmOuterProlongUniform: GPUBuffer[] = [];
+  for (let l = 0; l < PM_OUTER_LEVELS; l++) {
+    const sizeL = PM_OUTER_GRID_RES >> l;
+    const hL = PM_OUTER_DOMAIN_SIZE / sizeL;
+    const hSqL = hL * hL;
+    pmOuterSmoothUniform.push([0, 1].map(parity => {
+      const buf = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+      const ab = new ArrayBuffer(16);
+      new Uint32Array(ab, 0, 2).set([sizeL, parity]);
+      new Float32Array(ab, 8, 2).set([hSqL, PM_FOUR_PI_G]);
+      device.queue.writeBuffer(buf, 0, ab);
+      return buf;
+    }));
+    {
+      const buf = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+      const ab = new ArrayBuffer(16);
+      new Uint32Array(ab, 0, 2).set([sizeL, 0]);
+      new Float32Array(ab, 8, 2).set([hSqL, PM_FOUR_PI_G]);
+      device.queue.writeBuffer(buf, 0, ab);
+      pmOuterResidualUniform.push(buf);
+    }
+    if (l + 1 < PM_OUTER_LEVELS) {
+      const coarseSize = PM_OUTER_GRID_RES >> (l + 1);
+      {
+        const buf = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+        const ab = new ArrayBuffer(16);
+        new Uint32Array(ab, 0, 1).set([coarseSize]);
+        device.queue.writeBuffer(buf, 0, ab);
+        pmOuterRestrictUniform.push(buf);
+      }
+      {
+        const buf = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+        const ab = new ArrayBuffer(16);
+        new Uint32Array(ab, 0, 1).set([sizeL]);
+        device.queue.writeBuffer(buf, 0, ab);
+        pmOuterProlongUniform.push(buf);
+      }
+    }
+  }
+
+  // Outer-grid bind groups (reuse existing BGLs from the inner pipelines).
+  const pmOuterDepositBG = [bufferA, bufferB].map(buf => device.createBindGroup({
+    layout: pmDepositBGL, entries: [
+      { binding: 0, resource: { buffer: buf } },
+      { binding: 1, resource: { buffer: pmOuterDensityU32 } },
+      { binding: 2, resource: { buffer: pmOuterParamsBuffer } },
+    ]
+  }));
+  const pmOuterConvertBG = device.createBindGroup({
+    layout: pmConvertBGL, entries: [
+      { binding: 0, resource: { buffer: pmOuterDensityU32 } },
+      { binding: 1, resource: { buffer: pmOuterDensityF32 } },
+      { binding: 2, resource: { buffer: pmOuterMeanScratch } },
+      { binding: 3, resource: { buffer: pmOuterParamsBuffer } },
+    ]
+  });
+  const pmOuterSmoothBG: GPUBindGroup[][] = [];
+  const pmOuterResidualBG: GPUBindGroup[] = [];
+  const pmOuterRestrictBG: GPUBindGroup[] = [];
+  const pmOuterProlongBG: GPUBindGroup[] = [];
+  for (let l = 0; l < PM_OUTER_LEVELS; l++) {
+    pmOuterSmoothBG.push([0, 1].map(parity => device.createBindGroup({
+      layout: pmSmoothBGL, entries: [
+        { binding: 0, resource: { buffer: pmOuterPotential[l] } },
+        { binding: 1, resource: { buffer: pmOuterRho[l] } },
+        { binding: 2, resource: { buffer: pmOuterSmoothUniform[l][parity] } },
+      ]
+    })));
+    pmOuterResidualBG.push(device.createBindGroup({
+      layout: pmResidualBGL, entries: [
+        { binding: 0, resource: { buffer: pmOuterPotential[l] } },
+        { binding: 1, resource: { buffer: pmOuterRho[l] } },
+        { binding: 2, resource: { buffer: pmOuterResidual[l] } },
+        { binding: 3, resource: { buffer: pmOuterResidualUniform[l] } },
+      ]
+    }));
+    if (l + 1 < PM_OUTER_LEVELS) {
+      pmOuterRestrictBG.push(device.createBindGroup({
+        layout: pmRestrictBGL, entries: [
+          { binding: 0, resource: { buffer: pmOuterResidual[l] } },
+          { binding: 1, resource: { buffer: pmOuterRho[l + 1] } },
+          { binding: 2, resource: { buffer: pmOuterRestrictUniform[l] } },
+        ]
+      }));
+      pmOuterProlongBG.push(device.createBindGroup({
+        layout: pmProlongBGL, entries: [
+          { binding: 0, resource: { buffer: pmOuterPotential[l + 1] } },
+          { binding: 1, resource: { buffer: pmOuterPotential[l] } },
+          { binding: 2, resource: { buffer: pmOuterProlongUniform[l] } },
+        ]
+      }));
+    }
+  }
+
+  const pmOuterWgCount: number[] = [];
+  for (let l = 0; l < PM_OUTER_LEVELS; l++) {
+    pmOuterWgCount.push(Math.max(1, (PM_OUTER_GRID_RES >> l) / 4));
+  }
+
+  // Dev-only staging for __pmDumpOuter diagnostics (matches inner pattern).
+  const pmOuterDensityStaging = device.createBuffer({
+    size: pmOuterLevel0Cells * 4,
+    usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+  });
+  let pmOuterDiagPending = false;
+
   const computeModule = createShaderModuleChecked('nbody.compute', SHADER_NBODY_COMPUTE_EDIT || SHADER_NBODY_COMPUTE);
   const renderModule = createShaderModuleChecked('nbody.render', SHADER_NBODY_RENDER_EDIT || SHADER_NBODY_RENDER);
 
@@ -2439,9 +2596,15 @@ function createPhysicsSimulation() {
       // or not the density is consumed downstream.
       pmParamsF32[0] = dt;  // only field that varies per-frame
       device.queue.writeBuffer(pmParamsBuffer, 0, pmParamsData);
+      pmOuterParamsF32[0] = dt;
+      device.queue.writeBuffer(pmOuterParamsBuffer, 0, pmOuterParamsData);
+
       encoder.clearBuffer(pmDensityU32);
       encoder.clearBuffer(pmMeanScratch);
+      encoder.clearBuffer(pmOuterDensityU32);
+      encoder.clearBuffer(pmOuterMeanScratch);
       const pmPass = encoder.beginComputePass();
+      // Inner grid: CIC deposit → mean reduce → mean-subtract convert.
       pmPass.setPipeline(pmDepositPipeline);
       pmPass.setBindGroup(0, pmDepositBG[pingPong]);
       pmPass.dispatchWorkgroups(Math.ceil(count / 256));
@@ -2450,6 +2613,19 @@ function createPhysicsSimulation() {
       pmPass.dispatchWorkgroups(Math.ceil(pmLevel0Cells / 256));
       pmPass.setPipeline(pmConvertPipeline);
       pmPass.dispatchWorkgroups(Math.ceil(pmLevel0Cells / 256));
+      // Outer grid: same pipeline instances, separate bind groups + params.
+      // [LAW:one-source-of-truth] Every particle contributes mass to both grids.
+      // The plan will eventually gate inner deposit to particles inside ±16, but
+      // in this phase the inner grid still spans ±64 so every particle deposits
+      // into both. Mass double-counting is benign while outer force is unused.
+      pmPass.setPipeline(pmDepositPipeline);
+      pmPass.setBindGroup(0, pmOuterDepositBG[pingPong]);
+      pmPass.dispatchWorkgroups(Math.ceil(count / 256));
+      pmPass.setPipeline(pmReducePipeline);
+      pmPass.setBindGroup(0, pmOuterConvertBG);
+      pmPass.dispatchWorkgroups(Math.ceil(pmOuterLevel0Cells / 256));
+      pmPass.setPipeline(pmConvertPipeline);
+      pmPass.dispatchWorkgroups(Math.ceil(pmOuterLevel0Cells / 256));
       pmPass.end();
 
       // ── Multigrid V-cycle Poisson solver (phase-split across 2 frames) ────
@@ -2509,6 +2685,53 @@ function createPhysicsSimulation() {
         }
       }
       vPass.end();
+
+      // ── OUTER GRID V-CYCLE (full cycle every frame) ───────────────────
+      // Outer grid is 64³ (1/8 the cells of inner); one full V-cycle runs
+      // in ~0.6 ms on M2. No phase-split needed. Warm-starts pmOuterPotential[0]
+      // across frames (levels 1..4 are zeroed before each descent, matching the
+      // inner-grid pattern).
+      const pmOuterMaxLevel = PM_OUTER_LEVELS - 1;
+      for (let l = 1; l < PM_OUTER_LEVELS; l++) encoder.clearBuffer(pmOuterPotential[l]);
+      const vOuterPass = encoder.beginComputePass();
+      // Descent: pre-smooth → residual → restrict, l=0..maxLevel-1.
+      for (let l = 0; l < pmOuterMaxLevel; l++) {
+        vOuterPass.setPipeline(pmSmoothPipeline);
+        for (let s = 0; s < PM_SMOOTH_PRE; s++) {
+          vOuterPass.setBindGroup(0, pmOuterSmoothBG[l][0]);
+          vOuterPass.dispatchWorkgroups(pmOuterWgCount[l], pmOuterWgCount[l], pmOuterWgCount[l]);
+          vOuterPass.setBindGroup(0, pmOuterSmoothBG[l][1]);
+          vOuterPass.dispatchWorkgroups(pmOuterWgCount[l], pmOuterWgCount[l], pmOuterWgCount[l]);
+        }
+        vOuterPass.setPipeline(pmResidualPipeline);
+        vOuterPass.setBindGroup(0, pmOuterResidualBG[l]);
+        vOuterPass.dispatchWorkgroups(pmOuterWgCount[l], pmOuterWgCount[l], pmOuterWgCount[l]);
+        vOuterPass.setPipeline(pmRestrictPipeline);
+        vOuterPass.setBindGroup(0, pmOuterRestrictBG[l]);
+        vOuterPass.dispatchWorkgroups(pmOuterWgCount[l + 1], pmOuterWgCount[l + 1], pmOuterWgCount[l + 1]);
+      }
+      // Coarsest level: over-smooth.
+      vOuterPass.setPipeline(pmSmoothPipeline);
+      for (let s = 0; s < PM_COARSEST_SWEEPS; s++) {
+        vOuterPass.setBindGroup(0, pmOuterSmoothBG[pmOuterMaxLevel][0]);
+        vOuterPass.dispatchWorkgroups(pmOuterWgCount[pmOuterMaxLevel], pmOuterWgCount[pmOuterMaxLevel], pmOuterWgCount[pmOuterMaxLevel]);
+        vOuterPass.setBindGroup(0, pmOuterSmoothBG[pmOuterMaxLevel][1]);
+        vOuterPass.dispatchWorkgroups(pmOuterWgCount[pmOuterMaxLevel], pmOuterWgCount[pmOuterMaxLevel], pmOuterWgCount[pmOuterMaxLevel]);
+      }
+      // Ascent: prolong + post-smooth, l=maxLevel-1..0.
+      for (let l = pmOuterMaxLevel - 1; l >= 0; l--) {
+        vOuterPass.setPipeline(pmProlongPipeline);
+        vOuterPass.setBindGroup(0, pmOuterProlongBG[l]);
+        vOuterPass.dispatchWorkgroups(pmOuterWgCount[l], pmOuterWgCount[l], pmOuterWgCount[l]);
+        vOuterPass.setPipeline(pmSmoothPipeline);
+        for (let s = 0; s < PM_SMOOTH_POST; s++) {
+          vOuterPass.setBindGroup(0, pmOuterSmoothBG[l][0]);
+          vOuterPass.dispatchWorkgroups(pmOuterWgCount[l], pmOuterWgCount[l], pmOuterWgCount[l]);
+          vOuterPass.setBindGroup(0, pmOuterSmoothBG[l][1]);
+          vOuterPass.dispatchWorkgroups(pmOuterWgCount[l], pmOuterWgCount[l], pmOuterWgCount[l]);
+        }
+      }
+      vOuterPass.end();
 
       // ── PM force interpolation ─────────────────────────────────────────
       // Sample the freshly-solved pmPotential[0] at each particle via the CIC
@@ -2773,23 +2996,64 @@ function createPhysicsSimulation() {
 
     // Max |residual| at level 0 — the convergence metric for the V-cycle.
     // Below ~1% of peak density value after 4 V-cycles indicates good solve.
-    async maxResidual(): Promise<number | null> {
-      if (pmDiagPending) return null;
+    async maxResidual(): Promise<{ inner: number; outer: number } | null> {
+      if (pmDiagPending || pmOuterDiagPending) return null;
       pmDiagPending = true;
+      pmOuterDiagPending = true;
       const enc = device.createCommandEncoder();
       enc.copyBufferToBuffer(pmResidual[0], 0, pmDensityStaging, 0, pmLevel0Cells * 4);
+      enc.copyBufferToBuffer(pmOuterResidual[0], 0, pmOuterDensityStaging, 0, pmOuterLevel0Cells * 4);
       device.queue.submit([enc.finish()]);
       await device.queue.onSubmittedWorkDone();
       await pmDensityStaging.mapAsync(GPUMapMode.READ);
-      const arr = new Float32Array(pmDensityStaging.getMappedRange());
-      let maxAbs = 0;
-      for (let i = 0; i < arr.length; i++) {
-        const a = Math.abs(arr[i]);
-        if (a > maxAbs) maxAbs = a;
+      const innerArr = new Float32Array(pmDensityStaging.getMappedRange());
+      let inner = 0;
+      for (let i = 0; i < innerArr.length; i++) {
+        const a = Math.abs(innerArr[i]);
+        if (a > inner) inner = a;
       }
       pmDensityStaging.unmap();
       pmDiagPending = false;
-      return maxAbs;
+
+      await pmOuterDensityStaging.mapAsync(GPUMapMode.READ);
+      const outerArr = new Float32Array(pmOuterDensityStaging.getMappedRange());
+      let outer = 0;
+      for (let i = 0; i < outerArr.length; i++) {
+        const a = Math.abs(outerArr[i]);
+        if (a > outer) outer = a;
+      }
+      pmOuterDensityStaging.unmap();
+      pmOuterDiagPending = false;
+      return { inner, outer };
+    },
+
+    // Outer-grid density + potential dumps. Separate staging buffer keeps
+    // these independent of the inner-grid diagnostic in-flight flag.
+    async dumpOuterDensity(): Promise<Float32Array | null> {
+      if (pmOuterDiagPending) return null;
+      pmOuterDiagPending = true;
+      const enc = device.createCommandEncoder();
+      enc.copyBufferToBuffer(pmOuterDensityF32, 0, pmOuterDensityStaging, 0, pmOuterLevel0Cells * 4);
+      device.queue.submit([enc.finish()]);
+      await device.queue.onSubmittedWorkDone();
+      await pmOuterDensityStaging.mapAsync(GPUMapMode.READ);
+      const out = new Float32Array(pmOuterDensityStaging.getMappedRange().slice(0));
+      pmOuterDensityStaging.unmap();
+      pmOuterDiagPending = false;
+      return out;
+    },
+    async dumpOuterPotential(): Promise<Float32Array | null> {
+      if (pmOuterDiagPending) return null;
+      pmOuterDiagPending = true;
+      const enc = device.createCommandEncoder();
+      enc.copyBufferToBuffer(pmOuterPotential[0], 0, pmOuterDensityStaging, 0, pmOuterLevel0Cells * 4);
+      device.queue.submit([enc.finish()]);
+      await device.queue.onSubmittedWorkDone();
+      await pmOuterDensityStaging.mapAsync(GPUMapMode.READ);
+      const out = new Float32Array(pmOuterDensityStaging.getMappedRange().slice(0));
+      pmOuterDensityStaging.unmap();
+      pmOuterDiagPending = false;
+      return out;
     },
 
     // PM reversibility harness. Snapshots particle positions, runs N forward
@@ -2884,6 +3148,17 @@ function createPhysicsSimulation() {
       for (const b of pmResidualUniform) b.destroy();
       for (const b of pmRestrictUniform) b.destroy();
       for (const b of pmProlongUniform) b.destroy();
+      // Outer grid (same resource bundle — mirrors the inner cleanup above).
+      pmOuterDensityU32.destroy(); pmOuterDensityF32.destroy();
+      for (const b of pmOuterPotential) b.destroy();
+      for (const b of pmOuterResidual) b.destroy();
+      pmOuterMeanScratch.destroy();
+      pmOuterParamsBuffer.destroy(); pmOuterDensityStaging.destroy();
+      for (let l = 1; l < pmOuterRho.length; l++) pmOuterRho[l].destroy();
+      for (const pair of pmOuterSmoothUniform) for (const b of pair) b.destroy();
+      for (const b of pmOuterResidualUniform) b.destroy();
+      for (const b of pmOuterRestrictUniform) b.destroy();
+      for (const b of pmOuterProlongUniform) b.destroy();
       destroyDepthRef(depthRef);
     },
     // PM internal state — not read by external callers today. Future tickets
@@ -7515,7 +7790,9 @@ async function main() {
   type PmDiag = {
     dumpDensity?: () => Promise<Float32Array | null>,
     dumpPotential?: () => Promise<Float32Array | null>,
-    maxResidual?: () => Promise<number | null>,
+    dumpOuterDensity?: () => Promise<Float32Array | null>,
+    dumpOuterPotential?: () => Promise<Float32Array | null>,
+    maxResidual?: () => Promise<{ inner: number; outer: number } | null>,
     reversibilityTest?: (n: number) => Promise<{ maxErr: number; meanErr: number; count: number } | null>,
   };
   (window as any).__pmDumpDensity = () => {
@@ -7525,6 +7802,14 @@ async function main() {
   (window as any).__pmDumpPotential = () => {
     const sim = simulations[state.mode] as unknown as PmDiag;
     return sim?.dumpPotential ? sim.dumpPotential() : Promise.resolve(null);
+  };
+  (window as any).__pmDumpOuterDensity = () => {
+    const sim = simulations[state.mode] as unknown as PmDiag;
+    return sim?.dumpOuterDensity ? sim.dumpOuterDensity() : Promise.resolve(null);
+  };
+  (window as any).__pmDumpOuterPotential = () => {
+    const sim = simulations[state.mode] as unknown as PmDiag;
+    return sim?.dumpOuterPotential ? sim.dumpOuterPotential() : Promise.resolve(null);
   };
   (window as any).__pmMaxResidual = () => {
     const sim = simulations[state.mode] as unknown as PmDiag;
