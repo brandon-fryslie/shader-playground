@@ -338,29 +338,29 @@ function computeDragValue(
   const dy = hf.pinch.current[1] - state.handOriginPos[1];
   const dz = hf.pinch.current[2] - state.handOriginPos[2];
   const span = binding.range.max - binding.range.min;
-  let delta = 0;
-  switch (state.interaction.kind) {
-    case 'direct-drag': {
-      // 1m of hand travel → full slider range. Tuneable later if too sensitive.
-      const raw = state.interaction.axis === 'x' ? dx : dy;
-      delta = raw * span;
-      break;
+  const computeInteractionDelta = (interaction: ContinuousInteraction): number => {
+    switch (interaction.kind) {
+      case 'direct-drag': {
+        // 1m of hand travel → full slider range. Tuneable later if too sensitive.
+        const raw = interaction.axis === 'x' ? dx : dy;
+        return raw * span;
+      }
+      case 'pinch-pull': {
+        const ax = interaction.axis;
+        const raw = ax === 'forward' ? -dz : ax === 'up' ? dy : dx;
+        return raw * interaction.unitsPerMeter;
+      }
+      case 'pinch-twist':
+        // Wrist quat delta wiring lands in ticket .14 — for MVP, no twist response.
+        return 0;
+      case 'expand-to-focus':
+        // Outer focus mechanic lands in ticket .14; until then the wrapped
+        // slider behaves as its underlying interaction (recursive delegation
+        // beats a silent no-op for a kind that's part of the public union).
+        return computeInteractionDelta(interaction.underlying);
     }
-    case 'pinch-pull': {
-      const ax = state.interaction.axis;
-      const raw = ax === 'forward' ? -dz : ax === 'up' ? dy : dx;
-      delta = raw * state.interaction.unitsPerMeter;
-      break;
-    }
-    case 'pinch-twist':
-      // Wrist quat delta wiring lands in ticket .14 — for MVP, no twist response.
-      delta = 0;
-      break;
-    case 'expand-to-focus':
-      // Defers to inner interaction; full mechanic lands in ticket .14.
-      delta = 0;
-      break;
-  }
+  };
+  const delta = computeInteractionDelta(state.interaction);
   const v = state.valueAtOrigin + delta * gain;
   return Math.max(binding.range.min, Math.min(binding.range.max, v));
 }

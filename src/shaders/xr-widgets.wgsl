@@ -4,8 +4,8 @@
 // fragment renders an SDF rounded rectangle and branches on `kind` for
 // kind-specific fills (slider track, dial arc, toggle knob, etc.).
 //
-// Label atlas: instance.labelStripIndex selects a 32-pixel-tall strip in the
-// 256x2048 atlas texture; instance.hasLabel gates the lookup. CPU side
+// Label atlas: instance.labelStripIndex selects a 64-pixel-tall strip in the
+// 512x4096 atlas texture; instance.hasLabel gates the lookup. CPU side
 // (renderer.ts) re-rasterizes a strip when the binding's text changes.
 //
 // Kind codes — keep in sync with renderer.ts KIND map and step.ts widget union:
@@ -220,7 +220,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     let CANVAS_ASPECT = ATLAS_W / STRIP_H;        // 8.0
     let V_BAND = 0.45;                             // strip occupies ±V_BAND in widget uv
     let widgetTextAspect = in.halfX / max(V_BAND * in.halfY, 0.001);
-    // Floor uHalf at 0.4 so very narrow widgets still show readable text
+    // Floor uHalf at 0.1 so very narrow widgets still show readable text
     // (cropping a few glyphs is preferable to invisible text).
     let uHalf = clamp(widgetTextAspect / CANVAS_ASPECT * 0.5, 0.1, 0.5);
     let labelU = 0.5 + in.uv.x * uHalf;
@@ -228,7 +228,10 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     let stripV0 = f32(in.stripIndex) * STRIP_V_FRAC;
     let labelV = stripV0 + (labelLocalV * 0.5 + 0.5) * STRIP_V_FRAC;
     if (labelU >= 0.0 && labelU <= 1.0 && labelLocalV >= -1.0 && labelLocalV <= 1.0) {
-      let glyph = textureSample(atlas, atlasSampler, vec2<f32>(labelU, labelV));
+      // textureSampleLevel (explicit LOD 0) avoids implicit-derivative
+      // uniform-control-flow violations: this branch depends on per-fragment
+      // varyings and runs after a discard, so textureSample would be UB.
+      let glyph = textureSampleLevel(atlas, atlasSampler, vec2<f32>(labelU, labelV), 0.0);
       fill = mix(fill, vec3<f32>(0.97, 0.97, 0.97), glyph.a);
     }
   }

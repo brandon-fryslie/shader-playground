@@ -5490,9 +5490,12 @@ let xrRefSpace: XRReferenceSpace | null = null;
 let xrBaseRefSpace: XRReferenceSpace | null = null; // pre-gesture reference space
 let xrBinding: XRGPUBinding | null = null;
 let xrLayer: XRProjectionLayer | null = null;
-// [LAW:one-source-of-truth] Single session-scoped flag for hand-tracking availability.
-// Set at session acquisition from xrSession.enabledFeatures; reset on session end.
-// Ticket .5 reads this to decide whether to attempt frame.getJointPose() queries.
+// Diagnostic only: logged at session acquisition so the acquired-session log
+// line records whether the runtime granted hand-tracking. The hot path does
+// NOT consult this flag — per-source `source.hand` is the canonical truth
+// (xrUpdateHandFrames already gates joint queries on it). Mirroring that into
+// a session-level boolean and reading both would be a [LAW:one-source-of-truth]
+// violation. Reset on session end so a re-acquisition doesn't read stale state.
 let xrHandTrackingAvailable = false;
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -5886,8 +5889,12 @@ function computePalmNormal(joints: XrJoints, hand: XrHand): number[] | null {
   // Right hand: cross(toPinky, toIndex) points out of palm.
   // Left  hand: cross(toIndex, toPinky) points out of palm (mirror).
   const raw = hand === 'right' ? cross3(toPinky, toIndex) : cross3(toIndex, toPinky);
-  const n = normalize3(raw);
-  return (n[0] === 0 && n[1] === 0 && n[2] === 0) ? null : n;
+  // Reject near-collinear metacarpals: a healthy cross product has |raw|² on
+  // the order of (5cm × 5cm)² ≈ 6e-6 m⁴; floor at 1e-12 catches both exact
+  // zeros and the noisy unit vectors normalize3 would produce from tiny inputs.
+  const lenSq = raw[0]*raw[0] + raw[1]*raw[1] + raw[2]*raw[2];
+  if (lenSq < 1e-12) return null;
+  return normalize3(raw);
 }
 
 // Thumb-tip-to-fingertip geometric grip flags. Outer null ⟺ thumb-tip is
@@ -6431,7 +6438,7 @@ async function toggleXR() {
     // [LAW:one-source-of-truth] enabledFeatures is the WebXR-spec synchronous report
     // of which optional features the runtime granted. Missing/empty → false, which
     // is the correct conservative default ([LAW:no-defensive-null-guards]).
-    const enabledFeatures = (xrSession as unknown as { enabledFeatures?: readonly string[] }).enabledFeatures;
+    const enabledFeatures = xrSession.enabledFeatures;
     xrHandTrackingAvailable = !!enabledFeatures && enabledFeatures.includes('hand-tracking');
     logInfo('xr', 'session acquired', {
       environmentBlendMode: (xrSession as unknown as { environmentBlendMode?: string }).environmentBlendMode,
