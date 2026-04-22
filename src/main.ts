@@ -25,6 +25,7 @@ import SHADER_PM_RESIDUAL from './shaders/pm.residual.wgsl?raw';
 import SHADER_PM_RESTRICT from './shaders/pm.restrict.wgsl?raw';
 import SHADER_PM_PROLONG from './shaders/pm.prolong.wgsl?raw';
 import SHADER_PM_INTERPOLATE from './shaders/pm.interpolate.wgsl?raw';
+import SHADER_PM_INTERPOLATE_NESTED from './shaders/pm.interpolate_nested.wgsl?raw';
 import SHADER_NBODY_CLASSIC_RENDER from './shaders/nbody.classic.render.wgsl?raw';
 import SHADER_FLUID_FORCES_ADVECT from './shaders/fluid.forces.wgsl?raw';
 import SHADER_FLUID_DIFFUSE from './shaders/fluid.diffuse.wgsl?raw';
@@ -1788,10 +1789,15 @@ function createPhysicsSimulation() {
   // Verification: __pmReversibilityTest(1000) → maxErr < 0.01 world units.
   // Values much larger indicate a sampling mismatch (pos vs posHalf) or a
   // non-reversible operation slipped in somewhere.
-  const PM_GRID_RES = 128;                          // 128³ cells at level 0
-  const PM_DOMAIN_HALF = 64.0;                      // matches DOMAIN_HALF in nbody.compute.wgsl (sized to visual room)
-  const PM_DOMAIN_SIZE = PM_DOMAIN_HALF * 2;        // = 128.0
-  const PM_CELL_SIZE = PM_DOMAIN_SIZE / PM_GRID_RES; // = 1.0 world units per cell
+  const PM_GRID_RES = 128;                          // 128³ cells at level 0 (inner grid)
+  // Inner grid covers the central ±16 region at cell size 0.25 — sharp enough
+  // to resolve the ~3–5 world-unit initial cloud in 24–40 cells. The outer
+  // grid (allocated below at ±64, cell 2.0) handles long-range gravity for
+  // particles that escape the inner domain, with nested.interpolate blending
+  // force between them in the ±14..±16 transition shell.
+  const PM_DOMAIN_HALF = 16.0;
+  const PM_DOMAIN_SIZE = PM_DOMAIN_HALF * 2;        // = 32.0
+  const PM_CELL_SIZE = PM_DOMAIN_SIZE / PM_GRID_RES; // = 0.25 world units per cell
   const PM_FIXED_POINT_SCALE = 65536;               // 2^16 — u32 atomic mass accumulation
   const PM_MULTIGRID_LEVELS = 6;                    // 128³, 64³, 32³, 16³, 8³, 4³
   const PM_V_CYCLE_COUNT = 1;                       // V-cycles per Poisson solve (warm-started; see header)
@@ -1992,36 +1998,43 @@ function createPhysicsSimulation() {
   const pmRestrictPipeline = device.createComputePipeline({ layout: device.createPipelineLayout({ bindGroupLayouts: [pmRestrictBGL] }), compute: { module: pmRestrictModule, entryPoint: 'main' } });
   const pmProlongPipeline  = device.createComputePipeline({ layout: device.createPipelineLayout({ bindGroupLayouts: [pmProlongBGL] }),  compute: { module: pmProlongModule,  entryPoint: 'main' } });
 
-  // PM force interpolation — reads pmPotential[0] + current bodies, writes pmForce.
-  const pmInterpolateModule = createShaderModuleChecked('pm.interpolate', SHADER_PM_INTERPOLATE);
+  // PM nested force interpolation — reads BOTH grids' level-0 potential,
+  // samples each at the particle position, and blends via smoothstep across
+  // the transition shell. This is the sole force source for nbody.compute.
+  // [LAW:one-source-of-truth] Single shader owns the inner/outer selection;
+  // no fan-in at the integrator level.
+  void SHADER_PM_INTERPOLATE;  // legacy import kept; superseded by nested below
+  const pmInterpolateModule = createShaderModuleChecked('pm.interpolate_nested', SHADER_PM_INTERPOLATE_NESTED);
   const pmInterpolateBGL = device.createBindGroupLayout({
     entries: [
-      { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
-      { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
-      { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
-      { binding: 3, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
+      { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } }, // bodies
+      { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } }, // innerPhi
+      { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } }, // outerPhi
+      { binding: 3, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },           // forceOut
+      { binding: 4, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },           // innerParams
+      { binding: 5, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },           // outerParams
+      { binding: 6, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },           // blend shell
     ]
   });
   const pmInterpolatePipeline = device.createComputePipeline({
     layout: device.createPipelineLayout({ bindGroupLayouts: [pmInterpolateBGL] }),
     compute: { module: pmInterpolateModule, entryPoint: 'main' }
   });
-  // Per-ping-pong interpolate bind groups — read from whichever body buffer
-  // is the current frame's input (matches pmDepositBG indexing).
-  const pmInterpolateBG = [
-    device.createBindGroup({ layout: pmInterpolateBGL, entries: [
-      { binding: 0, resource: { buffer: bufferA } },
-      { binding: 1, resource: { buffer: pmPotential[0] } },
-      { binding: 2, resource: { buffer: pmForce } },
-      { binding: 3, resource: { buffer: pmParamsBuffer } },
-    ]}),
-    device.createBindGroup({ layout: pmInterpolateBGL, entries: [
-      { binding: 0, resource: { buffer: bufferB } },
-      { binding: 1, resource: { buffer: pmPotential[0] } },
-      { binding: 2, resource: { buffer: pmForce } },
-      { binding: 3, resource: { buffer: pmParamsBuffer } },
-    ]}),
-  ];
+
+  // Blend shell uniform: transitions pure-inner → pure-outer over [start, end].
+  // Placed at start = innerDomainHalf - 2 and end = innerDomainHalf so the
+  // full blend happens in the last 2-unit-thick shell of the inner grid.
+  // This keeps the inner grid's boundary region (where periodic-wrap artifacts
+  // live until A5's Dirichlet BC lands) weighted toward outer.
+  const pmBlendBuffer = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+  {
+    const ab = new ArrayBuffer(16);
+    new Float32Array(ab, 0, 2).set([PM_DOMAIN_HALF - 2.0, PM_DOMAIN_HALF]);
+    device.queue.writeBuffer(pmBlendBuffer, 0, ab);
+  }
+
+  // Per-ping-pong interpolate bind groups live AFTER the outer-grid
+  // allocation (below) since they reference pmOuterPotential / pmOuterParamsBuffer.
 
 
   // Per-level uniform buffers, pre-populated at factory init. Each holds a
@@ -2275,6 +2288,30 @@ function createPhysicsSimulation() {
     usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
   });
   let pmOuterDiagPending = false;
+
+  // Deferred interpolate bind groups — all dependencies now in scope.
+  // Per-ping-pong: binds whichever body buffer is the current frame's input,
+  // both grids' level-0 potentials, and the blend shell uniform.
+  const pmInterpolateBG = [
+    device.createBindGroup({ layout: pmInterpolateBGL, entries: [
+      { binding: 0, resource: { buffer: bufferA } },
+      { binding: 1, resource: { buffer: pmPotential[0] } },
+      { binding: 2, resource: { buffer: pmOuterPotential[0] } },
+      { binding: 3, resource: { buffer: pmForce } },
+      { binding: 4, resource: { buffer: pmParamsBuffer } },
+      { binding: 5, resource: { buffer: pmOuterParamsBuffer } },
+      { binding: 6, resource: { buffer: pmBlendBuffer } },
+    ]}),
+    device.createBindGroup({ layout: pmInterpolateBGL, entries: [
+      { binding: 0, resource: { buffer: bufferB } },
+      { binding: 1, resource: { buffer: pmPotential[0] } },
+      { binding: 2, resource: { buffer: pmOuterPotential[0] } },
+      { binding: 3, resource: { buffer: pmForce } },
+      { binding: 4, resource: { buffer: pmParamsBuffer } },
+      { binding: 5, resource: { buffer: pmOuterParamsBuffer } },
+      { binding: 6, resource: { buffer: pmBlendBuffer } },
+    ]}),
+  ];
 
   const computeModule = createShaderModuleChecked('nbody.compute', SHADER_NBODY_COMPUTE_EDIT || SHADER_NBODY_COMPUTE);
   const renderModule = createShaderModuleChecked('nbody.render', SHADER_NBODY_RENDER_EDIT || SHADER_NBODY_RENDER);
@@ -3159,6 +3196,7 @@ function createPhysicsSimulation() {
       for (const b of pmOuterResidualUniform) b.destroy();
       for (const b of pmOuterRestrictUniform) b.destroy();
       for (const b of pmOuterProlongUniform) b.destroy();
+      pmBlendBuffer.destroy();
       destroyDepthRef(depthRef);
     },
     // PM internal state — not read by external callers today. Future tickets
