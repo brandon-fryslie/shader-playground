@@ -4,15 +4,22 @@
     {
       "version": "pr-13",
       "ref": "refs/pull/13/merge",
-      "sha": "64c98a088598843344e50745ea422b3b7470bf76",
-      "timestamp": "2026-04-22T19:02:51.778Z",
+      "sha": "bd97b804bf3f4afbe806985dece561f6de8a769f",
+      "timestamp": "2026-04-22T21:32:40.896Z",
       "commits": [
         {
-          "sha": "64c98a088598843344e50745ea422b3b7470bf76",
+          "sha": "bd97b804bf3f4afbe806985dece561f6de8a769f",
           "author_name": "Brandon Fryslie",
           "author_email": "530235+brandon-fryslie@users.noreply.github.com",
-          "timestamp": "2026-04-22T19:02:36Z",
-          "message": "Merge 08ad7c8664ba93cfda18fd512c68aabd9b9c1f5a into e59fa2d42b0961590a58c5fa15d159d77978f0e0\n"
+          "timestamp": "2026-04-22T21:32:23Z",
+          "message": "Merge 981b68a9936ea8311e5c70c607f9a09eedfae748 into e59fa2d42b0961590a58c5fa15d159d77978f0e0\n"
+        },
+        {
+          "sha": "981b68a9936ea8311e5c70c607f9a09eedfae748",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-22T15:32:10-06:00",
+          "message": "feat(physics): full V-cycle per frame + runPmVCycle helper\n\nCollapses the phase-split multigrid V-cycle — which alternated between\n\"descent only\" and \"ascent only\" frames and leaked work-in-progress phi\nto the integrator every other frame — into a single complete V-cycle\nper frame. The integrator now always reads a fully-solved potential;\ngravity no longer alternates between short-range-only and full-range\nbetween frames (the 2-state oscillation that appeared as static\nanimation under debug frame stepping).\n\nChanges:\n- PM_SMOOTH_PRE / PM_SMOOTH_POST: 2 → 1. Net smoother work per frame is\n  actually lower than the old split (1+1 sweeps vs. 2+2 when the split\n  accumulated across a cycle).\n- Extract runPmVCycle() helper at module scope. Inner and outer grids\n  now use the same dispatcher, eliminating ~50 lines of duplicated\n  descent/coarsest/ascent code. Pipelines hoisted to module-scope\n  handles so the helper can reference them.\n- Remove pmDescent branching; no more if(phase A)/else(phase B) in\n  compute(). The V-cycle is a pure function of (density, previous phi).\n\nWhy this is better:\n- Consumers see only completed solutions — impossible to read mid-solve\n  state by design.\n- Density snapshot is implicit: deposit + full V-cycle + interpolate\n  all happen in one frame, so RHS is consistent within a cycle. The\n  old scheme's descent-uses-frame-N-rho / ascent-uses-frame-N+1-rho\n  inconsistency is gone.\n- Reversibility drift should tighten because there are no multi-frame\n  history-dependent intermediate buffers (pmPotential[1..5] and\n  pmRho[1..5] now live and die within a single cycle).\n- Pattern composes: a future gas-coupled grid or further nested PM\n  level just calls runPmVCycle with its own buffer bundle.\n\nBudget: full 128³ V-cycle ~3.5 ms on M2 (well under Vision Pro 11 ms\nbudget with room for nbody compute + stereo render + outer V-cycle).\n\nVerification pending on-device:\n- __pmReversibilityTest(1000) maxErr < 0.01\n- __pmMaxResidual() inner + outer both < 1% of peak density\n- Frame-step debug: each step advances to a NEW state (not alternating\n  between 2); 10/60 step buttons show visible bulk motion.\n"
         },
         {
           "sha": "08ad7c8664ba93cfda18fd512c68aabd9b9c1f5a",
