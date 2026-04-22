@@ -4,15 +4,22 @@
     {
       "version": "pr-12",
       "ref": "refs/pull/12/merge",
-      "sha": "7382d69fe3dee5ab63019be87e832a23222b5138",
-      "timestamp": "2026-04-21T23:20:06.887Z",
+      "sha": "8adb258548a4437f0f39e02fd8552d6d42e74d29",
+      "timestamp": "2026-04-22T00:50:38.178Z",
       "commits": [
         {
-          "sha": "7382d69fe3dee5ab63019be87e832a23222b5138",
+          "sha": "8adb258548a4437f0f39e02fd8552d6d42e74d29",
           "author_name": "Brandon Fryslie",
           "author_email": "530235+brandon-fryslie@users.noreply.github.com",
-          "timestamp": "2026-04-21T23:19:52Z",
-          "message": "Merge a7fe86f619d1ab443a2ee8ca68ddc42939e1148a into 806c0ac22ecb4ac0a01350d9c72de335e33649f7\n"
+          "timestamp": "2026-04-22T00:50:17Z",
+          "message": "Merge 82ac63647e8a04e3ed271740f797c5d0fbf11a55 into 806c0ac22ecb4ac0a01350d9c72de335e33649f7\n"
+        },
+        {
+          "sha": "82ac63647e8a04e3ed271740f797c5d0fbf11a55",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-21T18:50:05-06:00",
+          "message": "fix(xr): address PR #12 review — palm normal stability, doc accuracy, WGSL safety\n\n- computePalmNormal: reject near-collinear metacarpals via epsilon on raw\n  cross-product squared length, not just exact-zero after normalization.\n  Fixes unstable palm orientation when metacarpals are momentarily aligned.\n\n- xrHandTrackingAvailable: rewrite the comment to match actual usage. The\n  flag is diagnostic-only (logged at session acquisition); per-source\n  source.hand is the canonical truth and the hot path correctly uses it.\n  Documenting the intentional non-use prevents future \"mirror this into a\n  gate\" accidents.\n\n- toggleXR: drop the redundant `as unknown as { enabledFeatures? }` cast\n  now that XRSession is declared with enabledFeatures in webxr-gpu.d.ts.\n\n- xr-widgets.wgsl header: update stale 32px / 256x2048 atlas comment to\n  match the actual 64px / 512x4096 constants below it.\n\n- xr-widgets.wgsl label sample: switch textureSample → textureSampleLevel\n  with explicit LOD 0. The label sample sits inside a varying-dependent\n  branch downstream of a per-fragment discard, which violates WGSL's\n  uniform-control-flow requirement for implicit-derivative sampling.\n  Atlas glyphs are pre-rendered at native resolution; we never want\n  mipmap selection here anyway.\n\n- xr-widgets.wgsl uHalf comment: code clamps to 0.1 (correct behavior —\n  smaller uHalf shows more text on narrow widgets); fix the comment that\n  claimed \"Floor at 0.4\".\n\n- step.ts computeDragValue: replace the silent expand-to-focus no-op\n  with recursive delegation to interaction.underlying. The wrapped\n  slider now behaves as its underlying interaction until the outer\n  focus mechanic lands; better than a public-union variant that\n  silently does nothing.\n\nGenerated with [Claude Code](https://claude.ai/code)\nvia [Happy](https://happy.engineering)\n\nCo-Authored-By: Claude <noreply@anthropic.com>\nCo-Authored-By: Happy <yesreply@happy.engineering>\n"
         },
         {
           "sha": "a7fe86f619d1ab443a2ee8ca68ddc42939e1148a",
