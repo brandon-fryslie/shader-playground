@@ -4,15 +4,29 @@
     {
       "version": "pr-12",
       "ref": "refs/pull/12/merge",
-      "sha": "a9c01499e6731c28fcf3bcd68474d0fa5d6ebbde",
-      "timestamp": "2026-04-22T00:56:08.587Z",
+      "sha": "d90e96e5d7a18680a17244f37d0868e07cfa1760",
+      "timestamp": "2026-04-22T06:24:07.312Z",
       "commits": [
         {
-          "sha": "a9c01499e6731c28fcf3bcd68474d0fa5d6ebbde",
+          "sha": "d90e96e5d7a18680a17244f37d0868e07cfa1760",
           "author_name": "Brandon Fryslie",
           "author_email": "530235+brandon-fryslie@users.noreply.github.com",
-          "timestamp": "2026-04-22T00:55:44Z",
-          "message": "Merge 1648a8096a016e855787b889845116f053763cc0 into 806c0ac22ecb4ac0a01350d9c72de335e33649f7\n"
+          "timestamp": "2026-04-22T06:23:47Z",
+          "message": "Merge e7e4a63db1c2e9090951e1a55dea2adff76608b9 into 806c0ac22ecb4ac0a01350d9c72de335e33649f7\n"
+        },
+        {
+          "sha": "e7e4a63db1c2e9090951e1a55dea2adff76608b9",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-22T00:22:35-06:00",
+          "message": "fix(xr-ui): bound label-atlas strips to instance slots; drag deltas in widget-local space\n\nTwo correctness fixes flagged in PR #12 review:\n\n1. Label atlas: the widget-id-keyed `stripsByWidget` map grew monotonically\n   across layout swaps / tab changes and eventually saturated `nextStripIndex`,\n   at which point `ensureLabelStrip` silently returned -1 and labels disappeared\n   even though the active panel had room. Strips and instance slots are 1:1\n   (MAX_STRIPS == MAX_INSTANCES), so the map is a redundant second namespace;\n   replaced with `lastLabelByStrip: string[]` keyed by slot index. Cache-hit\n   path is identical in steady state.\n\n2. Drag axes: `computeDragValue` read `dx/dy/dz` as world coordinates, which\n   breaks slider/dial interactions on wrist- or palm-anchored panels because\n   the panel's local X/Y/Z no longer align with world X/Y/Z. Snapshot the\n   widget's orientation at pinch-start (widgetOrientationAtOrigin) and rotate\n   the world-space delta by its conjugate before switching on interaction.axis.\n   Orientation is frozen at pinch-start so a rotating wrist mid-drag does not\n   remap axes underneath the user.\n\nGenerated with [Claude Code](https://claude.ai/code)\nvia [Happy](https://happy.engineering)\n\nCo-Authored-By: Claude <noreply@anthropic.com>\nCo-Authored-By: Happy <yesreply@happy.engineering>\n"
+        },
+        {
+          "sha": "3c39e4da61b3268d8ff7a945ffd6c489b8181715",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-21T23:13:32-06:00",
+          "message": "tone down gravity again\n"
         },
         {
           "sha": "1648a8096a016e855787b889845116f053763cc0",
