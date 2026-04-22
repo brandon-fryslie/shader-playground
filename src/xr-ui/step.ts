@@ -23,6 +23,7 @@
 // (return idle); we never substitute a default UI or swallow the absence.
 
 import type { AnchorContext, Pose } from './anchors';
+import { quatConj, quatRotateVec } from './anchors';
 import type { Container, Widget, Vec2, ContinuousInteraction } from './widgets';
 import type { Binding, BindingRegistry } from './bindings';
 import { layout, hitTestWidgets } from './layout';
@@ -55,6 +56,11 @@ export type InteractionState =
   | { kind: 'dragging';
       widgetId: string; bindingId: string;
       handOriginPos: number[];        // world-space hand position at pinch-start
+      // Widget orientation frozen at pinch-start. Drag deltas are rotated into this frame so the
+      // users mental axis (slider X, pinch-pull forward, etc.) matches panel-local space even when
+      // the panel is wrist/palm anchored and tilted. Locked at start so a rotating wrist mid-drag
+      // does not remap axes underneath the user.
+      widgetOrientationAtOrigin: [number, number, number, number];
       valueAtOrigin: number;          // binding value snapshot at pinch-start
       interaction: ContinuousInteraction;
       cancelPending: boolean };
@@ -143,8 +149,9 @@ export function xrUiStep(
       // PINCH-START → SELECTION pipeline.
       // [LAW:one-source-of-truth] Selection ALWAYS reads gazeRay (frozen at pinch-start).
       const id = hf.gazeRay ? hitTestWidgets(laid, hf.gazeRay) : null;
-      const widget = id ? laid.get(id)?.widget ?? null : null;
-      nextState = (widget && id) ? beginInteraction(widget, id, registry.bindings, hf) : { kind: 'idle' };
+      const laidEntry = id ? laid.get(id) ?? null : null;
+      const widget = laidEntry?.widget ?? null;
+      nextState = (widget && id && laidEntry) ? beginInteraction(widget, id, laidEntry.pose, registry.bindings, hf) : { kind: 'idle' };
     } else if (!isPinching && wasPinching) {
       // PINCH-END → COMMIT or RELEASE.
       if (prevState.kind === 'pressing' && !prevState.cancelPending) {
@@ -286,6 +293,7 @@ function readWidgetValue(widget: Widget, bindings: BindingRegistry): number | un
 function beginInteraction(
   widget: Widget,
   widgetId: string,
+  pose: Pose,
   bindings: BindingRegistry,
   hf: HandFrame,
 ): InteractionState {
@@ -316,6 +324,9 @@ function beginInteraction(
       kind: 'dragging',
       widgetId, bindingId: b.id,
       handOriginPos: [...hf.pinch.origin],
+      widgetOrientationAtOrigin: [
+        pose.orientation[0], pose.orientation[1], pose.orientation[2], pose.orientation[3],
+      ],
       valueAtOrigin: b.get(),
       interaction: widget.interaction,
       cancelPending: false,
@@ -334,9 +345,19 @@ function computeDragValue(
   binding: Extract<Binding, { kind: 'continuous' }>,
   gain: number,
 ): number {
-  const dx = hf.pinch.current[0] - state.handOriginPos[0];
-  const dy = hf.pinch.current[1] - state.handOriginPos[1];
-  const dz = hf.pinch.current[2] - state.handOriginPos[2];
+  // [LAW:one-source-of-truth] Drag delta is evaluated in widget-LOCAL space so slider-X / pinch-pull-forward
+  // mean the same thing no matter how the panel is oriented in world. The widget orientation is frozen at
+  // pinch-start (widgetOrientationAtOrigin) — re-reading the pose each frame would let a rotating wrist
+  // remap the axes underneath the user mid-drag.
+  const worldDelta: [number, number, number] = [
+    hf.pinch.current[0] - state.handOriginPos[0],
+    hf.pinch.current[1] - state.handOriginPos[1],
+    hf.pinch.current[2] - state.handOriginPos[2],
+  ];
+  const localDelta = quatRotateVec(quatConj(state.widgetOrientationAtOrigin), worldDelta);
+  const dx = localDelta[0];
+  const dy = localDelta[1];
+  const dz = localDelta[2];
   const span = binding.range.max - binding.range.min;
   const computeInteractionDelta = (interaction: ContinuousInteraction): number => {
     switch (interaction.kind) {

@@ -111,23 +111,17 @@ export function createXrWidgetRenderer(
     addressModeV: 'clamp-to-edge',
   });
 
-  // widget id → assigned strip + cached label text. lastLabel is '' on first
-  // assignment (forces an initial render). We never recycle strips: a panel
-  // swap will overwrite labels, and total widget count is bounded by
-  // MAX_INSTANCES anyway.
-  const stripsByWidget = new Map<string, { stripIndex: number; lastLabel: string }>();
-  let nextStripIndex = 0;
+  // [LAW:one-source-of-truth] Strip index == instance slot index. MAX_STRIPS == MAX_INSTANCES, so
+  // every slot has exactly one strip and every strip has exactly one slot. The atlas cache is keyed
+  // by slot, not by widget identity — layout churn / tab swaps can't leak new entries into an
+  // unbounded map. Slot shuffles naturally re-render because the text in that slot changed.
+  // '' on a slot forces an initial render; after that, steady-state reuse hits the cache.
+  const lastLabelByStrip: string[] = new Array(MAX_STRIPS).fill('');
 
-  function ensureLabelStrip(widgetId: string, label: string): number {
-    let entry = stripsByWidget.get(widgetId);
-    if (!entry) {
-      if (nextStripIndex >= MAX_STRIPS) return -1;
-      entry = { stripIndex: nextStripIndex++, lastLabel: '' };
-      stripsByWidget.set(widgetId, entry);
-    }
-    if (entry.lastLabel === label) return entry.stripIndex;
-    entry.lastLabel = label;
-    const y = entry.stripIndex * STRIP_H;
+  function ensureLabelStrip(stripIndex: number, label: string): number {
+    if (lastLabelByStrip[stripIndex] === label) return stripIndex;
+    lastLabelByStrip[stripIndex] = label;
+    const y = stripIndex * STRIP_H;
     // Clear, then draw the text. White on transparent so the shader can blend
     // with whatever fill color the widget kind chose.
     ctx.clearRect(0, y, ATLAS_W, STRIP_H);
@@ -138,7 +132,7 @@ export function createXrWidgetRenderer(
       { texture: atlasTex, origin: { x: 0, y } },
       [ATLAS_W, STRIP_H, 1],
     );
-    return entry.stripIndex;
+    return stripIndex;
   }
 
   // ── BIND GROUPS / PIPELINE ───────────────────────────────────────────────
@@ -195,9 +189,9 @@ export function createXrWidgetRenderer(
       const flags = (c.state.hover ? 1 : 0) | (c.state.pressed ? 2 : 0) | (c.state.dragging ? 4 : 0);
       stagingU[o + 10] = flags >>> 0;
       stagingF[o + 11] = c.state.value ?? 0;
-      // Label slot. -1 sentinel from ensureLabelStrip → hasLabel=0 path in shader.
+      // Label slot == instance slot. -1 sentinel when the command has no label → hasLabel=0 path in shader.
       const stripIndex = (c.label != null && c.label.length > 0)
-        ? ensureLabelStrip(c.widgetId, c.label)
+        ? ensureLabelStrip(i, c.label)
         : -1;
       stagingU[o + 12] = stripIndex >= 0 ? stripIndex >>> 0 : 0;
       stagingU[o + 13] = stripIndex >= 0 ? 1 : 0;
