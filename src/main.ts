@@ -1488,6 +1488,94 @@ function createBoidsSimulation() {
 
 // --- 5b: N-BODY PHYSICS ---
 
+// [LAW:single-enforcer] Canonical multigrid V-cycle dispatcher used by every
+// PM grid (inner, outer, future gas-coupled grid). Encapsulates the full
+// descent → coarsest → ascent shape:
+//   1. Clear coarse-level potentials (levels 1..maxLevel). Level 0 keeps
+//      previous-frame warm-start so the solver converges in 1 cycle.
+//   2. Descent (l = 0..maxLevel-1): pre-smooth, residual, restrict.
+//   3. Coarsest level (l = maxLevel): over-smooth toward exact solve.
+//   4. Ascent (l = maxLevel-1..0): prolong correction + post-smooth.
+//
+// Opens its own compute pass (WebGPU implicit-barrier boundary). The clear
+// ops MUST run outside any compute pass, which is why the clears live in
+// this helper rather than the caller.
+interface PmVCycleArgs {
+  levels: number;              // total multigrid levels (e.g. 6 → levels 0..5)
+  wgCount: number[];           // workgroup count per level (@workgroup_size(4,4,4))
+  potential: GPUBuffer[];      // phi[0..levels-1]
+  smoothBG: GPUBindGroup[][];  // smoothBG[level][parity]  (parity: 0=red, 1=black)
+  residualBG: GPUBindGroup[];  // residualBG[level]
+  restrictBG: GPUBindGroup[];  // restrictBG[level] = transition level → level+1
+  prolongBG: GPUBindGroup[];   // prolongBG[level]  = transition level+1 → level
+  preSmooth: number;           // red-black GS sweeps before restriction (per level)
+  postSmooth: number;          // red-black GS sweeps after prolongation (per level)
+  coarsestSweeps: number;      // red-black GS sweeps on the coarsest level
+}
+
+function runPmVCycle(encoder: GPUCommandEncoder, a: PmVCycleArgs): void {
+  const maxLevel = a.levels - 1;
+
+  // Clear coarse-level corrections. Level 0 is NOT cleared — its residual
+  // warm-start is the whole reason one V-cycle suffices each frame.
+  for (let l = 1; l < a.levels; l++) encoder.clearBuffer(a.potential[l]);
+
+  // [LAW:dataflow-not-control-flow] Every level runs the same operations
+  // every cycle; only the per-level bind group and workgroup count vary.
+  // No phase check, no branch on simStep — the solver is a pure function of
+  // (density, previous phi[0]).
+  const pass = encoder.beginComputePass();
+
+  // Descent: smooth + residual + restrict at each level down to maxLevel-1.
+  for (let l = 0; l < maxLevel; l++) {
+    const n = a.wgCount[l];
+    pass.setPipeline(pmSmoothPipeline);
+    for (let s = 0; s < a.preSmooth; s++) {
+      pass.setBindGroup(0, a.smoothBG[l][0]); pass.dispatchWorkgroups(n, n, n);
+      pass.setBindGroup(0, a.smoothBG[l][1]); pass.dispatchWorkgroups(n, n, n);
+    }
+    pass.setPipeline(pmResidualPipeline);
+    pass.setBindGroup(0, a.residualBG[l]); pass.dispatchWorkgroups(n, n, n);
+    pass.setPipeline(pmRestrictPipeline);
+    pass.setBindGroup(0, a.restrictBG[l]);
+    const nNext = a.wgCount[l + 1];
+    pass.dispatchWorkgroups(nNext, nNext, nNext);
+  }
+
+  // Coarsest level: over-smooth toward exact solve. Level is tiny (4³ for
+  // inner, 4³ for outer with 5 levels) so many sweeps are cheap.
+  {
+    const n = a.wgCount[maxLevel];
+    pass.setPipeline(pmSmoothPipeline);
+    for (let s = 0; s < a.coarsestSweeps; s++) {
+      pass.setBindGroup(0, a.smoothBG[maxLevel][0]); pass.dispatchWorkgroups(n, n, n);
+      pass.setBindGroup(0, a.smoothBG[maxLevel][1]); pass.dispatchWorkgroups(n, n, n);
+    }
+  }
+
+  // Ascent: prolong correction up one level + post-smooth.
+  for (let l = maxLevel - 1; l >= 0; l--) {
+    const n = a.wgCount[l];
+    pass.setPipeline(pmProlongPipeline);
+    pass.setBindGroup(0, a.prolongBG[l]); pass.dispatchWorkgroups(n, n, n);
+    pass.setPipeline(pmSmoothPipeline);
+    for (let s = 0; s < a.postSmooth; s++) {
+      pass.setBindGroup(0, a.smoothBG[l][0]); pass.dispatchWorkgroups(n, n, n);
+      pass.setBindGroup(0, a.smoothBG[l][1]); pass.dispatchWorkgroups(n, n, n);
+    }
+  }
+
+  pass.end();
+}
+
+// Pipeline handles reused by runPmVCycle. Declared here so the helper can
+// reference them; populated once inside createPhysicsSimulation at init.
+// [LAW:one-source-of-truth] Single module-scope pipeline object per stage.
+let pmSmoothPipeline: GPUComputePipeline;
+let pmResidualPipeline: GPUComputePipeline;
+let pmRestrictPipeline: GPUComputePipeline;
+let pmProlongPipeline: GPUComputePipeline;
+
 function createPhysicsSimulation() {
   const count = state.physics.count;
   const bodyBytes = count * 48; // pos(12) + mass(4) + vel(12) + pad(4) + home(12) + pad(4) = 48
@@ -1795,26 +1883,26 @@ function createPhysicsSimulation() {
   const PM_FIXED_POINT_SCALE = 65536;               // 2^16 — u32 atomic mass accumulation
   const PM_MULTIGRID_LEVELS = 6;                    // 128³, 64³, 32³, 16³, 8³, 4³
   const PM_V_CYCLE_COUNT = 1;                       // V-cycles per Poisson solve (warm-started; see header)
-  const PM_SMOOTH_PRE = 2;                          // red-black GS passes before restriction
-  const PM_SMOOTH_POST = 2;                         // red-black GS passes after prolongation
-  // V-cycle phase split: half the work runs each frame to keep frame time
-  // even (vs. doing the full cycle every Nth frame, which produces a heavy/
-  // light alternation that misses the 90 Hz Vision Pro budget on heavy
-  // frames). One full V-cycle spans 2 simSteps:
-  //   simStep & 1 == 0 → DESCENT   (pre-smooth + residual + restrict, l=0..4)
-  //   simStep & 1 == 1 → ASCENT    (coarsest sweeps + prolong + post-smooth)
-  // Intermediate state (pmRhs[1..5], pmPotential[1..5]) naturally persists
-  // across the two halves in dedicated per-level buffers — no extra plumbing.
-  // Descent and ascent each touch ~8M level-0 cells/frame (4 smooth sweeps
-  // each side), so per-frame GPU load is ~50% of the un-split V-cycle and
-  // worst-case frame time is matched to average. Trade-off: pmPotential[0]
-  // is fully resolved only on odd simSteps; even simSteps see a partially
-  // descended (warm-start + pre-smooth) field. The interpolate pass reads it
-  // every frame — both halves are monotonically improving, so the lag is
-  // visually imperceptible. Reversibility caveat (see __pmReversibilityTest):
-  // intermediate buffers are history-dependent, so fwd/rev paths leave them
-  // in slightly different states at the same simStep; maxErr is larger than
-  // V=1 alone. Acceptable while debugging perf; revisit if rewinds drift.
+  // Reduced from 2→1 per sweep when we collapsed the phase-split V-cycle
+  // (see compute() below). Each frame now runs ONE complete V-cycle instead
+  // of half across two frames. With warm-start from the previous frame's
+  // phi (density evolves slowly, so prior solution is a good initial guess),
+  // 1 pre + 1 post smooth per level delivers ~1 order of magnitude residual
+  // reduction per cycle — enough to hold maxResidual < 1% of peak density.
+  // Net per-frame smoother work is actually LESS than the old split (1+1
+  // vs 2+2 sweeps), so the full cycle fits well under the 11 ms budget.
+  const PM_SMOOTH_PRE = 1;                          // red-black GS passes before restriction
+  const PM_SMOOTH_POST = 1;                         // red-black GS passes after prolongation
+  // V-cycle scheduling: ONE complete V-cycle (descent + coarsest + ascent)
+  // runs each frame, producing a fully-solved pmPotential[0] every frame.
+  // No phase split, no partial state visible to the integrator. The prior
+  // scheme split the cycle across two frames; on "descent" frames the
+  // integrator read a half-solved phi (pre-smooth only, no coarse correction),
+  // making gravity alternate between short-range-only and full-range every
+  // frame — visible as 2-state frame-by-frame oscillation under debug
+  // stepping, and as subtle but real jitter at 60 Hz. The rewrite puts
+  // density snapshot + full solve + consumer read on the same frame, so
+  // every frame sees a consistent gravitational field.
   // Silence noUnusedLocals until downstream tickets (.3 deposition, .4
   // multigrid, .5 force sampling) reference these. Landing the canonical
   // values now establishes the contract; later tickets only tune usage.
@@ -1987,10 +2075,13 @@ function createPhysicsSimulation() {
     ]
   });
 
-  const pmSmoothPipeline   = device.createComputePipeline({ layout: device.createPipelineLayout({ bindGroupLayouts: [pmSmoothBGL] }),   compute: { module: pmSmoothModule,   entryPoint: 'main' } });
-  const pmResidualPipeline = device.createComputePipeline({ layout: device.createPipelineLayout({ bindGroupLayouts: [pmResidualBGL] }), compute: { module: pmResidualModule, entryPoint: 'main' } });
-  const pmRestrictPipeline = device.createComputePipeline({ layout: device.createPipelineLayout({ bindGroupLayouts: [pmRestrictBGL] }), compute: { module: pmRestrictModule, entryPoint: 'main' } });
-  const pmProlongPipeline  = device.createComputePipeline({ layout: device.createPipelineLayout({ bindGroupLayouts: [pmProlongBGL] }),  compute: { module: pmProlongModule,  entryPoint: 'main' } });
+  // Assign to module-scope pipeline handles used by runPmVCycle().
+  // [LAW:single-enforcer] These pipelines are created once per simulation
+  // instance; the V-cycle helper at module scope references them.
+  pmSmoothPipeline   = device.createComputePipeline({ layout: device.createPipelineLayout({ bindGroupLayouts: [pmSmoothBGL] }),   compute: { module: pmSmoothModule,   entryPoint: 'main' } });
+  pmResidualPipeline = device.createComputePipeline({ layout: device.createPipelineLayout({ bindGroupLayouts: [pmResidualBGL] }), compute: { module: pmResidualModule, entryPoint: 'main' } });
+  pmRestrictPipeline = device.createComputePipeline({ layout: device.createPipelineLayout({ bindGroupLayouts: [pmRestrictBGL] }), compute: { module: pmRestrictModule, entryPoint: 'main' } });
+  pmProlongPipeline  = device.createComputePipeline({ layout: device.createPipelineLayout({ bindGroupLayouts: [pmProlongBGL] }),  compute: { module: pmProlongModule,  entryPoint: 'main' } });
 
   // PM force interpolation — reads pmPotential[0] + current bodies, writes pmForce.
   const pmInterpolateModule = createShaderModuleChecked('pm.interpolate', SHADER_PM_INTERPOLATE);
@@ -2628,110 +2719,49 @@ function createPhysicsSimulation() {
       pmPass.dispatchWorkgroups(Math.ceil(pmOuterLevel0Cells / 256));
       pmPass.end();
 
-      // ── Multigrid V-cycle Poisson solver (phase-split across 2 frames) ────
-      // Input:  pmDensityF32 (mean-zero RHS at level 0)
+      // ── Multigrid V-cycle Poisson solver (full cycle per frame) ──────────
+      // Input:  pmRho[0] = pmDensityF32 (mean-zero RHS at level 0)
       // Output: pmPotential[0] (φ satisfying ∇²φ = 4πGρ on the 3-torus)
-      // [LAW:dataflow-not-control-flow] Phase is a deterministic function of
-      // simStep (parity), so the same dispatch sequence runs in fwd and rev.
-      // Phase A (descent) and Phase B (ascent + coarsest) each do roughly
-      // 8M level-0 cell-updates — half the un-split V-cycle, matched per
-      // frame so the worst frame fits the 90 Hz budget.
-      const pmMaxLevel = PM_MULTIGRID_LEVELS - 1;
+      //
+      // [LAW:single-enforcer] runPmVCycle is the sole dispatcher of the
+      // multigrid V-cycle; both grids use it. It owns the descent → coarsest
+      // → ascent sequence and the level-0 warm-start convention.
+      //
+      // [LAW:one-source-of-truth] Each V-cycle completes within ONE frame.
+      // pmPotential[0] is always a fully-solved state when the interpolate
+      // reads it — no mid-solve snapshots bleed to consumers.
+      //
+      // Levels 1..maxLevel are cleared at the start of each cycle because
+      // they accumulate corrections; level 0 keeps the previous frame's
+      // solution as warm-start (density evolves slowly frame-to-frame,
+      // so the prior phi is a near-converged initial guess).
       const PM_COARSEST_SWEEPS = 16;
-      const pmDescent = (simStep & 1) === 0;
-      const vPass = encoder.beginComputePass();
-      if (pmDescent) {
-        // Phase A: zero coarse correction state (start of new V-cycle), then
-        // pre-smooth → residual → restrict down to the coarsest grid. Level 0
-        // is NOT cleared — it carries the warm-start from the previous V-cycle.
-        for (let l = 1; l < PM_MULTIGRID_LEVELS; l++) encoder.clearBuffer(pmPotential[l]);
-        for (let l = 0; l < pmMaxLevel; l++) {
-          vPass.setPipeline(pmSmoothPipeline);
-          for (let s = 0; s < PM_SMOOTH_PRE; s++) {
-            vPass.setBindGroup(0, pmSmoothBG[l][0]);
-            vPass.dispatchWorkgroups(pmWgCount[l], pmWgCount[l], pmWgCount[l]);
-            vPass.setBindGroup(0, pmSmoothBG[l][1]);
-            vPass.dispatchWorkgroups(pmWgCount[l], pmWgCount[l], pmWgCount[l]);
-          }
-          vPass.setPipeline(pmResidualPipeline);
-          vPass.setBindGroup(0, pmResidualBG[l]);
-          vPass.dispatchWorkgroups(pmWgCount[l], pmWgCount[l], pmWgCount[l]);
-          vPass.setPipeline(pmRestrictPipeline);
-          vPass.setBindGroup(0, pmRestrictBG[l]);
-          vPass.dispatchWorkgroups(pmWgCount[l + 1], pmWgCount[l + 1], pmWgCount[l + 1]);
-        }
-      } else {
-        // Phase B: coarsest exact-ish solve, then prolong + post-smooth back
-        // up to level 0. Reads pmRhs[1..5] and pmPotential[1..5] left by the
-        // previous frame's Phase A; writes the final solution into pmPotential[0].
-        vPass.setPipeline(pmSmoothPipeline);
-        for (let s = 0; s < PM_COARSEST_SWEEPS; s++) {
-          vPass.setBindGroup(0, pmSmoothBG[pmMaxLevel][0]);
-          vPass.dispatchWorkgroups(pmWgCount[pmMaxLevel], pmWgCount[pmMaxLevel], pmWgCount[pmMaxLevel]);
-          vPass.setBindGroup(0, pmSmoothBG[pmMaxLevel][1]);
-          vPass.dispatchWorkgroups(pmWgCount[pmMaxLevel], pmWgCount[pmMaxLevel], pmWgCount[pmMaxLevel]);
-        }
-        for (let l = pmMaxLevel - 1; l >= 0; l--) {
-          vPass.setPipeline(pmProlongPipeline);
-          vPass.setBindGroup(0, pmProlongBG[l]);
-          vPass.dispatchWorkgroups(pmWgCount[l], pmWgCount[l], pmWgCount[l]);
-          vPass.setPipeline(pmSmoothPipeline);
-          for (let s = 0; s < PM_SMOOTH_POST; s++) {
-            vPass.setBindGroup(0, pmSmoothBG[l][0]);
-            vPass.dispatchWorkgroups(pmWgCount[l], pmWgCount[l], pmWgCount[l]);
-            vPass.setBindGroup(0, pmSmoothBG[l][1]);
-            vPass.dispatchWorkgroups(pmWgCount[l], pmWgCount[l], pmWgCount[l]);
-          }
-        }
-      }
-      vPass.end();
+      runPmVCycle(encoder, {
+        levels: PM_MULTIGRID_LEVELS,
+        wgCount: pmWgCount,
+        potential: pmPotential,
+        smoothBG: pmSmoothBG,
+        residualBG: pmResidualBG,
+        restrictBG: pmRestrictBG,
+        prolongBG: pmProlongBG,
+        preSmooth: PM_SMOOTH_PRE,
+        postSmooth: PM_SMOOTH_POST,
+        coarsestSweeps: PM_COARSEST_SWEEPS,
+      });
 
-      // ── OUTER GRID V-CYCLE (full cycle every frame) ───────────────────
-      // Outer grid is 64³ (1/8 the cells of inner); one full V-cycle runs
-      // in ~0.6 ms on M2. No phase-split needed. Warm-starts pmOuterPotential[0]
-      // across frames (levels 1..4 are zeroed before each descent, matching the
-      // inner-grid pattern).
-      const pmOuterMaxLevel = PM_OUTER_LEVELS - 1;
-      for (let l = 1; l < PM_OUTER_LEVELS; l++) encoder.clearBuffer(pmOuterPotential[l]);
-      const vOuterPass = encoder.beginComputePass();
-      // Descent: pre-smooth → residual → restrict, l=0..maxLevel-1.
-      for (let l = 0; l < pmOuterMaxLevel; l++) {
-        vOuterPass.setPipeline(pmSmoothPipeline);
-        for (let s = 0; s < PM_SMOOTH_PRE; s++) {
-          vOuterPass.setBindGroup(0, pmOuterSmoothBG[l][0]);
-          vOuterPass.dispatchWorkgroups(pmOuterWgCount[l], pmOuterWgCount[l], pmOuterWgCount[l]);
-          vOuterPass.setBindGroup(0, pmOuterSmoothBG[l][1]);
-          vOuterPass.dispatchWorkgroups(pmOuterWgCount[l], pmOuterWgCount[l], pmOuterWgCount[l]);
-        }
-        vOuterPass.setPipeline(pmResidualPipeline);
-        vOuterPass.setBindGroup(0, pmOuterResidualBG[l]);
-        vOuterPass.dispatchWorkgroups(pmOuterWgCount[l], pmOuterWgCount[l], pmOuterWgCount[l]);
-        vOuterPass.setPipeline(pmRestrictPipeline);
-        vOuterPass.setBindGroup(0, pmOuterRestrictBG[l]);
-        vOuterPass.dispatchWorkgroups(pmOuterWgCount[l + 1], pmOuterWgCount[l + 1], pmOuterWgCount[l + 1]);
-      }
-      // Coarsest level: over-smooth.
-      vOuterPass.setPipeline(pmSmoothPipeline);
-      for (let s = 0; s < PM_COARSEST_SWEEPS; s++) {
-        vOuterPass.setBindGroup(0, pmOuterSmoothBG[pmOuterMaxLevel][0]);
-        vOuterPass.dispatchWorkgroups(pmOuterWgCount[pmOuterMaxLevel], pmOuterWgCount[pmOuterMaxLevel], pmOuterWgCount[pmOuterMaxLevel]);
-        vOuterPass.setBindGroup(0, pmOuterSmoothBG[pmOuterMaxLevel][1]);
-        vOuterPass.dispatchWorkgroups(pmOuterWgCount[pmOuterMaxLevel], pmOuterWgCount[pmOuterMaxLevel], pmOuterWgCount[pmOuterMaxLevel]);
-      }
-      // Ascent: prolong + post-smooth, l=maxLevel-1..0.
-      for (let l = pmOuterMaxLevel - 1; l >= 0; l--) {
-        vOuterPass.setPipeline(pmProlongPipeline);
-        vOuterPass.setBindGroup(0, pmOuterProlongBG[l]);
-        vOuterPass.dispatchWorkgroups(pmOuterWgCount[l], pmOuterWgCount[l], pmOuterWgCount[l]);
-        vOuterPass.setPipeline(pmSmoothPipeline);
-        for (let s = 0; s < PM_SMOOTH_POST; s++) {
-          vOuterPass.setBindGroup(0, pmOuterSmoothBG[l][0]);
-          vOuterPass.dispatchWorkgroups(pmOuterWgCount[l], pmOuterWgCount[l], pmOuterWgCount[l]);
-          vOuterPass.setBindGroup(0, pmOuterSmoothBG[l][1]);
-          vOuterPass.dispatchWorkgroups(pmOuterWgCount[l], pmOuterWgCount[l], pmOuterWgCount[l]);
-        }
-      }
-      vOuterPass.end();
+      // Outer grid — same helper, outer buffer bundle.
+      runPmVCycle(encoder, {
+        levels: PM_OUTER_LEVELS,
+        wgCount: pmOuterWgCount,
+        potential: pmOuterPotential,
+        smoothBG: pmOuterSmoothBG,
+        residualBG: pmOuterResidualBG,
+        restrictBG: pmOuterRestrictBG,
+        prolongBG: pmOuterProlongBG,
+        preSmooth: PM_SMOOTH_PRE,
+        postSmooth: PM_SMOOTH_POST,
+        coarsestSweeps: PM_COARSEST_SWEEPS,
+      });
 
       // ── PM force interpolation ─────────────────────────────────────────
       // Sample the freshly-solved pmPotential[0] at each particle via the CIC

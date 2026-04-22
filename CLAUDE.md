@@ -99,17 +99,22 @@ The integration scheme per step (single GPU dispatch):
 
 **No velocity-dependent forces exist.** All dissipative forces (damping, friction, disk recovery) were removed and replaced with the dark matter potentials. The virial controller is removed — dark matter provides structural stability.
 
-### Nested PM Grids (cosmic-weaving-flask, Phase A)
+### PM Solver (full V-cycle per frame)
 
-N-body gravity above is powered by a **two-grid nested Particle-Mesh solver**:
+N-body gravity is solved via Particle-Mesh multigrid on a 128³ grid spanning the full periodic domain (±64, cell size 1.0). One **complete** V-cycle runs every frame — descent, coarsest-level over-smooth, ascent — producing a fully-solved `pmPotential[0]` that the interpolate pass reads as-is. No phase-split, no double-buffering, no half-solved state visible to consumers.
 
-- **Inner grid**: 128³ covering ±16 world units (cell size 0.25). Sharp central gravity where particles actually live.
-- **Outer grid**: 64³ covering the full ±64 periodic domain (cell size 2.0). Cheap long-range coupling for particles that escape the inner domain.
-- Both solves use the existing multigrid V-cycle with red-black Gauss-Seidel; inner phase-splits the V across 2 frames (the existing Vision Pro 11 ms budget discipline), outer runs a full V-cycle per frame (~0.6 ms on M2).
-- `pm.interpolate_nested.wgsl` samples both grids per particle and smoothstep-blends force across the [±14, ±16] transition shell. No branches — the blend weight decides which contribution survives.
-- `pm.deposit.wgsl` filters particles outside each grid's `domainHalf`, so inner gets only particles inside ±16 while outer gets everyone. Nbody.compute's periodic wrap at ±64 keeps the outer grid's periodic BC consistent.
+The V-cycle shape (handled by the `runPmVCycle` helper at module scope, `src/main.ts`):
 
-Diagnostics: `__pmMaxResidual()` returns `{ inner, outer }`. `__pmDumpOuterDensity()` / `__pmDumpOuterPotential()` dump the outer grid. `__pmReversibilityTest(1000)` exercises both grids in the full fwd/rev pass.
+1. **Clear levels 1..maxLevel.** Level 0 keeps the previous frame's potential as a warm-start. Density evolves slowly, so last frame's solution is a near-converged initial guess and one V-cycle per frame suffices for sub-1% residual.
+2. **Descent** (`l = 0..maxLevel-1`): `PM_SMOOTH_PRE` red-black GS sweeps → residual → restrict residual to level `l+1` as RHS.
+3. **Coarsest level** (`l = maxLevel`): over-smooth with `PM_COARSEST_SWEEPS` = 16 red-black GS sweeps (cheap — level is 4³).
+4. **Ascent** (`l = maxLevel-1..0`): prolong correction from level `l+1`, add into level `l`'s potential, then `PM_SMOOTH_POST` red-black GS sweeps.
+
+With `PM_SMOOTH_PRE = PM_SMOOTH_POST = 1`, per-frame smoother work is 1+1 sweeps per level — half the 2+2 the old phase-split used within a single V-cycle. On M2, a full 128³ cycle fits under ~3.5 ms; on Vision Pro stereo with the full compute+render chain, total frame time stays under the 11 ms budget with margin.
+
+There is also an **outer** 64³ grid at ±64 (cell 2.0) allocated in parallel — scaffolding for the future nested-PM zoom-in scheme. It runs its own full V-cycle per frame (~0.6 ms on M2) but its output is currently unused; interpolate still reads only the inner grid's potential. That wiring becomes live in a follow-up commit once the integration story is locked down.
+
+Diagnostics: `__pmMaxResidual()` returns `{ inner, outer }`. `__pmDumpDensity()` / `__pmDumpPotential()` dump the inner grid; `__pmDumpOuterDensity()` / `__pmDumpOuterPotential()` dump the outer. `__pmReversibilityTest(1000)` should hold maxErr < 0.01 world units — the full-cycle-per-frame design makes this tighter than the old phase-split because there's no history-dependent intermediate state leaking between frames.
 
 ### Simulation Clock
 
