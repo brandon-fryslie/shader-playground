@@ -103,10 +103,15 @@ The integration scheme per step (single GPU dispatch):
 
 N-body gravity is solved via Particle-Mesh multigrid on **two concentric grids**:
 
-- **Inner**: 128³ cells covering ±16 (cell size **0.25**). Resolves the central galaxy region with 4× the resolution of the old uniform ±64 grid. Uses periodic BC (Dirichlet from outer potential is deferred; the blend shell masks the boundary region).
-- **Outer**: 64³ cells covering the full periodic domain ±64 (cell size **2.0**). Handles long-range gravity and all mass outside the inner domain.
+- **Inner**: 128³ cells covering ±16 (cell size **0.25**). Resolves the central galaxy region with 4× the resolution of the old uniform ±64 grid. Uses **Dirichlet BC** seeded each frame from the outer potential (`pm.boundary_sample.wgsl`).
+- **Outer**: 64³ cells covering the full periodic domain ±64 (cell size **2.0**). Handles long-range gravity and all mass outside the inner domain. Uses periodic BC (3-torus).
 
 Both grids run one **complete** V-cycle per frame — descent, coarsest-level over-smooth, ascent — producing fully-solved `pmPotential[0]` buffers that the interpolate pass reads as-is. No phase-split, no double-buffering, no half-solved state visible to consumers.
+
+**Per-frame ordering:**
+1. Outer deposit + V-cycle → fully-solved `pmOuterPotential[0]` (periodic BC).
+2. `pm.boundary_sample` → writes outer φ values into the inner grid's level-0 face cells (6 faces, via a 3D dispatch masked by the face-cell predicate). This is the sole bridge between the two grids during the inner solve. [LAW:single-enforcer]
+3. Inner deposit + V-cycle → reads face cells as Dirichlet BC (smoother / residual / prolong freeze face cells via a `dirichletBoundary` flag in their per-level uniforms). Interior cells solve `∇²φ = 4πGρ_inner` with the outer potential clamping the faces.
 
 The V-cycle is dispatched by the module-scope `runPmVCycle` helper (`src/main.ts`). It is called twice per frame, once per grid, with the relevant buffer bundle:
 
@@ -120,6 +125,8 @@ With `PM_SMOOTH_PRE = PM_SMOOTH_POST = 1`, per-frame smoother work is 1+1 sweeps
 **Deposit** (`pm.deposit.wgsl`): CIC scatter with a domain filter — particles outside ±domainHalf skip deposition so they don't wrap-pollute the inner grid via the periodic cell-index wrap. For the outer grid (domainHalf = 64 = periodic-wrap radius), the filter never triggers.
 
 **Interpolate** (`pm.interpolate_nested.wgsl`): for each particle, sample force from **both** potentials via the CIC transpose kernel, then `mix(innerAcc, outerAcc, t)` where `t = smoothstep(PM_DOMAIN_HALF-2, PM_DOMAIN_HALF, max(|x|,|y|,|z|))` — 0 inside ±14 (pure inner), 1 beyond ±16 (pure outer), C¹ blend in between. [LAW:dataflow-not-control-flow] Always sample both; the blend weight decides which contribution survives — no branch, no seam.
+
+**Boundary-sample shader** (`pm.boundary_sample.wgsl`): runs once per frame between the outer and inner V-cycles. Dispatches over the full 128³ inner grid; every thread trilinearly samples `outerPhi[0]` at its cell's world-space center, then `select` writes the sampled value at face cells and keeps the warm-start value at interior cells. The approximation is that the outer potential includes mass *inside* ±16 as well as outside, so the BC slightly over-states the "external-only" gravitational potential — acceptable for this simulation because >90% of mass lives inside the inner domain anyway, and the nested interpolate's smoothstep blend shell absorbs residual mismatch at the faces.
 
 Diagnostics: `__pmMaxResidual()` returns `{ inner, outer }`. `__pmDumpDensity()` / `__pmDumpPotential()` dump the inner grid; `__pmDumpOuterDensity()` / `__pmDumpOuterPotential()` dump the outer. `__pmReversibilityTest(1000)` should hold maxErr < 0.01 world units.
 
@@ -266,8 +273,22 @@ HDR scene → bloom (downsample/upsample chain) → composite with tone mapping,
 
 ---
 
-## Future: Phase 3 — Gas Grid (Conservative Structure Recovery)
+## Future: Phase B — Gas Grid (Cooling via Gravitational Wake + Visible Nebula)
 
-Planned: Eulerian gas physics on a 256×256×32 anisotropic grid coupled to the N-body particles. Gas provides "friction" that forms disks through conservative momentum exchange — fully reversible. See `.claude/plans/cosmic-soaring-squirrel.md` for the full design.
+Planned: an isothermal Eulerian gas field on a 96³ cubic grid spanning ±32, coupled to the particles **only** through shared PM gravity. Moving particles stir gravitational wakes in the gas, the wake's gravity decelerates the particle — dynamical friction, the canonical astrophysical cooling mechanism, and fully reversible by construction because F = -∇φ is position-only. Canonical plan: `~/.claude/plans/cosmic-weaving-flask.md`.
 
-Key elements: isothermal Euler equations (no viscosity), sort-and-bin spatial hashing for particle↔grid coupling, fixed-point atomic CIC deposition, semi-Lagrangian advection, and P³M gravity as an optional optimization.
+**Why gravity-only coupling?** Direct velocity-based momentum exchange (standard hydro↔particle coupling) is velocity-dependent and breaks DKD reversibility. Pure gravitational coupling keeps the position-only force structure: gas mass gets scattered into **both** PM density grids (inner + outer) in `pm.deposit.wgsl`'s pattern, so particles feel gas gravity via the existing interpolate path, and gas feels particle gravity by sampling the same pmPotential during its own gravity kick.
+
+**Per-frame gas step** (Strang-split semi-Lagrangian):
+1. Half-advect: back-trace each cell's sample point by `u · dt/2`, trilinear-sample prior ρ and u.
+2. Gravity kick: `u += -∇Φ_pm · dt`.
+3. Pressure kick: `u += -(c_s²/ρ)·∇ρ · dt` (isothermal EOS; `c_s` is a slider).
+4. Half-advect again.
+
+**Visible gas:** volumetric raymarch after the particle pass, before post-processing — gas density becomes a diffuse nebula that naturally participates in bloom. Stops at the particle depth buffer so foreground particles aren't occluded.
+
+**Sliders** (physical, not arbitrary): `gasDensity` (0..2, total gas mass — 0 = no gas, no cooling, no render), `gasSoundSpeed` (0.5..5, pressure-wave speed = cooling rate knob), `gasVisible` (bool, toggles render pass).
+
+**Perf targets:** ~3.2 ms total gas cost on M2 (0.6 ms advect ×2 + 0.3 ms pressure+gravity + 0.3 ms deposit + 1.0 ms render × 2 eyes), fits within the 11 ms Vision Pro budget with Phase A's ~1.15× PM overhead. A15 phone requires a dialed-down 64³ gas grid and half-res render.
+
+Phase A does not block Phase B: the nested-interpolate shader is read-only against the PM potentials, and `pm.deposit.wgsl`'s domain filter makes it straightforward to add a second dispatch that feeds gas-mass into the same atomic density buffers without any refactoring of the particle path.

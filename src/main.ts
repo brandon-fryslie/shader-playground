@@ -26,6 +26,7 @@ import SHADER_PM_RESTRICT from './shaders/pm.restrict.wgsl?raw';
 import SHADER_PM_PROLONG from './shaders/pm.prolong.wgsl?raw';
 import SHADER_PM_INTERPOLATE from './shaders/pm.interpolate.wgsl?raw';
 import SHADER_PM_INTERPOLATE_NESTED from './shaders/pm.interpolate_nested.wgsl?raw';
+import SHADER_PM_BOUNDARY_SAMPLE from './shaders/pm.boundary_sample.wgsl?raw';
 import SHADER_NBODY_CLASSIC_RENDER from './shaders/nbody.classic.render.wgsl?raw';
 import SHADER_FLUID_FORCES_ADVECT from './shaders/fluid.forces.wgsl?raw';
 import SHADER_FLUID_DIFFUSE from './shaders/fluid.diffuse.wgsl?raw';
@@ -2133,7 +2134,13 @@ function createPhysicsSimulation() {
   //   smoothUniform[l][parity]  → { gridRes, parity, hSquared, fourPiG }
   //   residualUniform[l]        → { gridRes, _pad, hSquared, fourPiG }
   //   restrictUniform[l]        → { coarseGridRes, _pad×3 }   (for transition l → l+1)
-  //   prolongUniform[l]         → { fineGridRes, _pad×3 }     (for transition l+1 → l)
+  //   prolongUniform[l]         → { fineGridRes, dirichletBoundary, _pad×2 }  (for l+1 → l)
+  //
+  // [LAW:one-source-of-truth] The inner grid runs Dirichlet BC (flag = 1) at
+  // every level — BC values at level 0 come from pm.boundary_sample; coarser
+  // levels hold zero on faces because they store corrections (cleared at
+  // V-cycle start). The outer grid keeps periodic (flag = 0), unchanged.
+  const PM_INNER_DIRICHLET = 1;
   const PM_FOUR_PI_G = 4 * Math.PI * (state.physics.G ?? 0.3) * 0.001;
   const pmSmoothUniform: GPUBuffer[][] = [];
   const pmResidualUniform: GPUBuffer[] = [];
@@ -2144,18 +2151,20 @@ function createPhysicsSimulation() {
     const hL = PM_DOMAIN_SIZE / sizeL;
     const hSqL = hL * hL;
     pmSmoothUniform.push([0, 1].map(parity => {
-      const buf = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-      const ab = new ArrayBuffer(16);
+      const buf = device.createBuffer({ size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+      const ab = new ArrayBuffer(32);
       new Uint32Array(ab, 0, 2).set([sizeL, parity]);
       new Float32Array(ab, 8, 2).set([hSqL, PM_FOUR_PI_G]);
+      new Uint32Array(ab, 16, 1).set([PM_INNER_DIRICHLET]);
       device.queue.writeBuffer(buf, 0, ab);
       return buf;
     }));
     {
-      const buf = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-      const ab = new ArrayBuffer(16);
+      const buf = device.createBuffer({ size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+      const ab = new ArrayBuffer(32);
       new Uint32Array(ab, 0, 2).set([sizeL, 0]);
       new Float32Array(ab, 8, 2).set([hSqL, PM_FOUR_PI_G]);
+      new Uint32Array(ab, 16, 1).set([PM_INNER_DIRICHLET]);
       device.queue.writeBuffer(buf, 0, ab);
       pmResidualUniform.push(buf);
     }
@@ -2171,7 +2180,7 @@ function createPhysicsSimulation() {
       {
         const buf = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
         const ab = new ArrayBuffer(16);
-        new Uint32Array(ab, 0, 1).set([sizeL]);  // fineGridRes for the transition l+1 → l
+        new Uint32Array(ab, 0, 2).set([sizeL, PM_INNER_DIRICHLET]);  // fineGridRes, dirichletBoundary
         device.queue.writeBuffer(buf, 0, ab);
         pmProlongUniform.push(buf);
       }
@@ -2275,23 +2284,29 @@ function createPhysicsSimulation() {
   const pmOuterResidualUniform: GPUBuffer[] = [];
   const pmOuterRestrictUniform: GPUBuffer[] = [];
   const pmOuterProlongUniform: GPUBuffer[] = [];
+  // Outer grid keeps periodic BC (flag = 0). Shares shader modules/pipelines
+  // with the inner grid, but its uniforms pin dirichletBoundary to 0 so the
+  // smoother/residual/prolong behave exactly as before this BC wiring landed.
+  const PM_OUTER_DIRICHLET = 0;
   for (let l = 0; l < PM_OUTER_LEVELS; l++) {
     const sizeL = PM_OUTER_GRID_RES >> l;
     const hL = PM_OUTER_DOMAIN_SIZE / sizeL;
     const hSqL = hL * hL;
     pmOuterSmoothUniform.push([0, 1].map(parity => {
-      const buf = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-      const ab = new ArrayBuffer(16);
+      const buf = device.createBuffer({ size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+      const ab = new ArrayBuffer(32);
       new Uint32Array(ab, 0, 2).set([sizeL, parity]);
       new Float32Array(ab, 8, 2).set([hSqL, PM_FOUR_PI_G]);
+      new Uint32Array(ab, 16, 1).set([PM_OUTER_DIRICHLET]);
       device.queue.writeBuffer(buf, 0, ab);
       return buf;
     }));
     {
-      const buf = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-      const ab = new ArrayBuffer(16);
+      const buf = device.createBuffer({ size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+      const ab = new ArrayBuffer(32);
       new Uint32Array(ab, 0, 2).set([sizeL, 0]);
       new Float32Array(ab, 8, 2).set([hSqL, PM_FOUR_PI_G]);
+      new Uint32Array(ab, 16, 1).set([PM_OUTER_DIRICHLET]);
       device.queue.writeBuffer(buf, 0, ab);
       pmOuterResidualUniform.push(buf);
     }
@@ -2307,7 +2322,7 @@ function createPhysicsSimulation() {
       {
         const buf = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
         const ab = new ArrayBuffer(16);
-        new Uint32Array(ab, 0, 1).set([sizeL]);
+        new Uint32Array(ab, 0, 2).set([sizeL, PM_OUTER_DIRICHLET]);
         device.queue.writeBuffer(buf, 0, ab);
         pmOuterProlongUniform.push(buf);
       }
@@ -2379,6 +2394,47 @@ function createPhysicsSimulation() {
     usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
   });
   let pmOuterDiagPending = false;
+
+  // ── Boundary-sample pass: outer φ → inner φ face cells ────────────────────
+  // [LAW:single-enforcer] Sole bridge between the two grids during the inner
+  // solve. Runs AFTER the outer V-cycle (so outerPhi[0] is fully solved) and
+  // BEFORE the inner V-cycle (so the smoother sees valid BC on face cells).
+  // [LAW:one-source-of-truth] The uniform is written once at init — inner
+  // and outer grid geometry are immutable after createPhysicsSimulation ends.
+  const pmBoundarySampleModule = createShaderModuleChecked('pm.boundary_sample', SHADER_PM_BOUNDARY_SAMPLE);
+  const pmBoundarySampleBGL = device.createBindGroupLayout({
+    entries: [
+      { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } }, // outerPhi
+      { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },           // innerPhi (rw)
+      { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
+    ]
+  });
+  const pmBoundarySamplePipeline = device.createComputePipeline({
+    layout: device.createPipelineLayout({ bindGroupLayouts: [pmBoundarySampleBGL] }),
+    compute: { module: pmBoundarySampleModule, entryPoint: 'main' }
+  });
+  const pmBoundarySampleParams = device.createBuffer({ size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+  {
+    const ab = new ArrayBuffer(32);
+    const bsU32 = new Uint32Array(ab);
+    const bsF32 = new Float32Array(ab);
+    bsU32[0] = PM_GRID_RES;
+    bsF32[2] = PM_DOMAIN_HALF;
+    bsF32[3] = PM_CELL_SIZE;
+    bsU32[4] = PM_OUTER_GRID_RES;
+    bsF32[6] = PM_OUTER_DOMAIN_HALF;
+    bsF32[7] = PM_OUTER_CELL_SIZE;
+    device.queue.writeBuffer(pmBoundarySampleParams, 0, ab);
+  }
+  const pmBoundarySampleBG = device.createBindGroup({
+    layout: pmBoundarySampleBGL,
+    entries: [
+      { binding: 0, resource: { buffer: pmOuterPotential[0] } },
+      { binding: 1, resource: { buffer: pmPotential[0] } },
+      { binding: 2, resource: { buffer: pmBoundarySampleParams } },
+    ]
+  });
+  const pmBoundarySampleWg = pmWgCount[0];  // same as finest inner level
 
   // Deferred interpolate bind groups — all dependencies now in scope.
   // Per-ping-pong: binds whichever body buffer is the current frame's input,
@@ -2761,7 +2817,7 @@ function createPhysicsSimulation() {
 
       // ── Multigrid V-cycle Poisson solver (full cycle per frame) ──────────
       // Input:  pmRho[0] = pmDensityF32 (mean-zero RHS at level 0)
-      // Output: pmPotential[0] (φ satisfying ∇²φ = 4πGρ on the 3-torus)
+      // Output: pmPotential[0] (φ satisfying ∇²φ = 4πGρ)
       //
       // [LAW:single-enforcer] runPmVCycle is the sole dispatcher of the
       // multigrid V-cycle; both grids use it. It owns the descent → coarsest
@@ -2771,25 +2827,20 @@ function createPhysicsSimulation() {
       // pmPotential[0] is always a fully-solved state when the interpolate
       // reads it — no mid-solve snapshots bleed to consumers.
       //
+      // Ordering matters: the outer grid solves first (periodic BC on the
+      // full ±64 box), then pm.boundary_sample writes outer φ values into
+      // the inner grid's level-0 face cells, then the inner V-cycle runs
+      // with Dirichlet BC (smoother / residual / prolong freeze face cells).
+      // This is the nested-PM scheme: inner resolution is driven by outer
+      // long-range φ at its boundary, not by periodic wrap of ±16.
+      //
       // Levels 1..maxLevel are cleared at the start of each cycle because
       // they accumulate corrections; level 0 keeps the previous frame's
       // solution as warm-start (density evolves slowly frame-to-frame,
       // so the prior phi is a near-converged initial guess).
       const PM_COARSEST_SWEEPS = 16;
-      runPmVCycle(encoder, {
-        levels: PM_MULTIGRID_LEVELS,
-        wgCount: pmWgCount,
-        potential: pmPotential,
-        smoothBG: pmSmoothBG,
-        residualBG: pmResidualBG,
-        restrictBG: pmRestrictBG,
-        prolongBG: pmProlongBG,
-        preSmooth: PM_SMOOTH_PRE,
-        postSmooth: PM_SMOOTH_POST,
-        coarsestSweeps: PM_COARSEST_SWEEPS,
-      });
 
-      // Outer grid — same helper, outer buffer bundle.
+      // Outer first — its fully-solved φ becomes the inner grid's Dirichlet BC.
       runPmVCycle(encoder, {
         levels: PM_OUTER_LEVELS,
         wgCount: pmOuterWgCount,
@@ -2798,6 +2849,31 @@ function createPhysicsSimulation() {
         residualBG: pmOuterResidualBG,
         restrictBG: pmOuterRestrictBG,
         prolongBG: pmOuterProlongBG,
+        preSmooth: PM_SMOOTH_PRE,
+        postSmooth: PM_SMOOTH_POST,
+        coarsestSweeps: PM_COARSEST_SWEEPS,
+      });
+
+      // Boundary-sample: write outer φ into inner φ's level-0 face cells.
+      // Separate pass so WebGPU's implicit pass-boundary barriers serialize
+      // the outer-write vs. outer-read dependency without any explicit sync.
+      {
+        const bsPass = encoder.beginComputePass();
+        bsPass.setPipeline(pmBoundarySamplePipeline);
+        bsPass.setBindGroup(0, pmBoundarySampleBG);
+        bsPass.dispatchWorkgroups(pmBoundarySampleWg, pmBoundarySampleWg, pmBoundarySampleWg);
+        bsPass.end();
+      }
+
+      // Inner V-cycle — reads face cells as Dirichlet BC (flag = 1 in uniforms).
+      runPmVCycle(encoder, {
+        levels: PM_MULTIGRID_LEVELS,
+        wgCount: pmWgCount,
+        potential: pmPotential,
+        smoothBG: pmSmoothBG,
+        residualBG: pmResidualBG,
+        restrictBG: pmRestrictBG,
+        prolongBG: pmProlongBG,
         preSmooth: PM_SMOOTH_PRE,
         postSmooth: PM_SMOOTH_POST,
         coarsestSweeps: PM_COARSEST_SWEEPS,

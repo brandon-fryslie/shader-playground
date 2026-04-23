@@ -2,12 +2,21 @@
 // wrap used by the smoother. Run once per level between pre-smoothing and
 // restriction: the residual is what gets coarsened and solved more cheaply
 // on the smaller grid, then interpolated back as a correction.
+//
+// For Dirichlet boundaries: residual at face cells = 0 regardless of the
+// stencil (the "equation" there is φ = g, not ∇²φ = 4πGρ, so its residual is
+// exactly 0 once the BC is satisfied). Zeroing face residuals here prevents
+// garbage from polluting the restricted RHS at the next coarser level.
 
 struct Params {
   gridRes: u32,
   _pad: u32,
   hSquared: f32,
   fourPiG: f32,
+  dirichletBoundary: u32,  // 0 = periodic (include boundary in residual), 1 = zero boundary residual
+  _pad0: u32,
+  _pad1: u32,
+  _pad2: u32,
 }
 
 @group(0) @binding(0) var<storage, read> phi: array<f32>;
@@ -47,5 +56,11 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
     - 6.0 * phi[me]
   ) / params.hSquared;
 
-  residual[me] = params.fourPiG * rho[me] - laplacian;
+  let r = params.fourPiG * rho[me] - laplacian;
+  let nm1 = n - 1u;
+  let atBoundary = gid.x == 0u || gid.x == nm1
+                || gid.y == 0u || gid.y == nm1
+                || gid.z == 0u || gid.z == nm1;
+  let freeze = atBoundary && params.dirichletBoundary != 0u;
+  residual[me] = select(r, 0.0, freeze);
 }
