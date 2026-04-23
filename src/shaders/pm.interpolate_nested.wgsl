@@ -5,10 +5,18 @@
 // into forceOut; the downstream nbody.compute reads it as its sole source of
 // pair gravity.
 //
-// Both grids use the same CIC kernel as pm.deposit.wgsl. This guarantees
-// Newton's 3rd law: the force particle i feels from mass in cell c equals the
-// force c receives from particle i's deposit. [LAW:single-enforcer] This is
-// the only force-interpolation shader used by the physics sim.
+// Both grids use the same CIC kernel as pm.deposit.wgsl, which keeps force
+// interpolation consistent with deposition on each grid individually (per-grid
+// CIC is its own transpose, so per-grid momentum conservation holds). This
+// shader then blends the two per-grid forces with a particle-position-dependent
+// weight `t`, which does NOT by itself guarantee exact Newton's 3rd law or
+// exact total-momentum conservation across the ±14..±16 transition shell —
+// two particles in different blend regimes see effective kernels that are not
+// symmetric. A rigorous conservative blend would require either a single
+// unified kernel (losing the zoom-in benefit) or gradient-of-blended-potential
+// with a ∇t coupling term; neither is worth the complexity for this visual
+// sim, since the affected shell is narrow and the blend is C¹. [LAW:single-enforcer]
+// This is the only force-interpolation shader used by the physics sim.
 //
 // Design: inner spans ±innerHalf, outer spans ±outerHalf. Particle at posHalf
 // computes d = max(|x|,|y|,|z|) (infinity norm — matches the cubical grid).

@@ -1847,9 +1847,16 @@ function createPhysicsSimulation() {
 
   // ── PM (Particle-Mesh) gravity ──────────────────────────────────────────────
   // Solver pipeline: CIC deposit → mean-subtract → V-cycle → CIC interpolate.
-  // [LAW:one-source-of-truth] PM_DOMAIN_HALF/SIZE must match DOMAIN_HALF/SIZE
-  // in nbody.compute.wgsl so the integrator's periodic wrap and the PM grid
-  // span the same volume.
+  //
+  // Nested-grid layout post-A4/A5/A6:
+  //   Inner grid (this block): 128³ over ±16, cell 0.25 — subdomain. Uses
+  //     Dirichlet BC seeded from the outer potential, NOT periodic wrap.
+  //   Outer grid (allocated further below): 64³ over ±64, cell 2.0 — 3-torus.
+  //     [LAW:one-source-of-truth] This outer grid is the one whose domain
+  //     must match nbody.compute.wgsl's DOMAIN_HALF=64 periodic wrap so the
+  //     integrator's positional domain and the PM periodic domain coincide.
+  // The inner grid is intentionally a subdomain used via nested force
+  // interpolation (pm.interpolate_nested.wgsl).
   //
   // Tuning (shader-physics-brr.7):
   //   PM_V_CYCLE_COUNT = 1
@@ -1978,6 +1985,7 @@ function createPhysicsSimulation() {
   pmParamsF32[4] = PM_CELL_SIZE;           // cellSize
   pmParamsF32[5] = PM_FIXED_POINT_SCALE;   // fixedPointScale
   pmParamsU32[6] = pmLevel0Cells;          // cellCount = gridRes³
+  pmParamsU32[7] = 1;                       // filterOutOfDomain = 1 (inner is a ±16 subdomain)
 
   // PM deposit pipeline: 1 read-only particle buffer + 1 atomic-u32 density + params.
   const pmDepositModule = createShaderModuleChecked('pm.deposit', SHADER_PM_DEPOSIT);
@@ -2232,17 +2240,21 @@ function createPhysicsSimulation() {
     pmWgCount.push(Math.max(1, (PM_GRID_RES >> l) / 4));
   }
 
-  // ── OUTER PM GRID (Phase A — nested zoom-in scheme) ──────────────────────
+  // ── OUTER PM GRID (nested zoom-in scheme — fully live) ───────────────────
   // Second grid at 1/2 linear resolution covering the full periodic domain.
   // Together with the inner grid (above), delivers sharp central gravity +
   // cheap long-range coupling. Pipelines are reused from the inner grid —
   // only buffers, uniforms, and bind groups are outer-specific.
-  // See /Users/bmf/.claude/plans/cosmic-weaving-flask.md.
   //
-  // Scaffolding-only in this commit (A2). Outer grid's potential is written
-  // each frame but not yet read by force interpolation — that arrives in
-  // the blended-force commit (A6) once the inner grid is shrunk to ±16 (A4)
-  // and Dirichlet BC plumbing is in place (A5).
+  // Live per-frame role:
+  //   1. Receives CIC deposit from every particle in the scene (filterOutOfDomain=0).
+  //   2. Runs its own full V-cycle → fully-solved pmOuterPotential[0].
+  //   3. pm.boundary_sample reads outerPhi and writes values into the inner
+  //      grid's level-0 face cells (the inner grid's Dirichlet BC).
+  //   4. pm.interpolate_nested reads outerPhi and smoothstep-blends it into
+  //      the per-particle PM force outside the inner ±14 shell.
+  // See CLAUDE.md "PM Solver (nested grids, full V-cycle per frame)" for
+  // the top-level architecture summary.
   const PM_OUTER_GRID_RES = 64;
   const PM_OUTER_DOMAIN_HALF = 64.0;
   const PM_OUTER_DOMAIN_SIZE = PM_OUTER_DOMAIN_HALF * 2;  // 128
@@ -2278,6 +2290,7 @@ function createPhysicsSimulation() {
   pmOuterParamsF32[4] = PM_OUTER_CELL_SIZE;
   pmOuterParamsF32[5] = PM_FIXED_POINT_SCALE;
   pmOuterParamsU32[6] = pmOuterLevel0Cells;
+  pmOuterParamsU32[7] = 0;  // filterOutOfDomain = 0 (outer is the full 3-torus; wrapIdx handles near-boundary posHalf)
 
   // Per-level uniform buffers for the outer multigrid (matches inner pattern).
   const pmOuterSmoothUniform: GPUBuffer[][] = [];

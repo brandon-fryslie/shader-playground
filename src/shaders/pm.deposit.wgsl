@@ -17,8 +17,25 @@ struct Body {
   _pad2: f32,
 }
 
-// Shared layout with pm.density_convert.wgsl. Only the first six fields are
-// read here; cellCount + _pad are populated by the host for the convert pass.
+// Shared layout with pm.density_convert.wgsl / pm.interpolate_nested.wgsl.
+// Only this shader reads `filterOutOfDomain`; the other shaders ignore it.
+//
+// filterOutOfDomain semantics (data-driven per-grid behavior):
+//   0 → full periodic deposit. wrapIdx below scatters mass across the grid's
+//       periodic boundary correctly. Right for the outer 3-torus grid, where
+//       the periodic domain IS the physical domain.
+//   1 → subdomain filter. Particles outside ±domainHalf return early without
+//       depositing. Right for the inner subdomain grid (±16) — without this
+//       filter, a particle at world x=20 would wrap-pollute cells near x=-12
+//       via the periodic index wrap, creating phantom density.
+//
+// Why not a single threshold? The outer grid's `domainHalf` equals the
+// periodic-wrap radius (64), but `posHalf = pos + vel*halfDt` is computed
+// BEFORE `nbody.compute.wgsl`'s end-of-step periodic wrap. A fast particle
+// near +64 can have posHalf > 64 for one step. Filtering on `domainHalf`
+// for the outer grid would silently drop that particle's mass — breaking
+// density conservation. The flag makes the filter strictly about subdomain
+// containment, not about periodic wrap.
 struct Params {
   dt: f32,
   count: u32,
@@ -27,7 +44,7 @@ struct Params {
   cellSize: f32,
   fixedPointScale: f32,
   cellCount: u32,
-  _pad: u32,
+  filterOutOfDomain: u32,  // 0 = periodic grid (no filter), 1 = subdomain grid (filter)
 }
 
 @group(0) @binding(0) var<storage, read> bodies: array<Body>;
@@ -60,15 +77,14 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
   // matching the force evaluation in nbody.compute.wgsl.
   let posHalf = me.pos + me.vel * halfDt;
 
-  // Domain filter: the nested-PM inner grid spans only ±16 while the outer
-  // grid spans the full ±64 periodic domain. For the inner grid, particles
-  // outside domainHalf must NOT deposit — wrapIdx below would otherwise
-  // scatter their mass to the far side of the grid via periodic wrap,
-  // producing phantom density. For the outer grid (domainHalf = periodic-wrap
-  // radius), this never triggers because nbody.compute keeps every particle
-  // inside the periodic domain. [LAW:dataflow-not-control-flow] Same code path
-  // for both grids; the data (domainHalf) decides the outcome.
-  if (abs(posHalf.x) > params.domainHalf || abs(posHalf.y) > params.domainHalf || abs(posHalf.z) > params.domainHalf) { return; }
+  // Subdomain filter (gated by the per-grid filterOutOfDomain flag).
+  // See the Params struct header for the full rationale — the short version:
+  // outer grid = 3-torus, wants periodic wrap (filter OFF); inner grid =
+  // ±16 subdomain, wants strict containment (filter ON).
+  let outOfDomain = abs(posHalf.x) > params.domainHalf
+                 || abs(posHalf.y) > params.domainHalf
+                 || abs(posHalf.z) > params.domainHalf;
+  if (outOfDomain && params.filterOutOfDomain != 0u) { return; }
 
   // World → fractional grid coords. Grid spans [-domainHalf, +domainHalf);
   // cell centers are at (cell_i + 0.5) * cellSize - domainHalf.
