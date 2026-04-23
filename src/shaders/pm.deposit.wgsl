@@ -60,6 +60,16 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
   // matching the force evaluation in nbody.compute.wgsl.
   let posHalf = me.pos + me.vel * halfDt;
 
+  // Domain filter: the nested-PM inner grid spans only ±16 while the outer
+  // grid spans the full ±64 periodic domain. For the inner grid, particles
+  // outside domainHalf must NOT deposit — wrapIdx below would otherwise
+  // scatter their mass to the far side of the grid via periodic wrap,
+  // producing phantom density. For the outer grid (domainHalf = periodic-wrap
+  // radius), this never triggers because nbody.compute keeps every particle
+  // inside the periodic domain. [LAW:dataflow-not-control-flow] Same code path
+  // for both grids; the data (domainHalf) decides the outcome.
+  if (abs(posHalf.x) > params.domainHalf || abs(posHalf.y) > params.domainHalf || abs(posHalf.z) > params.domainHalf) { return; }
+
   // World → fractional grid coords. Grid spans [-domainHalf, +domainHalf);
   // cell centers are at (cell_i + 0.5) * cellSize - domainHalf.
   let fgrid = (posHalf + vec3f(params.domainHalf)) / params.cellSize - vec3f(0.5);

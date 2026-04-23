@@ -99,22 +99,29 @@ The integration scheme per step (single GPU dispatch):
 
 **No velocity-dependent forces exist.** All dissipative forces (damping, friction, disk recovery) were removed and replaced with the dark matter potentials. The virial controller is removed — dark matter provides structural stability.
 
-### PM Solver (full V-cycle per frame)
+### PM Solver (nested grids, full V-cycle per frame)
 
-N-body gravity is solved via Particle-Mesh multigrid on a 128³ grid spanning the full periodic domain (±64, cell size 1.0). One **complete** V-cycle runs every frame — descent, coarsest-level over-smooth, ascent — producing a fully-solved `pmPotential[0]` that the interpolate pass reads as-is. No phase-split, no double-buffering, no half-solved state visible to consumers.
+N-body gravity is solved via Particle-Mesh multigrid on **two concentric grids**:
 
-The V-cycle shape (handled by the `runPmVCycle` helper at module scope, `src/main.ts`):
+- **Inner**: 128³ cells covering ±16 (cell size **0.25**). Resolves the central galaxy region with 4× the resolution of the old uniform ±64 grid. Uses periodic BC (Dirichlet from outer potential is deferred; the blend shell masks the boundary region).
+- **Outer**: 64³ cells covering the full periodic domain ±64 (cell size **2.0**). Handles long-range gravity and all mass outside the inner domain.
+
+Both grids run one **complete** V-cycle per frame — descent, coarsest-level over-smooth, ascent — producing fully-solved `pmPotential[0]` buffers that the interpolate pass reads as-is. No phase-split, no double-buffering, no half-solved state visible to consumers.
+
+The V-cycle is dispatched by the module-scope `runPmVCycle` helper (`src/main.ts`). It is called twice per frame, once per grid, with the relevant buffer bundle:
 
 1. **Clear levels 1..maxLevel.** Level 0 keeps the previous frame's potential as a warm-start. Density evolves slowly, so last frame's solution is a near-converged initial guess and one V-cycle per frame suffices for sub-1% residual.
 2. **Descent** (`l = 0..maxLevel-1`): `PM_SMOOTH_PRE` red-black GS sweeps → residual → restrict residual to level `l+1` as RHS.
 3. **Coarsest level** (`l = maxLevel`): over-smooth with `PM_COARSEST_SWEEPS` = 16 red-black GS sweeps (cheap — level is 4³).
 4. **Ascent** (`l = maxLevel-1..0`): prolong correction from level `l+1`, add into level `l`'s potential, then `PM_SMOOTH_POST` red-black GS sweeps.
 
-With `PM_SMOOTH_PRE = PM_SMOOTH_POST = 1`, per-frame smoother work is 1+1 sweeps per level — half the 2+2 the old phase-split used within a single V-cycle. On M2, a full 128³ cycle fits under ~3.5 ms; on Vision Pro stereo with the full compute+render chain, total frame time stays under the 11 ms budget with margin.
+With `PM_SMOOTH_PRE = PM_SMOOTH_POST = 1`, per-frame smoother work is 1+1 sweeps per level. On M2, the inner 128³ V-cycle fits under ~3.5 ms; the outer 64³ V-cycle adds ~0.6 ms; total PM work ~1.15× the old single-grid cost — well under the 11 ms Vision Pro budget.
 
-There is also an **outer** 64³ grid at ±64 (cell 2.0) allocated in parallel — scaffolding for the future nested-PM zoom-in scheme. It runs its own full V-cycle per frame (~0.6 ms on M2) but its output is currently unused; interpolate still reads only the inner grid's potential. That wiring becomes live in a follow-up commit once the integration story is locked down.
+**Deposit** (`pm.deposit.wgsl`): CIC scatter with a domain filter — particles outside ±domainHalf skip deposition so they don't wrap-pollute the inner grid via the periodic cell-index wrap. For the outer grid (domainHalf = 64 = periodic-wrap radius), the filter never triggers.
 
-Diagnostics: `__pmMaxResidual()` returns `{ inner, outer }`. `__pmDumpDensity()` / `__pmDumpPotential()` dump the inner grid; `__pmDumpOuterDensity()` / `__pmDumpOuterPotential()` dump the outer. `__pmReversibilityTest(1000)` should hold maxErr < 0.01 world units — the full-cycle-per-frame design makes this tighter than the old phase-split because there's no history-dependent intermediate state leaking between frames.
+**Interpolate** (`pm.interpolate_nested.wgsl`): for each particle, sample force from **both** potentials via the CIC transpose kernel, then `mix(innerAcc, outerAcc, t)` where `t = smoothstep(PM_DOMAIN_HALF-2, PM_DOMAIN_HALF, max(|x|,|y|,|z|))` — 0 inside ±14 (pure inner), 1 beyond ±16 (pure outer), C¹ blend in between. [LAW:dataflow-not-control-flow] Always sample both; the blend weight decides which contribution survives — no branch, no seam.
+
+Diagnostics: `__pmMaxResidual()` returns `{ inner, outer }`. `__pmDumpDensity()` / `__pmDumpPotential()` dump the inner grid; `__pmDumpOuterDensity()` / `__pmDumpOuterPotential()` dump the outer. `__pmReversibilityTest(1000)` should hold maxErr < 0.01 world units.
 
 ### Simulation Clock
 
