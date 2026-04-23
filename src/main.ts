@@ -9,6 +9,7 @@ import {
 } from './xr-ui/step';
 import { createXrWidgetRenderer, type XrWidgetRenderer } from './xr-ui/renderer';
 import { HIG_DEFAULTS } from './xr-ui/widgets';
+import { createGasReservoir, GAS_SHADER_SOURCES } from './gasReservoir';
 
 // WGSL shader imports — Vite loads these as raw strings
 import SHADER_BOIDS_COMPUTE from './shaders/boids.compute.wgsl?raw';
@@ -169,6 +170,7 @@ const DEFAULTS: ModeParamsMap = {
     count: 80000, G: 0.3, softening: 1.5, distribution: 'disk',
     interactionStrength: 1.0, tidalStrength: 0.008,
     attractorDecayTime: 2.0,
+    gasMassFraction: 0.15, gasSoundSpeed: 2.0, gasVisible: true,
     haloMass: 5.0, haloScale: 2.0, diskMass: 3.0, diskScaleA: 1.5, diskScaleB: 0.3,
   },
   physics_classic: {
@@ -197,7 +199,7 @@ const DEFAULTS: ModeParamsMap = {
   },
 };
 
-const PRESETS: Record<SimMode, Record<string, Record<string, number | string>>> = {
+const PRESETS: Record<SimMode, Record<string, Record<string, number | string | boolean>>> = {
   boids: {
     'Default':     { ...DEFAULTS.boids },
     'Tight Flock': { count: 3000, separationRadius: 10, alignmentRadius: 30, cohesionRadius: 80, maxSpeed: 3.0, maxForce: 0.08, visualRange: 60 },
@@ -276,6 +278,11 @@ const PARAM_DEFS: Record<SimMode, ParamSection[]> = {
       { key: 'interactionStrength', label: 'Interaction Pull', min: 0.1, max: 100, step: 0.01, logScale: true },
       { key: 'attractorDecayTime', label: 'Decay Time (s)', min: 0.1, max: 30.0, step: 0.1, maxLabel: 'Permanent' },
       { key: 'tidalStrength', label: 'Tidal Field', min: 0.0, max: 0.05, step: 0.0005 },
+    ]},
+    { section: 'Gas Reservoir', params: [
+      { key: 'gasMassFraction', label: 'Gas Mass', min: 0.0, max: 0.5, step: 0.01, requiresReset: true },
+      { key: 'gasSoundSpeed', label: 'Sound Speed', min: 0.5, max: 5.0, step: 0.05 },
+      { key: 'gasVisible', label: 'Gas Visible', type: 'toggle' },
     ]},
     { section: 'Initial State', params: [
       { key: 'distribution', label: 'Distribution', type: 'dropdown', options: ['random', 'disk', 'shell'] },
@@ -444,8 +451,8 @@ function startThemeTransition(themeName: string, now = performance.now()): void 
 }
 
 // Dynamic access to mode-specific params — casts for TypeScript's correlated types limitation
-function modeParams(mode: SimMode): Record<string, number | string> {
-  return state[mode] as unknown as Record<string, number | string>;
+function modeParams(mode: SimMode): Record<string, number | string | boolean> {
+  return state[mode] as unknown as Record<string, number | string | boolean>;
 }
 
 const state: AppState = {
@@ -1371,7 +1378,7 @@ function createBoidsSimulation() {
 
   const computeBGL = device.createBindGroupLayout({
     entries: [
-      { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
+      { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
       { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
       { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
     ]
@@ -1581,6 +1588,7 @@ let pmProlongPipeline: GPUComputePipeline;
 function createPhysicsSimulation() {
   const count = state.physics.count;
   const bodyBytes = count * 48; // pos(12) + mass(4) + vel(12) + pad(4) + home(12) + pad(4) = 48
+  const gasMassFraction = Math.max(0, Math.min(0.5, state.physics.gasMassFraction ?? 0.15));
 
   // [LAW:one-source-of-truth] N-body orbit shaping constants live together so position thickness and velocity tilt stay in sync.
   const DISK_THICKNESS = 0.2;
@@ -1612,6 +1620,7 @@ function createPhysicsSimulation() {
   }
 
   const initData = new Float32Array(count * 12);
+  let totalStarMass = 0;
   const dist = state.physics.distribution;
   const orbitalNormal = normalize3([0.18, 1.0, -0.12]);
   const orbitalTangent = normalize3(cross3([0, 1, 0], orbitalNormal));
@@ -1843,6 +1852,7 @@ function createPhysicsSimulation() {
     initData[off + 8] = 0;
     initData[off + 9] = 0;
     initData[off + 10] = 0;
+    totalStarMass += mass;
   }
 
   // ── PM (Particle-Mesh) gravity ──────────────────────────────────────────────
@@ -2292,6 +2302,7 @@ function createPhysicsSimulation() {
   pmOuterParamsU32[6] = pmOuterLevel0Cells;
   pmOuterParamsU32[7] = 0;  // filterOutOfDomain = 0 (outer is the full 3-torus; wrapIdx handles near-boundary posHalf)
 
+
   // Per-level uniform buffers for the outer multigrid (matches inner pattern).
   const pmOuterSmoothUniform: GPUBuffer[][] = [];
   const pmOuterResidualUniform: GPUBuffer[] = [];
@@ -2472,6 +2483,35 @@ function createPhysicsSimulation() {
       { binding: 6, resource: { buffer: pmBlendBuffer } },
     ]}),
   ];
+
+  // [LAW:locality-or-seam] Gas reservoir owns its buffers/shaders in
+  // gasReservoir.ts; main.ts only dispatches it at the existing PM seams.
+  const gas = createGasReservoir({
+    device,
+    createShaderModuleChecked,
+    renderTargetFormat,
+    renderSampleCount,
+    cameraBuffer,
+    cameraStride: CAMERA_STRIDE,
+    cameraSize: CAMERA_SIZE,
+    starCount: count,
+    starBuffers: [bufferA, bufferB],
+    totalStarMass,
+    gasMassFraction,
+    pmBufUsage: PM_BUF_USAGE,
+    fixedPointScale: PM_FIXED_POINT_SCALE,
+    pmDepositBGL,
+    pmDepositPipeline,
+    pmInterpolateBGL,
+    pmInterpolatePipeline,
+    innerDensityU32: pmDensityU32,
+    innerPotential: pmPotential[0],
+    innerParams: { gridRes: PM_GRID_RES, domainHalf: PM_DOMAIN_HALF, cellSize: PM_CELL_SIZE, cellCount: pmLevel0Cells, filterOutOfDomain: 1 },
+    outerDensityU32: pmOuterDensityU32,
+    outerPotential: pmOuterPotential[0],
+    outerParams: { gridRes: PM_OUTER_GRID_RES, domainHalf: PM_OUTER_DOMAIN_HALF, cellSize: PM_OUTER_CELL_SIZE, cellCount: pmOuterLevel0Cells, filterOutOfDomain: 0 },
+    pmBlendBuffer,
+  });
 
   const computeModule = createShaderModuleChecked('nbody.compute', SHADER_NBODY_COMPUTE_EDIT || SHADER_NBODY_COMPUTE);
   const renderModule = createShaderModuleChecked('nbody.render', SHADER_NBODY_RENDER_EDIT || SHADER_NBODY_RENDER);
@@ -2795,16 +2835,19 @@ function createPhysicsSimulation() {
       device.queue.writeBuffer(pmParamsBuffer, 0, pmParamsData);
       pmOuterParamsF32[0] = dt;
       device.queue.writeBuffer(pmOuterParamsBuffer, 0, pmOuterParamsData);
+      gas.prepareFrame(dt, p.gasSoundSpeed ?? 2.0);
 
       encoder.clearBuffer(pmDensityU32);
       encoder.clearBuffer(pmMeanScratch);
       encoder.clearBuffer(pmOuterDensityU32);
       encoder.clearBuffer(pmOuterMeanScratch);
+      gas.clear(encoder);
       const pmPass = encoder.beginComputePass();
       // Inner grid: CIC deposit → mean reduce → mean-subtract convert.
       pmPass.setPipeline(pmDepositPipeline);
       pmPass.setBindGroup(0, pmDepositBG[pingPong]);
       pmPass.dispatchWorkgroups(Math.ceil(count / 256));
+      gas.depositInnerPm(pmPass, pingPong);
       pmPass.setPipeline(pmReducePipeline);
       pmPass.setBindGroup(0, pmConvertBG);
       pmPass.dispatchWorkgroups(Math.ceil(pmLevel0Cells / 256));
@@ -2821,11 +2864,13 @@ function createPhysicsSimulation() {
       pmPass.setPipeline(pmDepositPipeline);
       pmPass.setBindGroup(0, pmOuterDepositBG[pingPong]);
       pmPass.dispatchWorkgroups(Math.ceil(count / 256));
+      gas.depositOuterPm(pmPass, pingPong);
       pmPass.setPipeline(pmReducePipeline);
       pmPass.setBindGroup(0, pmOuterConvertBG);
       pmPass.dispatchWorkgroups(Math.ceil(pmOuterLevel0Cells / 256));
       pmPass.setPipeline(pmConvertPipeline);
       pmPass.dispatchWorkgroups(Math.ceil(pmOuterLevel0Cells / 256));
+      gas.depositGasAndBuildPressure(pmPass, pingPong);
       pmPass.end();
 
       // ── Multigrid V-cycle Poisson solver (full cycle per frame) ──────────
@@ -2900,10 +2945,14 @@ function createPhysicsSimulation() {
       iPass.setPipeline(pmInterpolatePipeline);
       iPass.setBindGroup(0, pmInterpolateBG[pingPong]);
       iPass.dispatchWorkgroups(Math.ceil(count / 256));
+      gas.interpolateForces(iPass, pingPong);
       iPass.end();
 
       const cTsw = tsWrites(0);
       const pass = encoder.beginComputePass(cTsw ? { timestampWrites: cTsw } : undefined);
+      // [LAW:dataflow-not-control-flow] Gas and stars integrate every frame in
+      // a fixed order; gasMassFraction=0 makes gas forces zero by value.
+      gas.integrate(pass, pingPong);
       pass.setPipeline(computePipeline);
       pass.setBindGroup(0, computeBG[pingPong]);
       pass.dispatchWorkgroups(Math.ceil(count / 256));
@@ -3004,6 +3053,8 @@ function createPhysicsSimulation() {
       pass.setPipeline(renderPipeline);
       pass.setBindGroup(0, renderBGs[viewIndex][pingPong]);
       pass.draw(6, count);
+
+      gas.render(pass, viewIndex, state.physics.gasVisible);
 
       renderMarkers(pass, viewIndex);
       pass.end();
@@ -3215,6 +3266,51 @@ function createPhysicsSimulation() {
       return out;
     },
 
+    gasDumpDensity: () => gas.dumpDensity(),
+
+    gasEnergyBreakdown: () => gas.energyBreakdown(pingPong, state.physics.gasSoundSpeed ?? 2.0),
+
+    gasWakeProbe: (starIdx = 0) => gas.wakeProbe(pingPong, starIdx),
+
+    async gasReversibilityTest(nSteps: number): Promise<{ maxPosErr: number; maxVelErr: number; count: number } | null> {
+      const wasPaused = state.paused;
+      const savedDir = timeDirection;
+      state.paused = true;
+      const start = await gas.snapshot(pingPong);
+      if (!start) {
+        timeDirection = savedDir;
+        state.paused = wasPaused;
+        return null;
+      }
+      timeDirection = 1;
+      for (let i = 0; i < nSteps; i++) {
+        const e = device.createCommandEncoder();
+        this.compute(e);
+        device.queue.submit([e.finish()]);
+      }
+      timeDirection = -1;
+      for (let i = 0; i < nSteps; i++) {
+        const e = device.createCommandEncoder();
+        this.compute(e);
+        device.queue.submit([e.finish()]);
+      }
+      timeDirection = savedDir;
+      state.paused = wasPaused;
+
+      const end = await gas.snapshot(pingPong);
+      if (!end) return null;
+      let maxPosErr = 0;
+      let maxVelErr = 0;
+      for (let i = 0; i < gas.count; i++) {
+        const o = i * 12;
+        const posErr = Math.hypot(end[o] - start[o], end[o + 1] - start[o + 1], end[o + 2] - start[o + 2]);
+        const velErr = Math.hypot(end[o + 4] - start[o + 4], end[o + 5] - start[o + 5], end[o + 6] - start[o + 6]);
+        if (posErr > maxPosErr) maxPosErr = posErr;
+        if (velErr > maxVelErr) maxVelErr = velErr;
+      }
+      return { maxPosErr, maxVelErr, count: gas.count };
+    },
+
     // PM reversibility harness. Snapshots particle positions, runs N forward
     // steps, then N reverse steps, then compares. A sound PM implementation
     // should return particles to within ~1e-3 world units for N=1000 thanks
@@ -3289,6 +3385,7 @@ function createPhysicsSimulation() {
 
     destroy() {
       bufferA.destroy(); bufferB.destroy();
+      gas.destroy();
       paramsBuffer.destroy(); cameraBuffer.destroy(); blurBuffer.destroy();
       attractorFieldBuffer.destroy(); markerBuffer.destroy();
       statsOutBuffer.destroy(); statsStaging.destroy(); statsParamsBuffer.destroy();
@@ -3298,7 +3395,8 @@ function createPhysicsSimulation() {
       pmDensityU32.destroy(); pmDensityF32.destroy();
       for (const b of pmPotential) b.destroy();
       for (const b of pmResidual) b.destroy();
-      pmForce.destroy(); pmMeanScratch.destroy();
+      pmForce.destroy();
+      pmMeanScratch.destroy();
       pmParamsBuffer.destroy(); pmDensityStaging.destroy();
       // V-cycle: coarse-level RHS buffers (pmRho[0] aliases pmDensityF32, skip).
       for (let l = 1; l < pmRho.length; l++) pmRho[l].destroy();
@@ -4357,6 +4455,17 @@ function buildParamRow(container: HTMLElement, mode: SimMode, param: ParamDef) {
       updateAll();
     });
     row.appendChild(select);
+  } else if (param.type === 'toggle') {
+    const input = document.createElement('input');
+    input.type = 'checkbox';
+    input.dataset.mode = mode;
+    input.dataset.key = param.key;
+    input.checked = Boolean(modeParams(mode)[param.key]);
+    input.addEventListener('change', () => {
+      modeParams(mode)[param.key] = input.checked;
+      updateAll();
+    });
+    row.appendChild(input);
   } else {
     const input = document.createElement('input');
     input.type = 'range';
@@ -5504,7 +5613,7 @@ const MODE_LABELS = {
 function updatePrompt() {
   const mode = state.mode;
   const params = modeParams(mode);
-  const defaultParams = DEFAULTS[mode] as unknown as Record<string, number | string>;
+  const defaultParams = DEFAULTS[mode] as unknown as Record<string, number | string | boolean>;
   const parts: (string | null)[] = [];
 
   for (const [key, val] of Object.entries(params)) {
@@ -5525,7 +5634,7 @@ function updatePrompt() {
   document.getElementById('prompt-text')!.textContent = prompt;
 }
 
-function describeParam(_mode: string, key: string, val: number | string): string | null {
+function describeParam(_mode: string, key: string, val: number | string | boolean): string | null {
   const n = Number(val);
   const descriptions: Record<string, () => string | null> = {
     count: () => `${val} particles`,
@@ -5543,6 +5652,9 @@ function describeParam(_mode: string, key: string, val: number | string): string
     diskMass: () => n < 0.1 ? `no disk potential` : `disk mass ${val}`,
     diskScaleA: () => `disk scale A ${val}`,
     diskScaleB: () => `disk scale B ${val}`,
+    gasMassFraction: () => n < 0.01 ? 'no gas reservoir' : `gas mass fraction ${val}`,
+    gasSoundSpeed: () => `gas sound speed ${val}`,
+    gasVisible: () => val ? null : 'gas hidden',
     distribution: () => `${val} distribution`,
     resolution: () => `${val}x${val} grid`,
     viscosity: () => n > 0.5 ? `thick fluid (viscosity ${val})` : n < 0.05 ? `thin fluid (viscosity ${val})` : `viscosity ${val}`,
@@ -5586,6 +5698,7 @@ function getShaderSources(mode: SimMode): Record<string, string> {
     physics: {
       'Compute (Gravity)': SHADER_NBODY_COMPUTE,
       'Render (Vert+Frag)': SHADER_NBODY_RENDER,
+      ...GAS_SHADER_SOURCES,
     },
     physics_classic: {
       'Compute (Classic)': SHADER_NBODY_CLASSIC_COMPUTE,
@@ -7770,6 +7883,10 @@ function syncUIFromState() {
         if (valueSpan) valueSpan.textContent = formatValueWithMax(realVal, paramDef);
       }
     });
+    container.querySelectorAll<HTMLInputElement>('input[type="checkbox"]').forEach(input => {
+      const key = input.dataset.key!;
+      if (key && key in params) input.checked = Boolean(params[key]);
+    });
     container.querySelectorAll<HTMLSelectElement>('select').forEach(sel => {
       const key = sel.dataset.key!;
       if (key && key in params) sel.value = String(params[key]);
@@ -7819,6 +7936,15 @@ function initBindings(): void {
               target[param.key] = typeof current === 'number' ? Number(v) : v;
             },
             options: (param.options ?? []).map(o => ({ value: String(o), label: String(o) })),
+          });
+        } else if (param.type === 'toggle') {
+          bindingRegistry.register({
+            kind: 'toggle',
+            id: `${mode}.${param.key}`,
+            label: param.label,
+            group: mode,
+            get: () => Boolean(modeParams(mode)[param.key]),
+            set: (v) => { modeParams(mode)[param.key] = v; },
           });
         } else if (param.min !== undefined && param.max !== undefined) {
           bindingRegistry.register({
@@ -7954,6 +8080,10 @@ async function main() {
     dumpOuterPotential?: () => Promise<Float32Array | null>,
     maxResidual?: () => Promise<{ inner: number; outer: number } | null>,
     reversibilityTest?: (n: number) => Promise<{ maxErr: number; meanErr: number; count: number } | null>,
+    gasDumpDensity?: () => Promise<Float32Array | null>,
+    gasEnergyBreakdown?: () => Promise<{ starKinetic: number; gasKinetic: number; gasInternal: number; total: number } | null>,
+    gasWakeProbe?: (starIdx?: number) => Promise<{ aheadDensity: number; behindDensity: number; asymmetry: number } | null>,
+    gasReversibilityTest?: (n: number) => Promise<{ maxPosErr: number; maxVelErr: number; count: number } | null>,
   };
   (window as any).__pmDumpDensity = () => {
     const sim = simulations[state.mode] as unknown as PmDiag;
@@ -7981,6 +8111,22 @@ async function main() {
   (window as any).__pmReversibilityTest = (n = 1000) => {
     const sim = simulations[state.mode] as unknown as PmDiag;
     return sim?.reversibilityTest ? sim.reversibilityTest(n) : Promise.resolve(null);
+  };
+  (window as any).__gasDumpDensity = () => {
+    const sim = simulations[state.mode] as unknown as PmDiag;
+    return sim?.gasDumpDensity ? sim.gasDumpDensity() : Promise.resolve(null);
+  };
+  (window as any).__gasEnergyBreakdown = () => {
+    const sim = simulations[state.mode] as unknown as PmDiag;
+    return sim?.gasEnergyBreakdown ? sim.gasEnergyBreakdown() : Promise.resolve(null);
+  };
+  (window as any).__gasWakeProbe = (starIdx = 0) => {
+    const sim = simulations[state.mode] as unknown as PmDiag;
+    return sim?.gasWakeProbe ? sim.gasWakeProbe(starIdx) : Promise.resolve(null);
+  };
+  (window as any).__gasReversibilityTest = (n = 1000) => {
+    const sim = simulations[state.mode] as unknown as PmDiag;
+    return sim?.gasReversibilityTest ? sim.gasReversibilityTest(n) : Promise.resolve(null);
   };
   (window as any).__bindings = bindingRegistry;
   (window as any).__anchors = { evaluateAnchor, handFrames: xrHandFrames };
