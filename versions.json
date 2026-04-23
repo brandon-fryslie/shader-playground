@@ -4,15 +4,36 @@
     {
       "version": "pr-13",
       "ref": "refs/pull/13/merge",
-      "sha": "bd97b804bf3f4afbe806985dece561f6de8a769f",
-      "timestamp": "2026-04-22T21:32:40.896Z",
+      "sha": "7fda56fa5689cf14bb2ad0f86b10642b7bd9d7f7",
+      "timestamp": "2026-04-23T00:58:13.084Z",
       "commits": [
         {
-          "sha": "bd97b804bf3f4afbe806985dece561f6de8a769f",
+          "sha": "7fda56fa5689cf14bb2ad0f86b10642b7bd9d7f7",
           "author_name": "Brandon Fryslie",
           "author_email": "530235+brandon-fryslie@users.noreply.github.com",
-          "timestamp": "2026-04-22T21:32:23Z",
-          "message": "Merge 981b68a9936ea8311e5c70c607f9a09eedfae748 into e59fa2d42b0961590a58c5fa15d159d77978f0e0\n"
+          "timestamp": "2026-04-23T00:57:47Z",
+          "message": "Merge 4a271d284ecc05dcb92d7dbf9f47062a98ad25d9 into e59fa2d42b0961590a58c5fa15d159d77978f0e0\n"
+        },
+        {
+          "sha": "4a271d284ecc05dcb92d7dbf9f47062a98ad25d9",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-22T18:57:36-06:00",
+          "message": "fix(physics): gate subdomain-filter to inner grid only; tighten PM nested-grid docs\n\nTwo behavior + four doc concerns from PR #13 review.\n\nBEHAVIOR FIX\npm.deposit.wgsl previously returned early whenever |posHalf| > domainHalf,\nregardless of which grid it was dispatched against. That is only correct\nfor the inner subdomain grid (±16) — for the outer 3-torus grid (±64),\nnbody.compute.wgsl wraps only the FINAL position each step (line 192),\nso posHalf = pos + vel*halfDt can transiently exceed ±64 for fast\nparticles near the boundary. Those particles were silently dropped from\nthe outer deposit, corrupting the long-range potential and potentially\nbreaking reversibility.\n\nFix: repurpose the Params `_pad` slot as `filterOutOfDomain: u32`. Outer\npins it to 0 (no filter — wrapIdx handles boundary crossings correctly\non the periodic grid). Inner pins it to 1 (filter — subdomain wants\nstrict containment so out-of-domain particles don't wrap-pollute\nthe grid via periodic cell-index wrap).\n\n[LAW:dataflow-not-control-flow] Same shader, same branch; the uniform\nvalue decides the outcome. No new pipeline, no new shader variant.\n\nDOC FIXES\n- PM_DOMAIN_HALF header: the [LAW:one-source-of-truth] \"must match\n  DOMAIN_HALF in nbody.compute.wgsl\" invariant was stale post-A4;\n  that invariant now applies only to the outer grid. Inner is\n  intentionally a subdomain.\n- Outer-grid allocation block: replaced \"Scaffolding-only (A2)\" header\n  with the outer grid's actual live role (deposit, V-cycle, Dirichlet\n  seed via pm.boundary_sample, read by pm.interpolate_nested).\n- Removed user-local absolute path `/Users/bmf/.claude/plans/...` —\n  CLAUDE.md is the canonical repo-local architecture doc.\n- pm.interpolate_nested.wgsl header: softened the \"guarantees Newton's\n  3rd law\" claim. Per-grid CIC-transpose is self-conjugate, but the\n  position-dependent blend weight breaks symmetry across the transition\n  shell, so exact total momentum conservation is not guaranteed. A\n  rigorous fix would require a conservative blended potential with a\n  ∇t coupling term — not worth the complexity for this visual sim.\n\nGenerated with [Claude Code](https://claude.ai/code)\nvia [Happy](https://happy.engineering)\n\nCo-Authored-By: Claude <noreply@anthropic.com>\nCo-Authored-By: Happy <yesreply@happy.engineering>\n"
+        },
+        {
+          "sha": "56c3d522e5f276e8fabb3fb3f5bcea1b36252c7b",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-22T18:50:40-06:00",
+          "message": "feat(physics): Dirichlet BC for inner PM via outer potential (A5)\n\nNested PM grids now couple through a Dirichlet boundary on the inner\ngrid, sampled from the outer grid's fully-solved potential each frame.\nThis replaces the previous periodic-wrap BC that made the inner solve\nblind to mass outside ±16 — long-range gravity now clamps the inner\ngrid's boundary to physically meaningful values instead of arbitrary\nperiodic-image noise.\n\nPer-frame order inside compute():\n  1. Outer deposit + V-cycle (periodic BC, unchanged).\n  2. pm.boundary_sample (new) — trilinearly samples outerPhi[0] at the\n     inner grid's face-cell world positions, writes into innerPhi[0]\n     face cells only (select-masked, 3D dispatch, no branch).\n  3. Inner deposit + V-cycle — smoother / residual / prolong freeze\n     face cells when the new dirichletBoundary flag = 1, so the BC\n     seeded in step 2 survives the whole cycle.\n\nShader changes (all dataflow-not-control-flow — the flag lives in the\nuniform, not in branching):\n  - pm.smooth.wgsl: `select(newPhi, phi[me], freeze)` at face cells.\n  - pm.residual.wgsl: residual = 0 on faces (keeps restricted RHS\n    from being polluted at the next coarser level).\n  - pm.prolong.wgsl: skip correction add on fine face cells so\n    prolonged values don't perturb the held BC.\n\nUniform buffers for smooth / residual / prolong grew from 16 to 32\nbytes to accommodate the flag (WGSL uniform alignment). Inner grid\npins the flag to 1 at every level; outer pins it to 0, preserving\nits exact pre-patch periodic behavior.\n\nBuild is clean. On-device verification pending:\n  - await __pmMaxResidual() should show inner residual dropping vs\n    the previous periodic-BC run, especially near faces.\n  - await __pmReversibilityTest(1000) should stay maxErr < 0.01.\n  - Visual: particle cloud should hold structure more tightly because\n    the inner gravity field is now anchored to the full outer field\n    rather than a periodic image of itself.\n\nGenerated with [Claude Code](https://claude.ai/code)\nvia [Happy](https://happy.engineering)\n\nCo-Authored-By: Claude <noreply@anthropic.com>\nCo-Authored-By: Happy <yesreply@happy.engineering>\n"
+        },
+        {
+          "sha": "886c0ee69c6f05b50a7feb5753c6f6d249257176",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-22T18:22:19-06:00",
+          "message": "feat(physics): nested PM grids go live (A4+A6, on top of fixed V-cycle)\n\nRe-applies the nested PM scheme that was reverted in 08ad7c8. Root-cause\nof the static-animation bug was the phase-split V-cycle (fixed in 981b68a),\nnot the nested code — so the same two-grid design now runs cleanly on top\nof a baseline that produces a fully-solved phi every frame.\n\nInner grid: 128³ over ±16, cell 0.25 (4× sharper than the old uniform\n±64 grid in the region where dynamics live).\nOuter grid: 64³ over ±64, cell 2.0 (captures mass outside the inner\ndomain for long-range gravity). Both run one full V-cycle per frame via\nthe shared runPmVCycle helper.\n\npm.interpolate_nested.wgsl samples both potentials, then smoothstep-\nblends across the ±14..±16 shell — no branch, no seam. Outside the\ninner domain, sampleInner's wrap-polluted reads are multiplied by\n(1 - t) == 0 and drop out. [LAW:dataflow-not-control-flow]\n\npm.deposit.wgsl gains a domain filter so particles outside ±domainHalf\nskip deposition — mandatory for the inner grid to avoid wrap-pollution\nof its periodic cell index. Harmless for the outer grid since\nnbody.compute keeps every particle inside ±64.\n\nMemory: ~49.5 MB PM total (inner 128³ + outer 64³ pyramid) — +12% vs.\nthe old uniform grid. Compute: ~1.15× the old PM cost, well under the\n11 ms Vision Pro budget.\n\nInner BC is still periodic in this commit (A5 replaces with Dirichlet\nfrom outer); blend shell weighting masks the boundary-face artifacts.\n\nVerification:\n- npm run build clean\n- __pmMaxResidual() → { inner, outer }, both < 1% peak expected\n- __pmReversibilityTest(1000) → maxErr < 0.01 expected\n\nGenerated with [Claude Code](https://claude.ai/code)\nvia [Happy](https://happy.engineering)\n\nCo-Authored-By: Claude <noreply@anthropic.com>\nCo-Authored-By: Happy <yesreply@happy.engineering>\n"
         },
         {
           "sha": "981b68a9936ea8311e5c70c607f9a09eedfae748",
