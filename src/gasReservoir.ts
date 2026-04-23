@@ -362,6 +362,9 @@ export function createGasReservoir(args: GasReservoirArgs): GasReservoir {
       pass.dispatchWorkgroups(Math.ceil(gasCount / 256));
     },
     render(pass, viewIndex, visible) {
+      // [LAW:dataflow-not-control-flow] The gas render pass always runs; the
+      // caller selects a 1x1 null target when hidden so this draw never becomes
+      // full-screen discard work.
       renderParamsF32[4] = totalMass > 0 ? 1.0 / Math.max(rhoRef * 24.0, 1e-12) : 0.0;
       renderParamsF32[5] = visible ? 1.0 : 0.0;
       device.queue.writeBuffer(renderParamsBuffer, 0, renderParamsData);

@@ -862,6 +862,10 @@ type PostFxState = {
   scene: GPUTexture[];     // ping-pong [0,1]
   sceneIdx: number;
   depth: GPUTexture | null;
+  nullColor: GPUTexture | null;
+  nullDepth: GPUTexture | null;
+  nullColorView: GPUTextureView | null;
+  nullDepthView: GPUTextureView | null;
   bloomMips: GPUTexture[]; // 5 mips, halved each level
   width: number;
   height: number;
@@ -902,6 +906,10 @@ const postFx: PostFxState = {
   scene: [],
   sceneIdx: 0,
   depth: null,
+  nullColor: null,
+  nullDepth: null,
+  nullColorView: null,
+  nullDepthView: null,
   bloomMips: [],
   width: 0,
   height: 0,
@@ -935,6 +943,22 @@ const HDR_FORMAT: GPUTextureFormat = 'rgba16float';
 const BLOOM_LEVELS = 3; // 5 mips made the largest blur radius half-screen, fusing dense clusters into a giant white blob.
 
 function initPostFx(): void {
+  // [LAW:dataflow-not-control-flow] Hidden optional render layers still encode
+  // their pass; the data-selected null attachments keep that pass from loading
+  // the full scene when the layer has no visible output.
+  postFx.nullColor = device.createTexture({
+    size: [1, 1],
+    format: HDR_FORMAT,
+    usage: GPUTextureUsage.RENDER_ATTACHMENT,
+  });
+  postFx.nullDepth = device.createTexture({
+    size: [1, 1],
+    format: 'depth24plus',
+    usage: GPUTextureUsage.RENDER_ATTACHMENT,
+  });
+  postFx.nullColorView = postFx.nullColor.createView();
+  postFx.nullDepthView = postFx.nullDepth.createView();
+
   postFx.linSampler = device.createSampler({
     magFilter: 'linear', minFilter: 'linear',
     addressModeU: 'clamp-to-edge', addressModeV: 'clamp-to-edge',
@@ -1378,7 +1402,9 @@ function createBoidsSimulation() {
 
   const computeBGL = device.createBindGroupLayout({
     entries: [
-      { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
+      // [LAW:one-source-of-truth] Buffer access mirrors boids.compute.wgsl:
+      // particlesIn is read-only and particlesOut is the sole write target.
+      { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
       { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
       { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
     ]
@@ -1520,6 +1546,7 @@ interface PmVCycleArgs {
   preSmooth: number;           // red-black GS sweeps before restriction (per level)
   postSmooth: number;          // red-black GS sweeps after prolongation (per level)
   coarsestSweeps: number;      // red-black GS sweeps on the coarsest level
+  timingBucket?: GpuTimingBucket;
 }
 
 function runPmVCycle(encoder: GPUCommandEncoder, a: PmVCycleArgs): void {
@@ -1533,7 +1560,8 @@ function runPmVCycle(encoder: GPUCommandEncoder, a: PmVCycleArgs): void {
   // every cycle; only the per-level bind group and workgroup count vary.
   // No phase check, no branch on simStep — the solver is a pure function of
   // (density, previous phi[0]).
-  const pass = encoder.beginComputePass();
+  const vTsw = a.timingBucket ? tsWrites(a.timingBucket) : undefined;
+  const pass = encoder.beginComputePass(vTsw ? { timestampWrites: vTsw } : undefined);
 
   // Descent: smooth + residual + restrict at each level down to maxLevel-1.
   for (let l = 0; l < maxLevel; l++) {
@@ -2842,7 +2870,8 @@ function createPhysicsSimulation() {
       encoder.clearBuffer(pmOuterDensityU32);
       encoder.clearBuffer(pmOuterMeanScratch);
       gas.clear(encoder);
-      const pmPass = encoder.beginComputePass();
+      const pmTsw = tsWrites('pmDepositConvert');
+      const pmPass = encoder.beginComputePass(pmTsw ? { timestampWrites: pmTsw } : undefined);
       // Inner grid: CIC deposit → mean reduce → mean-subtract convert.
       pmPass.setPipeline(pmDepositPipeline);
       pmPass.setBindGroup(0, pmDepositBG[pingPong]);
@@ -2910,13 +2939,15 @@ function createPhysicsSimulation() {
         preSmooth: PM_SMOOTH_PRE,
         postSmooth: PM_SMOOTH_POST,
         coarsestSweeps: PM_COARSEST_SWEEPS,
+        timingBucket: 'outerVCycle',
       });
 
       // Boundary-sample: write outer φ into inner φ's level-0 face cells.
       // Separate pass so WebGPU's implicit pass-boundary barriers serialize
       // the outer-write vs. outer-read dependency without any explicit sync.
       {
-        const bsPass = encoder.beginComputePass();
+        const bsTsw = tsWrites('boundarySample');
+        const bsPass = encoder.beginComputePass(bsTsw ? { timestampWrites: bsTsw } : undefined);
         bsPass.setPipeline(pmBoundarySamplePipeline);
         bsPass.setBindGroup(0, pmBoundarySampleBG);
         bsPass.dispatchWorkgroups(pmBoundarySampleWg, pmBoundarySampleWg, pmBoundarySampleWg);
@@ -2935,20 +2966,26 @@ function createPhysicsSimulation() {
         preSmooth: PM_SMOOTH_PRE,
         postSmooth: PM_SMOOTH_POST,
         coarsestSweeps: PM_COARSEST_SWEEPS,
+        timingBucket: 'innerVCycle',
       });
 
       // ── PM force interpolation ─────────────────────────────────────────
       // Sample the freshly-solved pmPotential[0] at each particle via the CIC
       // transpose kernel; write vec4 force to pmForce. Dispatched AFTER the
       // V-cycle (reads phi) and BEFORE the main n-body compute (reads pmForce).
-      const iPass = encoder.beginComputePass();
+      const iTsw = tsWrites('starInterpolate');
+      const iPass = encoder.beginComputePass(iTsw ? { timestampWrites: iTsw } : undefined);
       iPass.setPipeline(pmInterpolatePipeline);
       iPass.setBindGroup(0, pmInterpolateBG[pingPong]);
       iPass.dispatchWorkgroups(Math.ceil(count / 256));
-      gas.interpolateForces(iPass, pingPong);
       iPass.end();
 
-      const cTsw = tsWrites(0);
+      const gTsw = tsWrites('gasInterpolatePressure');
+      const gPass = encoder.beginComputePass(gTsw ? { timestampWrites: gTsw } : undefined);
+      gas.interpolateForces(gPass, pingPong);
+      gPass.end();
+
+      const cTsw = tsWrites('starGasIntegrate');
       const pass = encoder.beginComputePass(cTsw ? { timestampWrites: cTsw } : undefined);
       // [LAW:dataflow-not-control-flow] Gas and stars integrate every frame in
       // a fixed order; gasMassFraction=0 makes gas forces zero by value.
@@ -3036,7 +3073,7 @@ function createPhysicsSimulation() {
         device.queue.writeBuffer(attractorFieldBuffer, 0, attractorFieldData);
       }
 
-      const rTsw = tsWrites(1);
+      const rTsw = tsWrites('starsRender');
       const pass = encoder.beginRenderPass({
         colorAttachments: [getColorAttachment(depthRef, textureView, viewport)],
         depthStencilAttachment: getDepthAttachment(depthRef, viewport),
@@ -3054,10 +3091,34 @@ function createPhysicsSimulation() {
       pass.setBindGroup(0, renderBGs[viewIndex][pingPong]);
       pass.draw(6, count);
 
-      gas.render(pass, viewIndex, state.physics.gasVisible);
-
       renderMarkers(pass, viewIndex);
       pass.end();
+
+      const gasVisible = state.physics.gasVisible;
+      const gasColorView = gasVisible ? getCurrentSceneView() : postFx.nullColorView!;
+      const gasDepthView = gasVisible ? (xrDepthOverride ?? postFx.depth!.createView()) : postFx.nullDepthView!;
+      const gasViewport = gasVisible ? renderViewport : null;
+      const gTsw = tsWrites('gasRender');
+      const gasPass = encoder.beginRenderPass({
+        colorAttachments: [{
+          view: gasColorView,
+          clearValue: DEFAULT_CLEAR_COLOR,
+          loadOp: 'load',
+          storeOp: 'store',
+        }],
+        depthStencilAttachment: {
+          view: gasDepthView,
+          depthClearValue: 1.0,
+          depthLoadOp: 'load',
+          depthStoreOp: 'store',
+        },
+        ...(gTsw ? { timestampWrites: gTsw } : {}),
+      });
+      if (gasViewport) {
+        gasPass.setViewport(gasViewport[0], gasViewport[1], gasViewport[2], gasViewport[3], 0, 1);
+      }
+      gas.render(gasPass, viewIndex, gasVisible);
+      gasPass.end();
     },
 
     getCount() { return count; },
@@ -7456,16 +7517,39 @@ let currentFps = 0;
 let lastFrameTimestamp = -1;
 
 // --- GPU profiling ---
-// Two paths: GPU timestamp queries (Safari/Metal) give per-pass C/R/P breakdown.
-// JS-side onSubmittedWorkDone fallback (Chrome/all) gives total frame GPU time.
+// Two paths: GPU timestamp queries give named per-bucket breakdowns when
+// supported. JS-side onSubmittedWorkDone fallback gives total frame GPU time.
 let gpuFrameMs = 0;
-let gpuTimingDetail = { compute: 0, render: 0, post: 0 };
+const GPU_TIMING_BUCKETS = [
+  'pmDepositConvert',
+  'outerVCycle',
+  'boundarySample',
+  'innerVCycle',
+  'starInterpolate',
+  'gasInterpolatePressure',
+  'starGasIntegrate',
+  'starsRender',
+  'gasRender',
+  'bloomComposite',
+] as const;
+type GpuTimingBucket = typeof GPU_TIMING_BUCKETS[number];
+// [LAW:one-source-of-truth] This registry is the only source for GPU timing
+// query indices, public bucket names, and the zero-valued fallback shape.
+const GPU_TIMING_INDEX: Record<GpuTimingBucket, number> = Object.fromEntries(
+  GPU_TIMING_BUCKETS.map((bucket, index) => [bucket, index])
+) as Record<GpuTimingBucket, number>;
+function makeZeroGpuTimingDetail(): Record<GpuTimingBucket, number> {
+  return Object.fromEntries(GPU_TIMING_BUCKETS.map(bucket => [bucket, 0])) as Record<GpuTimingBucket, number>;
+}
+let gpuTimingDetail: Record<GpuTimingBucket, number> = makeZeroGpuTimingDetail();
+let activeGpuTimingBuckets = new Set<GpuTimingBucket>();
+let gpuTimingFrameActive = false;
 let profilingPending = false;
 let lastProfileTime = 0;
 const PROFILE_INTERVAL_MS = 2000;
 
 // GPU timestamp query state (null if unsupported)
-const GPU_TS_COUNT = 6; // 3 pass pairs (begin/end): compute, render, composite
+const GPU_TS_COUNT = GPU_TIMING_BUCKETS.length * 2; // begin/end pair per bucket
 let gpuTs: { querySet: GPUQuerySet; resolveBuf: GPUBuffer; stagingBuf: GPUBuffer; pending: boolean } | null = null;
 
 function initGpuTimestamps() {
@@ -7478,13 +7562,37 @@ function initGpuTimestamps() {
   };
 }
 
-function tsWrites(slotPair: number): { querySet: GPUQuerySet; beginningOfPassWriteIndex: number; endOfPassWriteIndex: number } | undefined {
-  if (!gpuTs) return undefined;
+function beginGpuTimingFrame() {
+  activeGpuTimingBuckets = new Set<GpuTimingBucket>();
+  gpuTimingFrameActive = true;
+}
+
+type TimestampWrites = { querySet: GPUQuerySet; beginningOfPassWriteIndex?: number; endOfPassWriteIndex?: number };
+
+function tsWrites(bucket: GpuTimingBucket): TimestampWrites | undefined {
+  if (!gpuTs || !gpuTimingFrameActive) return undefined;
+  activeGpuTimingBuckets.add(bucket);
+  const slotPair = GPU_TIMING_INDEX[bucket];
   return { querySet: gpuTs.querySet, beginningOfPassWriteIndex: slotPair * 2, endOfPassWriteIndex: slotPair * 2 + 1 };
 }
 
+function tsBegin(bucket: GpuTimingBucket): TimestampWrites | undefined {
+  if (!gpuTs || !gpuTimingFrameActive) return undefined;
+  activeGpuTimingBuckets.add(bucket);
+  return { querySet: gpuTs.querySet, beginningOfPassWriteIndex: GPU_TIMING_INDEX[bucket] * 2 };
+}
+
+function tsEnd(bucket: GpuTimingBucket): TimestampWrites | undefined {
+  if (!gpuTs || !gpuTimingFrameActive) return undefined;
+  activeGpuTimingBuckets.add(bucket);
+  return { querySet: gpuTs.querySet, endOfPassWriteIndex: GPU_TIMING_INDEX[bucket] * 2 + 1 };
+}
+
 function resolveTimestamps(encoder: GPUCommandEncoder, now: number) {
+  gpuTimingFrameActive = false;
   if (!gpuTs || gpuTs.pending || now - lastProfileTime < PROFILE_INTERVAL_MS) return;
+  const activeBuckets = Array.from(activeGpuTimingBuckets);
+  if (activeBuckets.length === 0) return;
   lastProfileTime = now;
   encoder.resolveQuerySet(gpuTs.querySet, 0, GPU_TS_COUNT, gpuTs.resolveBuf, 0);
   encoder.copyBufferToBuffer(gpuTs.resolveBuf, 0, gpuTs.stagingBuf, 0, GPU_TS_COUNT * 8);
@@ -7497,13 +7605,20 @@ function resolveTimestamps(encoder: GPUCommandEncoder, now: number) {
       const ns = new BigUint64Array(ts.stagingBuf.getMappedRange().slice(0));
       ts.stagingBuf.unmap();
       ts.pending = false;
-      const toMs = (a: bigint, b: bigint) => Number(b - a) / 1_000_000;
-      gpuTimingDetail = {
-        compute: toMs(ns[0], ns[1]),
-        render: toMs(ns[2], ns[3]),
-        post: toMs(ns[4], ns[5]),
-      };
-      gpuFrameMs = toMs(ns[0], ns[5]);
+      const toMs = (a: bigint, b: bigint) => b > a ? Number(b - a) / 1_000_000 : 0;
+      const detail = makeZeroGpuTimingDetail();
+      let first = 0n;
+      let last = 0n;
+      for (const bucket of activeBuckets) {
+        const idx = GPU_TIMING_INDEX[bucket] * 2;
+        const begin = ns[idx];
+        const end = ns[idx + 1];
+        detail[bucket] = toMs(begin, end);
+        if (begin > 0n && (first === 0n || begin < first)) first = begin;
+        if (end > last) last = end;
+      }
+      gpuTimingDetail = detail;
+      gpuFrameMs = first > 0n && last > first ? Number(last - first) / 1_000_000 : 0;
     }).catch(() => { ts.pending = false; });
   });
 }
@@ -7605,8 +7720,9 @@ function resetCurrentSim() {
 function updateStats() {
   const msPerFrame = currentFps > 0 ? (1000 / currentFps).toFixed(1) : '--';
   const d = gpuTimingDetail;
-  const gpuDetail = d.compute > 0
-    ? ` (C:${d.compute.toFixed(1)} R:${d.render.toFixed(1)} P:${d.post.toFixed(1)})`
+  const hasDetailedTiming = GPU_TIMING_BUCKETS.some(bucket => d[bucket] > 0);
+  const gpuDetail = hasDetailedTiming
+    ? ` (PM:${d.pmDepositConvert.toFixed(1)} V:${(d.outerVCycle + d.innerVCycle).toFixed(1)} R:${(d.starsRender + d.gasRender).toFixed(1)} P:${d.bloomComposite.toFixed(1)})`
     : gpuFrameMs > 0 ? ` gpu:${gpuFrameMs.toFixed(1)}ms` : '';
   document.getElementById('stat-fps')!.textContent = `${currentFps} fps ${msPerFrame}ms${gpuDetail}`;
   const sim = simulations[state.mode];
@@ -7663,7 +7779,7 @@ function runFadePass(encoder: GPUCommandEncoder, prevSceneIdx: number, currScene
   pass.end();
 }
 
-function runBloomChain(encoder: GPUCommandEncoder) {
+function runBloomChain(encoder: GPUCommandEncoder, timingBucket?: GpuTimingBucket) {
   const fx = state.fx;
   // Downsample chain: scene → mip0 → mip1 → ... → mipN
   const sceneIdx = postFx.sceneIdx;
@@ -7676,12 +7792,16 @@ function runBloomChain(encoder: GPUCommandEncoder) {
     // [LAW:single-enforcer] downsampleBGs cache layout: [0]=mip0 reading scene[0], [1]=mip0 reading scene[1],
     // [2..BLOOM_LEVELS]=mipK reading mipK-1. Keyed from (sceneIdx, i) here.
     const bg = postFx.downsampleBGs[i === 0 ? sceneIdx : i + 1];
-    const pass = encoder.beginRenderPass({ colorAttachments: [{
-      view: postFx.bloomMipViews[i],
-      clearValue: { r: 0, g: 0, b: 0, a: 1 },
-      loadOp: 'clear',
-      storeOp: 'store',
-    }]});
+    const bTsw = timingBucket && i === 0 ? tsBegin(timingBucket) : undefined;
+    const pass = encoder.beginRenderPass({
+      colorAttachments: [{
+        view: postFx.bloomMipViews[i],
+        clearValue: { r: 0, g: 0, b: 0, a: 1 },
+        loadOp: 'clear',
+        storeOp: 'store',
+      }],
+      ...(bTsw ? { timestampWrites: bTsw } : {}),
+    });
     pass.setPipeline(postFx.downsamplePipeline!);
     pass.setBindGroup(0, bg);
     pass.draw(3);
@@ -7707,7 +7827,13 @@ function runBloomChain(encoder: GPUCommandEncoder) {
   }
 }
 
-function runComposite(encoder: GPUCommandEncoder, finalView: GPUTextureView, finalFormat: GPUTextureFormat, viewport: number[] | null = null) {
+function runComposite(
+  encoder: GPUCommandEncoder,
+  finalView: GPUTextureView,
+  finalFormat: GPUTextureFormat,
+  viewport: number[] | null = null,
+  timingBucket?: GpuTimingBucket
+) {
   const fx = state.fx;
   const tc = getThemeColors();
   const buf = postFx.compositeParams;
@@ -7726,7 +7852,7 @@ function runComposite(encoder: GPUCommandEncoder, finalView: GPUTextureView, fin
   const pipeline = ensureCompositePipeline(finalFormat);
   // [LAW:single-enforcer] compositeBGs cache is indexed by scene ping-pong slot; allocate-on-resize, reuse-per-frame.
   const bg = postFx.compositeBGs[postFx.sceneIdx];
-  const pTsw = tsWrites(2);
+  const pTsw = timingBucket ? tsEnd(timingBucket) : undefined;
   const pass = encoder.beginRenderPass({
     colorAttachments: [{
       view: finalView,
@@ -7786,6 +7912,7 @@ function frame(now: DOMHighResTimeStamp) {
   const mode = state.mode;
 
   try {
+    beginGpuTimingFrame();
     const encoder = device.createCommandEncoder();
 
     // Debug stepping/skipping and normal play both funnel through runDebugCompute so the
@@ -7801,9 +7928,9 @@ function frame(now: DOMHighResTimeStamp) {
 
     sim.render(encoder, postFx.sceneViews[currIdx], null);
 
-    runBloomChain(encoder);
+    runBloomChain(encoder, 'bloomComposite');
     const swapchainView = context.getCurrentTexture().createView();
-    runComposite(encoder, swapchainView, canvasFormat);
+    runComposite(encoder, swapchainView, canvasFormat, null, 'bloomComposite');
 
     resolveTimestamps(encoder, now);
     device.queue.submit([encoder.finish()]);
