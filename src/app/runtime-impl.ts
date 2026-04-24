@@ -22,6 +22,7 @@ import { createFluidSimulation as createFluidSimulationModule } from '../simulat
 import { createParametricSimulation as createParametricSimulationModule } from '../simulations/parametric';
 import { createPhysicsDiagnostics } from '../simulations/physics/diagnostics';
 import { createPhysicsInitialConditions } from '../simulations/physics/initial-conditions';
+import { createPhysicsRenderOverlays } from '../simulations/physics/markers';
 import { createPhysicsClassicSimulation as createPhysicsClassicSimulationModule } from '../simulations/physics-classic';
 import { isPhysicsSimulation, type PhysicsSimulation } from '../simulations/types';
 import { runPmVCycle } from '../simulations/physics-vcycle';
@@ -37,7 +38,6 @@ import SHADER_BOIDS_RENDER from '../shaders/boids.render.wgsl?raw';
 import SHADER_NBODY_COMPUTE from '../shaders/nbody.compute.wgsl?raw';
 import SHADER_NBODY_STATS from '../shaders/nbody.stats.wgsl?raw';
 import SHADER_NBODY_RENDER from '../shaders/nbody.render.wgsl?raw';
-import SHADER_MARKERS_RENDER from '../shaders/markers.render.wgsl?raw';
 import SHADER_NBODY_CLASSIC_COMPUTE from '../shaders/nbody.classic.compute.wgsl?raw';
 import SHADER_PM_DEPOSIT from '../shaders/pm.deposit.wgsl?raw';
 import SHADER_PM_DENSITY_CONVERT from '../shaders/pm.density_convert.wgsl?raw';
@@ -2085,13 +2085,20 @@ function createPhysicsSimulation() {
     ]}),
   ];
 
-  // [LAW:one-source-of-truth] Render-side attractor field for particle HDR boost + marker rendering.
-  // 16-byte header (count u32 + pad) + 32 × 16-byte FieldAttractor = 528 bytes. Packed each render
-  // with log-normalized strength so the shader just does a linear gaussian sum.
-  const attractorFieldBuffer = device.createBuffer({ size: 528, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-  const attractorFieldData = new ArrayBuffer(528);
-  const attractorFieldF32 = new Float32Array(attractorFieldData);
-  const attractorFieldU32 = new Uint32Array(attractorFieldData);
+  const physicsRenderOverlays = createPhysicsRenderOverlays({
+    attractorMax: ATTRACTOR_MAX,
+    cameraBuffer,
+    cameraSize: CAMERA_SIZE,
+    cameraStride: CAMERA_STRIDE,
+    createShaderModuleChecked,
+    device,
+    getAttractorStrength: attractorStrength,
+    getSimStep: () => simStep,
+    markersPerAttractor: MARKERS_PER_ATTRACTOR,
+    renderSampleCount,
+    renderTargetFormat,
+    state,
+  });
 
   // renderBGs[viewIndex][pingPong]
   const renderBGs: GPUBindGroup[][] = [0, 1].map(vi =>
@@ -2099,79 +2106,9 @@ function createPhysicsSimulation() {
       { binding: 0, resource: { buffer: buf } },
       { binding: 1, resource: { buffer: cameraBuffer, offset: vi * CAMERA_STRIDE, size: CAMERA_SIZE } },
       { binding: 2, resource: { buffer: blurBuffer } },
-      { binding: 3, resource: { buffer: attractorFieldBuffer } },
+      { binding: 3, resource: { buffer: physicsRenderOverlays.attractorFieldBuffer } },
     ]}))
   );
-
-  // ── MARKER PARTICLES: rendered into the HDR scene so bloom carries them ──
-  // [LAW:one-source-of-truth] Per-marker payload is 32 bytes: pos(12) + strength(4) + tint(12) + seed(4).
-  // Pool is sized to the hard cap (32 attractors × 36 markers) and re-uploaded each frame from state.markers.
-  const MARKER_POOL = ATTRACTOR_MAX * MARKERS_PER_ATTRACTOR;
-  const MARKER_STRIDE = 32;
-  const markerBuffer = device.createBuffer({ size: MARKER_POOL * MARKER_STRIDE, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
-  const markerData = new Float32Array(MARKER_POOL * 8);
-
-  const markerModule = createShaderModuleChecked('markers.render', SHADER_MARKERS_RENDER);
-  const markerBGL = device.createBindGroupLayout({
-    entries: [
-      { binding: 0, visibility: GPUShaderStage.VERTEX, buffer: { type: 'read-only-storage' } },
-      { binding: 1, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
-    ]
-  });
-  const markerPipeline = device.createRenderPipeline({
-    layout: device.createPipelineLayout({ bindGroupLayouts: [markerBGL] }),
-    vertex: { module: markerModule, entryPoint: 'vs_main' },
-    fragment: {
-      module: markerModule, entryPoint: 'fs_main',
-      targets: [{
-        format: renderTargetFormat,
-        blend: {
-          color: { srcFactor: 'src-alpha', dstFactor: 'one', operation: 'add' },
-          alpha: { srcFactor: 'one', dstFactor: 'one', operation: 'add' },
-        }
-      }]
-    },
-    primitive: { topology: 'triangle-list' },
-    depthStencil: { format: 'depth24plus', depthWriteEnabled: false, depthCompare: 'always' },
-    multisample: { count: renderSampleCount },
-  });
-  const markerBGs: GPUBindGroup[] = [0, 1].map(vi => device.createBindGroup({
-    layout: markerBGL, entries: [
-      { binding: 0, resource: { buffer: markerBuffer } },
-      { binding: 1, resource: { buffer: cameraBuffer, offset: vi * CAMERA_STRIDE, size: CAMERA_SIZE } },
-    ]
-  }));
-
-  function renderMarkers(pass: GPURenderPassEncoder, viewIndex: number) {
-    const markers = state.markers;
-    const n = Math.min(markers.length, MARKER_POOL);
-    if (n === 0) return;
-    // [LAW:one-source-of-truth] Parent strength drives marker brightness/size. Log-normalize against the
-    // current interaction ceiling so the visual curve matches the log slider.
-    const p = state.physics as { interactionStrength?: number };
-    const ceiling = p.interactionStrength ?? 1;
-    const step = simStep;
-    const invLogMax = 1 / Math.log(1 + Math.max(ceiling, 1));
-    for (let i = 0; i < n; i++) {
-      const m = markers[i];
-      const a = state.attractors[m.attractorIdx];
-      const s = a ? attractorStrength(a, step, ceiling) : 0;
-      const strengthNorm = Math.max(0, Math.min(1, Math.log(1 + s) * invLogMax));
-      const o = i * 8;
-      markerData[o] = m.x;
-      markerData[o + 1] = m.y;
-      markerData[o + 2] = m.z;
-      markerData[o + 3] = strengthNorm;
-      markerData[o + 4] = m.tintR;
-      markerData[o + 5] = m.tintG;
-      markerData[o + 6] = m.tintB;
-      markerData[o + 7] = m.seed;
-    }
-    device.queue.writeBuffer(markerBuffer, 0, markerData.buffer, 0, n * MARKER_STRIDE);
-    pass.setPipeline(markerPipeline);
-    pass.setBindGroup(0, markerBGs[viewIndex]);
-    pass.draw(6, n);
-  }
 
   // Diagnostic readback: sample particles from the GPU for analysis.
   const DIAG_SAMPLE = 2048;
@@ -2543,36 +2480,7 @@ function createPhysicsSimulation() {
       const aspect = viewport ? (viewport[2] / viewport[3]) : (canvas.width / canvas.height);
       device.queue.writeBuffer(cameraBuffer, viewIndex * CAMERA_STRIDE, getCameraUniformData(aspect));
 
-      // [LAW:one-source-of-truth] Pack render-side attractor field from the same lifecycle state the
-      // compute pass reads. Strength is log-normalized to [0,1] so the shader's gaussian sum is stable
-      // across the 0.1..100 interaction slider range.
-      {
-        const p = state.physics as { interactionStrength?: number };
-        const ceiling = p.interactionStrength ?? 1;
-        const step = simStep;
-        const attractors = state.attractors;
-        const n = Math.min(attractors.length, ATTRACTOR_MAX);
-        const invLogMax = 1 / Math.log(1 + Math.max(ceiling, 1));
-        attractorFieldU32[0] = n;
-        attractorFieldU32[1] = 0; attractorFieldU32[2] = 0; attractorFieldU32[3] = 0;
-        for (let i = 0; i < n; i++) {
-          const a = attractors[i];
-          const s = attractorStrength(a, step, ceiling);
-          const base = 4 + i * 4;
-          attractorFieldF32[base] = a.x;
-          attractorFieldF32[base + 1] = a.y;
-          attractorFieldF32[base + 2] = a.z;
-          attractorFieldF32[base + 3] = Math.max(0, Math.min(1, Math.log(1 + s) * invLogMax));
-        }
-        for (let i = n; i < ATTRACTOR_MAX; i++) {
-          const base = 4 + i * 4;
-          attractorFieldF32[base] = 0;
-          attractorFieldF32[base + 1] = 0;
-          attractorFieldF32[base + 2] = 0;
-          attractorFieldF32[base + 3] = 0;
-        }
-        device.queue.writeBuffer(attractorFieldBuffer, 0, attractorFieldData);
-      }
+      physicsRenderOverlays.syncAttractorField();
 
       const rTsw = tsWrites('starsRender');
       const pass = encoder.beginRenderPass({
@@ -2592,7 +2500,7 @@ function createPhysicsSimulation() {
       pass.setBindGroup(0, renderBGs[viewIndex][pingPong]);
       pass.draw(6, count);
 
-      renderMarkers(pass, viewIndex);
+      physicsRenderOverlays.renderMarkers(pass, viewIndex);
       pass.end();
 
       const gasVisible = state.physics.gasVisible;
@@ -2630,7 +2538,7 @@ function createPhysicsSimulation() {
       bufferA.destroy(); bufferB.destroy();
       gas.destroy();
       paramsBuffer.destroy(); cameraBuffer.destroy(); blurBuffer.destroy();
-      attractorFieldBuffer.destroy(); markerBuffer.destroy();
+      physicsRenderOverlays.destroy();
       statsOutBuffer.destroy(); statsStaging.destroy(); statsParamsBuffer.destroy();
       diagStaging.destroy();
       // PM scaffolding cleanup. Every buffer allocated in the PM block above
