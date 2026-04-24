@@ -99,13 +99,44 @@ The integration scheme per step (single GPU dispatch):
 
 **No velocity-dependent forces exist.** All dissipative forces (damping, friction, disk recovery) were removed and replaced with the dark matter potentials. The virial controller is removed — dark matter provides structural stability.
 
+### PM Solver (nested grids, full V-cycle per frame)
+
+N-body gravity is solved via Particle-Mesh multigrid on **two concentric grids**:
+
+- **Inner**: 128³ cells covering ±16 (cell size **0.25**). Resolves the central galaxy region with 4× the resolution of the old uniform ±64 grid. Uses **Dirichlet BC** seeded each frame from the outer potential (`pm.boundary_sample.wgsl`).
+- **Outer**: 64³ cells covering the full periodic domain ±64 (cell size **2.0**). Handles long-range gravity and all mass outside the inner domain. Uses periodic BC (3-torus).
+
+Both grids run one **complete** V-cycle per frame — descent, coarsest-level over-smooth, ascent — producing fully-solved `pmPotential[0]` buffers that the interpolate pass reads as-is. No phase-split, no double-buffering, no half-solved state visible to consumers.
+
+**Per-frame ordering:**
+1. Outer deposit + V-cycle → fully-solved `pmOuterPotential[0]` (periodic BC).
+2. `pm.boundary_sample` → writes outer φ values into the inner grid's level-0 face cells (6 faces, via a 3D dispatch masked by the face-cell predicate). This is the sole bridge between the two grids during the inner solve. [LAW:single-enforcer]
+3. Inner deposit + V-cycle → reads face cells as Dirichlet BC (smoother / residual / prolong freeze face cells via a `dirichletBoundary` flag in their per-level uniforms). Interior cells solve `∇²φ = 4πGρ_inner` with the outer potential clamping the faces.
+
+The V-cycle is dispatched by the module-scope `runPmVCycle` helper (`src/main.ts`). It is called twice per frame, once per grid, with the relevant buffer bundle:
+
+1. **Clear levels 1..maxLevel.** Level 0 keeps the previous frame's potential as a warm-start. Density evolves slowly, so last frame's solution is a near-converged initial guess and one V-cycle per frame suffices for sub-1% residual.
+2. **Descent** (`l = 0..maxLevel-1`): `PM_SMOOTH_PRE` red-black GS sweeps → residual → restrict residual to level `l+1` as RHS.
+3. **Coarsest level** (`l = maxLevel`): over-smooth with `PM_COARSEST_SWEEPS` = 16 red-black GS sweeps (cheap — level is 4³).
+4. **Ascent** (`l = maxLevel-1..0`): prolong correction from level `l+1`, add into level `l`'s potential, then `PM_SMOOTH_POST` red-black GS sweeps.
+
+With `PM_SMOOTH_PRE = PM_SMOOTH_POST = 1`, per-frame smoother work is 1+1 sweeps per level. On M2, the inner 128³ V-cycle fits under ~3.5 ms; the outer 64³ V-cycle adds ~0.6 ms; total PM work ~1.15× the old single-grid cost — well under the 11 ms Vision Pro budget.
+
+**Deposit** (`pm.deposit.wgsl`): CIC scatter with a domain filter — particles outside ±domainHalf skip deposition so they don't wrap-pollute the inner grid via the periodic cell-index wrap. For the outer grid (domainHalf = 64 = periodic-wrap radius), the filter never triggers.
+
+**Interpolate** (`pm.interpolate_nested.wgsl`): for each particle, sample force from **both** potentials via the CIC transpose kernel, then `mix(innerAcc, outerAcc, t)` where `t = smoothstep(PM_DOMAIN_HALF-2, PM_DOMAIN_HALF, max(|x|,|y|,|z|))` — 0 inside ±14 (pure inner), 1 beyond ±16 (pure outer), C¹ blend in between. [LAW:dataflow-not-control-flow] Always sample both; the blend weight decides which contribution survives — no branch, no seam.
+
+**Boundary-sample shader** (`pm.boundary_sample.wgsl`): runs once per frame between the outer and inner V-cycles. Dispatches over the full 128³ inner grid; every thread trilinearly samples `outerPhi[0]` at its cell's world-space center, then `select` writes the sampled value at face cells and keeps the warm-start value at interior cells. The approximation is that the outer potential includes mass *inside* ±16 as well as outside, so the BC slightly over-states the "external-only" gravitational potential — acceptable for this simulation because >90% of mass lives inside the inner domain anyway, and the nested interpolate's smoothstep blend shell absorbs residual mismatch at the faces.
+
+Diagnostics: `__pmMaxResidual()` returns `{ inner, outer }`. `__pmDumpDensity()` / `__pmDumpPotential()` dump the inner grid; `__pmDumpOuterDensity()` / `__pmDumpOuterPotential()` dump the outer. `__pmReversibilityTest(1000)` should hold maxErr < 0.01 world units.
+
 ### Simulation Clock
 
 `simStep` is the canonical step index of the simulation state currently in the particle buffer. It advances by `timeDirection` each compute dispatch — forward (`+1` after journal write) or reverse (`−1` at the top of `compute()` before param packing). Tidal angle = `simStep × dt × 0.15`. Attractor timing uses `simStep × dt`. No `performance.now()` in the simulation path — fully deterministic.
 
 **Decrement timing matters:** in reverse mode, `simStep` is decremented at the very start of `compute()` so that every downstream consumer (tidal angle, journal lookup, `nowSec`) uses the same step index — specifically, the step whose params were packed during the original forward step that produced the current state. Without this ordering, reverse params would mix values from step N and step N-1, breaking the `reverse(forward(s)) = s` invariant.
 
-### Body Struct (48 bytes)
+### Body Struct (48 bytes — shared by stars and gas)
 
 | Field | Type | Purpose |
 |-------|------|---------|
@@ -115,6 +146,8 @@ The integration scheme per step (single GPU dispatch):
 | `_pad` | f32 | Alignment |
 | `_unused` | vec3f | Available (was `home` for disk recovery springs) |
 | `_pad2` | f32 | Alignment |
+
+Gas particles in `src/gasReservoir.ts` use this identical layout so `pm.deposit.wgsl` and `pm.interpolate_nested.wgsl` consume either population without per-species adapters — the same shader is dispatched against the star buffer and the gas buffer with different bind groups.
 
 ### Params Uniform (608 bytes)
 
@@ -242,8 +275,68 @@ HDR scene → bloom (downsample/upsample chain) → composite with tone mapping,
 
 ---
 
-## Future: Phase 3 — Gas Grid (Conservative Structure Recovery)
+## Gas Reservoir (Cooling via Gravitational Wake + Visible Nebula)
 
-Planned: Eulerian gas physics on a 256×256×32 anisotropic grid coupled to the N-body particles. Gas provides "friction" that forms disks through conservative momentum exchange — fully reversible. See `.claude/plans/cosmic-soaring-squirrel.md` for the full design.
+A volumetric gas reservoir lives alongside the stars on the same periodic torus. It is the **kinetic-energy sink** that lets a hot/diffuse cloud be re-cooled into a settled disc: stars dragging gas into gravitational wakes lose orbital energy to the wake, which then disperses across many gas DOFs as bulk motion + isothermal compressive energy. All forces are position-only — gas reversibility is on the same DKD footing as stars.
 
-Key elements: isothermal Euler equations (no viscosity), sort-and-bin spatial hashing for particle↔grid coupling, fixed-point atomic CIC deposition, semi-Lagrangian advection, and P³M gravity as an optional optimization.
+Owned entirely by `src/gasReservoir.ts`. `main.ts` only dispatches the subsystem at the existing PM seams; no gas state is held in `main.ts`.
+
+### Architectural Choice: Particles + Grid Pressure
+
+Gas is **Lagrangian particles** (fixed mass, evolving pos/vel under DKD), but pressure is computed via a **grid-stored scalar potential**, not via SPH kernel sums. The crucial math: for isothermal gas with `P = c_s² ρ`, pressure force per unit mass simplifies to
+
+```
+F_pressure = -∇P/ρ = -c_s² ∇(ln ρ) = -∇χ        where χ = c_s² · ln(ρ_gas)
+```
+
+— a position-only scalar potential, structurally identical to gravity Φ. Gas particles feel `-∇χ` interpolated via CIC, exactly like they feel `-∇Φ`. This buys O(N_gas) scaling per frame: no neighbor search, no hash, no sort. The same PM deposit and nested interpolate shaders are reused for the gravity coupling; gas pressure adds one new grid (gas-only density), one new χ pass, and one new force-interpolate pass.
+
+### Coupling Channels (exactly two)
+
+1. **Gravity (bidirectional, single channel).** Gas mass deposits into both PM density grids (inner ±16 and outer ±64) alongside stars (`gas.depositInnerPm`, `gas.depositOuterPm` — both reuse `pm.deposit.wgsl` with different bind groups). Stars feel gas gravity automatically through the nested interpolate. Gas particles separately read the same nested PM force via `gas.interpolateForces` (which dispatches the existing `pm.interpolate_nested` pipeline against the gas body buffer).
+2. **Pressure (gas-only).** Gas particles deposit into a separate 128³ gas-only density grid spanning ±64 (cell size 1.0); `gas.chi.wgsl` computes `χ = c_s² · ln(max(ρ_gas, ρ_floor) / ρ_ref)` pointwise; `gas.pressure_interpolate.wgsl` samples `-∇χ` via CIC. Stars do **not** feel χ — pressure is a fluid property of gas alone.
+
+`ρ_ref = totalGasMass / cellCount` and `ρ_floor = ρ_ref × 1e-6` are set at gas-init time and never change. Both are pure functions of the deterministic initial state, so reversibility is unaffected. The floor regularizes `ln` at empty cells; gradient is zero there.
+
+### Reservoir Hamiltonian
+
+```
+H_gas_kinetic   = Σᵢ ½ m_g |vᵢ|²
+H_gas_internal  = Σᵢ m_g · c_s² · ln(ρᵢ / ρ_ref)        ← the cooling sink
+H_gravity(all)  = existing PM coupling, now reflects gas mass
+```
+
+`H_gas_internal` is the compressive energy of isothermal gas; it rises when wakes form (local ρ > ρ_ref) and disperses across many cells via pressure waves traveling at `c_s`. `Δ(starKinetic) + Δ(gasKinetic + gasInternal)` should sum to ~0 within solver noise, and the cooling signature is `Δ(starKinetic) < 0` while `Δ(gasInternal) > 0` over a relaxation phase.
+
+### Per-Frame Pipeline
+
+In `compute()`, after star param packing and PM density clears:
+
+1. `gas.clear(encoder)` — clears gas-only density grid.
+2. **Inner deposit pass:** stars (`pmDepositPipeline` w/ `pmDepositBG`), then `gas.depositInnerPm`, then density convert (mean-zero RHS).
+3. **Outer deposit pass:** stars (`pmDepositPipeline` w/ `pmOuterDepositBG`), then `gas.depositOuterPm`, then outer density convert.
+4. `gas.depositGasAndBuildPressure` — gas-only CIC deposit + χ pass. Both dispatches share one compute pass; WebGPU's implicit dispatch-to-dispatch barrier serializes deposit→χ correctly.
+5. **Outer V-cycle** → `pmOuterPotential[0]`.
+6. `pm.boundary_sample` → seeds inner Dirichlet BC from outer φ.
+7. **Inner V-cycle** → `pmPotential[0]` with Dirichlet faces.
+8. **Force interpolate pass:** `pm.interpolate_nested` against stars (writes `pmForce`), then `gas.interpolateForces` (writes gas `gravityForce` from the same nested interpolate, then `gas.pressure_interpolate.wgsl` writes `pressureForce` from χ).
+9. **Integrate pass:** `gas.integrate` (DKD over gas, periodic-wrapped; reads `gravityForce + pressureForce`), then `nbody.compute` (DKD over stars; reads `pmForce`).
+10. **Render** (later in frame): particle render, then `gas.render` (volumetric raymarch, additive blend, no depth write — guarded by `state.physics.gasVisible` via a uniform factor).
+
+### Sliders (physical, not arbitrary)
+
+- `gasMassFraction` (0.0..0.5, default 0.15) — total gas mass as a fraction of stellar mass. `requiresReset: true` (gas particle count and mass-per-particle are fixed at init).
+- `gasSoundSpeed` (0.5..5.0, default 2.0) — isothermal `c_s`. Higher → faster pressure-wave dispersal → faster cooling.
+- `gasVisible` (bool) — toggles the volumetric render pass output (uniform-gated; pass still dispatches).
+
+### Reversibility
+
+Gas uses the same DKD leapfrog as stars (`gas.compute.wgsl`). Forces are pure functions of current positions: `gravityForce` from nested interpolate of `Φ(ρ_total)`, `pressureForce` from interpolate of `χ(ρ_gas)`. Both grids' values reproduce exactly when positions reproduce, so flipping `dt` retraces every gas trajectory within the same atomic-deposit drift envelope as stars. `__gasReversibilityTest(1000)` should hold `maxPosErr < 0.01` world units.
+
+Diagnostics: `__gasDumpDensity`, `__gasEnergyBreakdown` (returns `{ starKinetic, gasKinetic, gasInternal, total }`), `__gasWakeProbe(starIdx)` (returns `{ aheadDensity, behindDensity, asymmetry }` around a given star — positive asymmetry confirms wake formation), `__gasReversibilityTest(n)`.
+
+### Costs (M2 estimates)
+
+- ~200k gas particles cap (`Math.min(200000, starCount × 2.5)`); 48-byte struct (shared with stars).
+- Memory: 19 MB (gas pingpong) + 8 MB (gas density f32) + 8 MB (χ) + small force buffers ≈ 36 MB on top of the ~50 MB PM footprint.
+- Compute: ~0.9 ms gas chain (deposits + χ + interpolates + integrate) + ~2 ms gas render stereo. Combined with PM (~3.5 ms inner + ~0.6 ms outer) and existing star compute/render, fits the 11 ms Vision Pro budget with knobs (`gasMassFraction`, render step count, gas resolution) for headroom.

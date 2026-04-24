@@ -31,6 +31,9 @@ export interface PhysicsParams {
   interactionStrength: number;
   tidalStrength: number;
   attractorDecayTime: number;   // seconds. Slider max is treated as "Permanent" (never decays).
+  gasMassFraction: number;      // gas mass as a fraction of current stellar mass
+  gasSoundSpeed: number;        // isothermal sound speed for χ = c_s² ln ρ
+  gasVisible: boolean;          // volumetric gas render toggle
   // Dark matter potential — conservative forces replacing dissipative disk recovery.
   haloMass: number;       // Plummer halo gravitational mass
   haloScale: number;      // Plummer halo softening radius

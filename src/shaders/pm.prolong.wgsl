@@ -7,7 +7,7 @@
 
 struct Params {
   fineGridRes: u32,   // coarseGridRes = fineGridRes / 2
-  _pad0: u32,
+  dirichletBoundary: u32,  // 0 = periodic (add correction everywhere), 1 = skip fine face cells
   _pad1: u32,
   _pad2: u32,
 }
@@ -54,5 +54,15 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
     + coarse[cidx(i0.x,     i0.y + 1, i0.z + 1, nC)] * g.x * frac.y * frac.z
     + coarse[cidx(i0.x + 1, i0.y + 1, i0.z + 1, nC)] * frac.x * frac.y * frac.z;
 
-  fine[gid.z * nF * nF + gid.y * nF + gid.x] = fine[gid.z * nF * nF + gid.y * nF + gid.x] + sum;
+  // [LAW:dataflow-not-control-flow] For Dirichlet BC, fine face cells must
+  // stay at their held value (BC at level 0, zero at coarser correction
+  // levels). Compute the new value then select old-vs-new by face mask.
+  let me = gid.z * nF * nF + gid.y * nF + gid.x;
+  let nm1 = nF - 1u;
+  let atBoundary = gid.x == 0u || gid.x == nm1
+                || gid.y == 0u || gid.y == nm1
+                || gid.z == 0u || gid.z == nm1;
+  let freeze = atBoundary && params.dirichletBoundary != 0u;
+  let oldFine = fine[me];
+  fine[me] = select(oldFine + sum, oldFine, freeze);
 }

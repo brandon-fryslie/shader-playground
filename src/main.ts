@@ -9,6 +9,7 @@ import {
 } from './xr-ui/step';
 import { createXrWidgetRenderer, type XrWidgetRenderer } from './xr-ui/renderer';
 import { HIG_DEFAULTS } from './xr-ui/widgets';
+import { createGasReservoir, GAS_SHADER_SOURCES } from './gasReservoir';
 
 // WGSL shader imports — Vite loads these as raw strings
 import SHADER_BOIDS_COMPUTE from './shaders/boids.compute.wgsl?raw';
@@ -25,6 +26,8 @@ import SHADER_PM_RESIDUAL from './shaders/pm.residual.wgsl?raw';
 import SHADER_PM_RESTRICT from './shaders/pm.restrict.wgsl?raw';
 import SHADER_PM_PROLONG from './shaders/pm.prolong.wgsl?raw';
 import SHADER_PM_INTERPOLATE from './shaders/pm.interpolate.wgsl?raw';
+import SHADER_PM_INTERPOLATE_NESTED from './shaders/pm.interpolate_nested.wgsl?raw';
+import SHADER_PM_BOUNDARY_SAMPLE from './shaders/pm.boundary_sample.wgsl?raw';
 import SHADER_NBODY_CLASSIC_RENDER from './shaders/nbody.classic.render.wgsl?raw';
 import SHADER_FLUID_FORCES_ADVECT from './shaders/fluid.forces.wgsl?raw';
 import SHADER_FLUID_DIFFUSE from './shaders/fluid.diffuse.wgsl?raw';
@@ -167,6 +170,7 @@ const DEFAULTS: ModeParamsMap = {
     count: 80000, G: 0.3, softening: 1.5, distribution: 'disk',
     interactionStrength: 1.0, tidalStrength: 0.008,
     attractorDecayTime: 2.0,
+    gasMassFraction: 0.15, gasSoundSpeed: 2.0, gasVisible: true,
     haloMass: 5.0, haloScale: 2.0, diskMass: 3.0, diskScaleA: 1.5, diskScaleB: 0.3,
   },
   physics_classic: {
@@ -195,7 +199,7 @@ const DEFAULTS: ModeParamsMap = {
   },
 };
 
-const PRESETS: Record<SimMode, Record<string, Record<string, number | string>>> = {
+const PRESETS: Record<SimMode, Record<string, Record<string, number | string | boolean>>> = {
   boids: {
     'Default':     { ...DEFAULTS.boids },
     'Tight Flock': { count: 3000, separationRadius: 10, alignmentRadius: 30, cohesionRadius: 80, maxSpeed: 3.0, maxForce: 0.08, visualRange: 60 },
@@ -274,6 +278,11 @@ const PARAM_DEFS: Record<SimMode, ParamSection[]> = {
       { key: 'interactionStrength', label: 'Interaction Pull', min: 0.1, max: 100, step: 0.01, logScale: true },
       { key: 'attractorDecayTime', label: 'Decay Time (s)', min: 0.1, max: 30.0, step: 0.1, maxLabel: 'Permanent' },
       { key: 'tidalStrength', label: 'Tidal Field', min: 0.0, max: 0.05, step: 0.0005 },
+    ]},
+    { section: 'Gas Reservoir', params: [
+      { key: 'gasMassFraction', label: 'Gas Mass', min: 0.0, max: 0.5, step: 0.01, requiresReset: true },
+      { key: 'gasSoundSpeed', label: 'Sound Speed', min: 0.5, max: 5.0, step: 0.05 },
+      { key: 'gasVisible', label: 'Gas Visible', type: 'toggle' },
     ]},
     { section: 'Initial State', params: [
       { key: 'distribution', label: 'Distribution', type: 'dropdown', options: ['random', 'disk', 'shell'] },
@@ -442,8 +451,8 @@ function startThemeTransition(themeName: string, now = performance.now()): void 
 }
 
 // Dynamic access to mode-specific params — casts for TypeScript's correlated types limitation
-function modeParams(mode: SimMode): Record<string, number | string> {
-  return state[mode] as unknown as Record<string, number | string>;
+function modeParams(mode: SimMode): Record<string, number | string | boolean> {
+  return state[mode] as unknown as Record<string, number | string | boolean>;
 }
 
 const state: AppState = {
@@ -853,6 +862,10 @@ type PostFxState = {
   scene: GPUTexture[];     // ping-pong [0,1]
   sceneIdx: number;
   depth: GPUTexture | null;
+  nullColor: GPUTexture | null;
+  nullDepth: GPUTexture | null;
+  nullColorView: GPUTextureView | null;
+  nullDepthView: GPUTextureView | null;
   bloomMips: GPUTexture[]; // 5 mips, halved each level
   width: number;
   height: number;
@@ -893,6 +906,10 @@ const postFx: PostFxState = {
   scene: [],
   sceneIdx: 0,
   depth: null,
+  nullColor: null,
+  nullDepth: null,
+  nullColorView: null,
+  nullDepthView: null,
   bloomMips: [],
   width: 0,
   height: 0,
@@ -926,6 +943,22 @@ const HDR_FORMAT: GPUTextureFormat = 'rgba16float';
 const BLOOM_LEVELS = 3; // 5 mips made the largest blur radius half-screen, fusing dense clusters into a giant white blob.
 
 function initPostFx(): void {
+  // [LAW:dataflow-not-control-flow] Hidden optional render layers still encode
+  // their pass; the data-selected null attachments keep that pass from loading
+  // the full scene when the layer has no visible output.
+  postFx.nullColor = device.createTexture({
+    size: [1, 1],
+    format: HDR_FORMAT,
+    usage: GPUTextureUsage.RENDER_ATTACHMENT,
+  });
+  postFx.nullDepth = device.createTexture({
+    size: [1, 1],
+    format: 'depth24plus',
+    usage: GPUTextureUsage.RENDER_ATTACHMENT,
+  });
+  postFx.nullColorView = postFx.nullColor.createView();
+  postFx.nullDepthView = postFx.nullDepth.createView();
+
   postFx.linSampler = device.createSampler({
     magFilter: 'linear', minFilter: 'linear',
     addressModeU: 'clamp-to-edge', addressModeV: 'clamp-to-edge',
@@ -1369,6 +1402,8 @@ function createBoidsSimulation() {
 
   const computeBGL = device.createBindGroupLayout({
     entries: [
+      // [LAW:one-source-of-truth] Buffer access mirrors boids.compute.wgsl:
+      // particlesIn is read-only and particlesOut is the sole write target.
       { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
       { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
       { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
@@ -1488,9 +1523,100 @@ function createBoidsSimulation() {
 
 // --- 5b: N-BODY PHYSICS ---
 
+// [LAW:single-enforcer] Canonical multigrid V-cycle dispatcher used by every
+// PM grid (inner, outer, future gas-coupled grid). Encapsulates the full
+// descent → coarsest → ascent shape:
+//   1. Clear coarse-level potentials (levels 1..maxLevel). Level 0 keeps
+//      previous-frame warm-start so the solver converges in 1 cycle.
+//   2. Descent (l = 0..maxLevel-1): pre-smooth, residual, restrict.
+//   3. Coarsest level (l = maxLevel): over-smooth toward exact solve.
+//   4. Ascent (l = maxLevel-1..0): prolong correction + post-smooth.
+//
+// Opens its own compute pass (WebGPU implicit-barrier boundary). The clear
+// ops MUST run outside any compute pass, which is why the clears live in
+// this helper rather than the caller.
+interface PmVCycleArgs {
+  levels: number;              // total multigrid levels (e.g. 6 → levels 0..5)
+  wgCount: number[];           // workgroup count per level (@workgroup_size(4,4,4))
+  potential: GPUBuffer[];      // phi[0..levels-1]
+  smoothBG: GPUBindGroup[][];  // smoothBG[level][parity]  (parity: 0=red, 1=black)
+  residualBG: GPUBindGroup[];  // residualBG[level]
+  restrictBG: GPUBindGroup[];  // restrictBG[level] = transition level → level+1
+  prolongBG: GPUBindGroup[];   // prolongBG[level]  = transition level+1 → level
+  preSmooth: number;           // red-black GS sweeps before restriction (per level)
+  postSmooth: number;          // red-black GS sweeps after prolongation (per level)
+  coarsestSweeps: number;      // red-black GS sweeps on the coarsest level
+  timingBucket?: GpuTimingBucket;
+}
+
+function runPmVCycle(encoder: GPUCommandEncoder, a: PmVCycleArgs): void {
+  const maxLevel = a.levels - 1;
+
+  // Clear coarse-level corrections. Level 0 is NOT cleared — its residual
+  // warm-start is the whole reason one V-cycle suffices each frame.
+  for (let l = 1; l < a.levels; l++) encoder.clearBuffer(a.potential[l]);
+
+  // [LAW:dataflow-not-control-flow] Every level runs the same operations
+  // every cycle; only the per-level bind group and workgroup count vary.
+  // No phase check, no branch on simStep — the solver is a pure function of
+  // (density, previous phi[0]).
+  const vTsw = a.timingBucket ? tsWrites(a.timingBucket) : undefined;
+  const pass = encoder.beginComputePass(vTsw ? { timestampWrites: vTsw } : undefined);
+
+  // Descent: smooth + residual + restrict at each level down to maxLevel-1.
+  for (let l = 0; l < maxLevel; l++) {
+    const n = a.wgCount[l];
+    pass.setPipeline(pmSmoothPipeline);
+    for (let s = 0; s < a.preSmooth; s++) {
+      pass.setBindGroup(0, a.smoothBG[l][0]); pass.dispatchWorkgroups(n, n, n);
+      pass.setBindGroup(0, a.smoothBG[l][1]); pass.dispatchWorkgroups(n, n, n);
+    }
+    pass.setPipeline(pmResidualPipeline);
+    pass.setBindGroup(0, a.residualBG[l]); pass.dispatchWorkgroups(n, n, n);
+    pass.setPipeline(pmRestrictPipeline);
+    pass.setBindGroup(0, a.restrictBG[l]);
+    const nNext = a.wgCount[l + 1];
+    pass.dispatchWorkgroups(nNext, nNext, nNext);
+  }
+
+  // Coarsest level: over-smooth toward exact solve. Level is tiny (4³ for
+  // inner, 4³ for outer with 5 levels) so many sweeps are cheap.
+  {
+    const n = a.wgCount[maxLevel];
+    pass.setPipeline(pmSmoothPipeline);
+    for (let s = 0; s < a.coarsestSweeps; s++) {
+      pass.setBindGroup(0, a.smoothBG[maxLevel][0]); pass.dispatchWorkgroups(n, n, n);
+      pass.setBindGroup(0, a.smoothBG[maxLevel][1]); pass.dispatchWorkgroups(n, n, n);
+    }
+  }
+
+  // Ascent: prolong correction up one level + post-smooth.
+  for (let l = maxLevel - 1; l >= 0; l--) {
+    const n = a.wgCount[l];
+    pass.setPipeline(pmProlongPipeline);
+    pass.setBindGroup(0, a.prolongBG[l]); pass.dispatchWorkgroups(n, n, n);
+    pass.setPipeline(pmSmoothPipeline);
+    for (let s = 0; s < a.postSmooth; s++) {
+      pass.setBindGroup(0, a.smoothBG[l][0]); pass.dispatchWorkgroups(n, n, n);
+      pass.setBindGroup(0, a.smoothBG[l][1]); pass.dispatchWorkgroups(n, n, n);
+    }
+  }
+
+  pass.end();
+}
+
+// Pipeline handles reused by runPmVCycle. Declared here so the helper can
+// reference them; populated once inside createPhysicsSimulation at init.
+// [LAW:one-source-of-truth] Single module-scope pipeline object per stage.
+let pmSmoothPipeline: GPUComputePipeline;
+let pmResidualPipeline: GPUComputePipeline;
+let pmRestrictPipeline: GPUComputePipeline;
+let pmProlongPipeline: GPUComputePipeline;
+
 function createPhysicsSimulation() {
   const count = state.physics.count;
   const bodyBytes = count * 48; // pos(12) + mass(4) + vel(12) + pad(4) + home(12) + pad(4) = 48
+  const gasMassFraction = Math.max(0, Math.min(0.5, state.physics.gasMassFraction ?? 0.15));
 
   // [LAW:one-source-of-truth] N-body orbit shaping constants live together so position thickness and velocity tilt stay in sync.
   const DISK_THICKNESS = 0.2;
@@ -1522,6 +1648,7 @@ function createPhysicsSimulation() {
   }
 
   const initData = new Float32Array(count * 12);
+  let totalStarMass = 0;
   const dist = state.physics.distribution;
   const orbitalNormal = normalize3([0.18, 1.0, -0.12]);
   const orbitalTangent = normalize3(cross3([0, 1, 0], orbitalNormal));
@@ -1753,13 +1880,21 @@ function createPhysicsSimulation() {
     initData[off + 8] = 0;
     initData[off + 9] = 0;
     initData[off + 10] = 0;
+    totalStarMass += mass;
   }
 
   // ── PM (Particle-Mesh) gravity ──────────────────────────────────────────────
   // Solver pipeline: CIC deposit → mean-subtract → V-cycle → CIC interpolate.
-  // [LAW:one-source-of-truth] PM_DOMAIN_HALF/SIZE must match DOMAIN_HALF/SIZE
-  // in nbody.compute.wgsl so the integrator's periodic wrap and the PM grid
-  // span the same volume.
+  //
+  // Nested-grid layout post-A4/A5/A6:
+  //   Inner grid (this block): 128³ over ±16, cell 0.25 — subdomain. Uses
+  //     Dirichlet BC seeded from the outer potential, NOT periodic wrap.
+  //   Outer grid (allocated further below): 64³ over ±64, cell 2.0 — 3-torus.
+  //     [LAW:one-source-of-truth] This outer grid is the one whose domain
+  //     must match nbody.compute.wgsl's DOMAIN_HALF=64 periodic wrap so the
+  //     integrator's positional domain and the PM periodic domain coincide.
+  // The inner grid is intentionally a subdomain used via nested force
+  // interpolation (pm.interpolate_nested.wgsl).
   //
   // Tuning (shader-physics-brr.7):
   //   PM_V_CYCLE_COUNT = 1
@@ -1788,33 +1923,39 @@ function createPhysicsSimulation() {
   // Verification: __pmReversibilityTest(1000) → maxErr < 0.01 world units.
   // Values much larger indicate a sampling mismatch (pos vs posHalf) or a
   // non-reversible operation slipped in somewhere.
-  const PM_GRID_RES = 128;                          // 128³ cells at level 0
-  const PM_DOMAIN_HALF = 64.0;                      // matches DOMAIN_HALF in nbody.compute.wgsl (sized to visual room)
-  const PM_DOMAIN_SIZE = PM_DOMAIN_HALF * 2;        // = 128.0
-  const PM_CELL_SIZE = PM_DOMAIN_SIZE / PM_GRID_RES; // = 1.0 world units per cell
+  const PM_GRID_RES = 128;                          // 128³ cells at level 0 (inner grid)
+  // Inner grid covers the central ±16 region at cell size 0.25 — 4× sharper
+  // than the ±64 uniform grid it replaces, enough to resolve the ~3–5 world-
+  // unit initial cloud in 24–40 cells. The outer grid (allocated below at
+  // ±64, cell 2.0) handles long-range gravity for particles outside the
+  // inner domain. pm.interpolate_nested smoothstep-blends force across the
+  // ±14..±16 transition shell so there is no seam.
+  const PM_DOMAIN_HALF = 16.0;
+  const PM_DOMAIN_SIZE = PM_DOMAIN_HALF * 2;        // = 32.0
+  const PM_CELL_SIZE = PM_DOMAIN_SIZE / PM_GRID_RES; // = 0.25 world units per cell
   const PM_FIXED_POINT_SCALE = 65536;               // 2^16 — u32 atomic mass accumulation
   const PM_MULTIGRID_LEVELS = 6;                    // 128³, 64³, 32³, 16³, 8³, 4³
   const PM_V_CYCLE_COUNT = 1;                       // V-cycles per Poisson solve (warm-started; see header)
-  const PM_SMOOTH_PRE = 2;                          // red-black GS passes before restriction
-  const PM_SMOOTH_POST = 2;                         // red-black GS passes after prolongation
-  // V-cycle phase split: half the work runs each frame to keep frame time
-  // even (vs. doing the full cycle every Nth frame, which produces a heavy/
-  // light alternation that misses the 90 Hz Vision Pro budget on heavy
-  // frames). One full V-cycle spans 2 simSteps:
-  //   simStep & 1 == 0 → DESCENT   (pre-smooth + residual + restrict, l=0..4)
-  //   simStep & 1 == 1 → ASCENT    (coarsest sweeps + prolong + post-smooth)
-  // Intermediate state (pmRhs[1..5], pmPotential[1..5]) naturally persists
-  // across the two halves in dedicated per-level buffers — no extra plumbing.
-  // Descent and ascent each touch ~8M level-0 cells/frame (4 smooth sweeps
-  // each side), so per-frame GPU load is ~50% of the un-split V-cycle and
-  // worst-case frame time is matched to average. Trade-off: pmPotential[0]
-  // is fully resolved only on odd simSteps; even simSteps see a partially
-  // descended (warm-start + pre-smooth) field. The interpolate pass reads it
-  // every frame — both halves are monotonically improving, so the lag is
-  // visually imperceptible. Reversibility caveat (see __pmReversibilityTest):
-  // intermediate buffers are history-dependent, so fwd/rev paths leave them
-  // in slightly different states at the same simStep; maxErr is larger than
-  // V=1 alone. Acceptable while debugging perf; revisit if rewinds drift.
+  // Reduced from 2→1 per sweep when we collapsed the phase-split V-cycle
+  // (see compute() below). Each frame now runs ONE complete V-cycle instead
+  // of half across two frames. With warm-start from the previous frame's
+  // phi (density evolves slowly, so prior solution is a good initial guess),
+  // 1 pre + 1 post smooth per level delivers ~1 order of magnitude residual
+  // reduction per cycle — enough to hold maxResidual < 1% of peak density.
+  // Net per-frame smoother work is actually LESS than the old split (1+1
+  // vs 2+2 sweeps), so the full cycle fits well under the 11 ms budget.
+  const PM_SMOOTH_PRE = 1;                          // red-black GS passes before restriction
+  const PM_SMOOTH_POST = 1;                         // red-black GS passes after prolongation
+  // V-cycle scheduling: ONE complete V-cycle (descent + coarsest + ascent)
+  // runs each frame, producing a fully-solved pmPotential[0] every frame.
+  // No phase split, no partial state visible to the integrator. The prior
+  // scheme split the cycle across two frames; on "descent" frames the
+  // integrator read a half-solved phi (pre-smooth only, no coarse correction),
+  // making gravity alternate between short-range-only and full-range every
+  // frame — visible as 2-state frame-by-frame oscillation under debug
+  // stepping, and as subtle but real jitter at 60 Hz. The rewrite puts
+  // density snapshot + full solve + consumer read on the same frame, so
+  // every frame sees a consistent gravitational field.
   // Silence noUnusedLocals until downstream tickets (.3 deposition, .4
   // multigrid, .5 force sampling) reference these. Landing the canonical
   // values now establishes the contract; later tickets only tune usage.
@@ -1882,6 +2023,7 @@ function createPhysicsSimulation() {
   pmParamsF32[4] = PM_CELL_SIZE;           // cellSize
   pmParamsF32[5] = PM_FIXED_POINT_SCALE;   // fixedPointScale
   pmParamsU32[6] = pmLevel0Cells;          // cellCount = gridRes³
+  pmParamsU32[7] = 1;                       // filterOutOfDomain = 1 (inner is a ±16 subdomain)
 
   // PM deposit pipeline: 1 read-only particle buffer + 1 atomic-u32 density + params.
   const pmDepositModule = createShaderModuleChecked('pm.deposit', SHADER_PM_DEPOSIT);
@@ -1987,41 +2129,50 @@ function createPhysicsSimulation() {
     ]
   });
 
-  const pmSmoothPipeline   = device.createComputePipeline({ layout: device.createPipelineLayout({ bindGroupLayouts: [pmSmoothBGL] }),   compute: { module: pmSmoothModule,   entryPoint: 'main' } });
-  const pmResidualPipeline = device.createComputePipeline({ layout: device.createPipelineLayout({ bindGroupLayouts: [pmResidualBGL] }), compute: { module: pmResidualModule, entryPoint: 'main' } });
-  const pmRestrictPipeline = device.createComputePipeline({ layout: device.createPipelineLayout({ bindGroupLayouts: [pmRestrictBGL] }), compute: { module: pmRestrictModule, entryPoint: 'main' } });
-  const pmProlongPipeline  = device.createComputePipeline({ layout: device.createPipelineLayout({ bindGroupLayouts: [pmProlongBGL] }),  compute: { module: pmProlongModule,  entryPoint: 'main' } });
+  // Assign to module-scope pipeline handles used by runPmVCycle().
+  // [LAW:single-enforcer] These pipelines are created once per simulation
+  // instance; the V-cycle helper at module scope references them.
+  pmSmoothPipeline   = device.createComputePipeline({ layout: device.createPipelineLayout({ bindGroupLayouts: [pmSmoothBGL] }),   compute: { module: pmSmoothModule,   entryPoint: 'main' } });
+  pmResidualPipeline = device.createComputePipeline({ layout: device.createPipelineLayout({ bindGroupLayouts: [pmResidualBGL] }), compute: { module: pmResidualModule, entryPoint: 'main' } });
+  pmRestrictPipeline = device.createComputePipeline({ layout: device.createPipelineLayout({ bindGroupLayouts: [pmRestrictBGL] }), compute: { module: pmRestrictModule, entryPoint: 'main' } });
+  pmProlongPipeline  = device.createComputePipeline({ layout: device.createPipelineLayout({ bindGroupLayouts: [pmProlongBGL] }),  compute: { module: pmProlongModule,  entryPoint: 'main' } });
 
-  // PM force interpolation — reads pmPotential[0] + current bodies, writes pmForce.
-  const pmInterpolateModule = createShaderModuleChecked('pm.interpolate', SHADER_PM_INTERPOLATE);
+  // PM nested force interpolation — reads BOTH grids' level-0 potential,
+  // samples each at the particle position, and blends via smoothstep across
+  // the transition shell. This is the sole force source for nbody.compute.
+  // [LAW:one-source-of-truth] Single shader owns the inner/outer selection;
+  // no fan-in at the integrator level.
+  void SHADER_PM_INTERPOLATE;  // legacy import preserved (non-nested shader unused while nested is live)
+  const pmInterpolateModule = createShaderModuleChecked('pm.interpolate_nested', SHADER_PM_INTERPOLATE_NESTED);
   const pmInterpolateBGL = device.createBindGroupLayout({
     entries: [
-      { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
-      { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
-      { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
-      { binding: 3, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
+      { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } }, // bodies
+      { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } }, // innerPhi
+      { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } }, // outerPhi
+      { binding: 3, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },           // forceOut
+      { binding: 4, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },           // innerParams
+      { binding: 5, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },           // outerParams
+      { binding: 6, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },           // blend shell
     ]
   });
   const pmInterpolatePipeline = device.createComputePipeline({
     layout: device.createPipelineLayout({ bindGroupLayouts: [pmInterpolateBGL] }),
     compute: { module: pmInterpolateModule, entryPoint: 'main' }
   });
-  // Per-ping-pong interpolate bind groups — read from whichever body buffer
-  // is the current frame's input (matches pmDepositBG indexing).
-  const pmInterpolateBG = [
-    device.createBindGroup({ layout: pmInterpolateBGL, entries: [
-      { binding: 0, resource: { buffer: bufferA } },
-      { binding: 1, resource: { buffer: pmPotential[0] } },
-      { binding: 2, resource: { buffer: pmForce } },
-      { binding: 3, resource: { buffer: pmParamsBuffer } },
-    ]}),
-    device.createBindGroup({ layout: pmInterpolateBGL, entries: [
-      { binding: 0, resource: { buffer: bufferB } },
-      { binding: 1, resource: { buffer: pmPotential[0] } },
-      { binding: 2, resource: { buffer: pmForce } },
-      { binding: 3, resource: { buffer: pmParamsBuffer } },
-    ]}),
-  ];
+
+  // Blend shell uniform: transitions pure-inner → pure-outer over [start, end].
+  // start = PM_DOMAIN_HALF - 2, end = PM_DOMAIN_HALF so the full blend happens
+  // in the last 2-unit-thick shell of the inner grid — the region where
+  // periodic-wrap artifacts live until A5's Dirichlet BC lands.
+  const pmBlendBuffer = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+  {
+    const ab = new ArrayBuffer(16);
+    new Float32Array(ab, 0, 2).set([PM_DOMAIN_HALF - 2.0, PM_DOMAIN_HALF]);
+    device.queue.writeBuffer(pmBlendBuffer, 0, ab);
+  }
+
+  // Per-ping-pong interpolate bind groups are created AFTER the outer-grid
+  // allocation below (pmOuterPotential / pmOuterParamsBuffer not yet in scope).
 
 
   // Per-level uniform buffers, pre-populated at factory init. Each holds a
@@ -2029,7 +2180,13 @@ function createPhysicsSimulation() {
   //   smoothUniform[l][parity]  → { gridRes, parity, hSquared, fourPiG }
   //   residualUniform[l]        → { gridRes, _pad, hSquared, fourPiG }
   //   restrictUniform[l]        → { coarseGridRes, _pad×3 }   (for transition l → l+1)
-  //   prolongUniform[l]         → { fineGridRes, _pad×3 }     (for transition l+1 → l)
+  //   prolongUniform[l]         → { fineGridRes, dirichletBoundary, _pad×2 }  (for l+1 → l)
+  //
+  // [LAW:one-source-of-truth] The inner grid runs Dirichlet BC (flag = 1) at
+  // every level — BC values at level 0 come from pm.boundary_sample; coarser
+  // levels hold zero on faces because they store corrections (cleared at
+  // V-cycle start). The outer grid keeps periodic (flag = 0), unchanged.
+  const PM_INNER_DIRICHLET = 1;
   const PM_FOUR_PI_G = 4 * Math.PI * (state.physics.G ?? 0.3) * 0.001;
   const pmSmoothUniform: GPUBuffer[][] = [];
   const pmResidualUniform: GPUBuffer[] = [];
@@ -2040,18 +2197,20 @@ function createPhysicsSimulation() {
     const hL = PM_DOMAIN_SIZE / sizeL;
     const hSqL = hL * hL;
     pmSmoothUniform.push([0, 1].map(parity => {
-      const buf = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-      const ab = new ArrayBuffer(16);
+      const buf = device.createBuffer({ size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+      const ab = new ArrayBuffer(32);
       new Uint32Array(ab, 0, 2).set([sizeL, parity]);
       new Float32Array(ab, 8, 2).set([hSqL, PM_FOUR_PI_G]);
+      new Uint32Array(ab, 16, 1).set([PM_INNER_DIRICHLET]);
       device.queue.writeBuffer(buf, 0, ab);
       return buf;
     }));
     {
-      const buf = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-      const ab = new ArrayBuffer(16);
+      const buf = device.createBuffer({ size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+      const ab = new ArrayBuffer(32);
       new Uint32Array(ab, 0, 2).set([sizeL, 0]);
       new Float32Array(ab, 8, 2).set([hSqL, PM_FOUR_PI_G]);
+      new Uint32Array(ab, 16, 1).set([PM_INNER_DIRICHLET]);
       device.queue.writeBuffer(buf, 0, ab);
       pmResidualUniform.push(buf);
     }
@@ -2067,7 +2226,7 @@ function createPhysicsSimulation() {
       {
         const buf = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
         const ab = new ArrayBuffer(16);
-        new Uint32Array(ab, 0, 1).set([sizeL]);  // fineGridRes for the transition l+1 → l
+        new Uint32Array(ab, 0, 2).set([sizeL, PM_INNER_DIRICHLET]);  // fineGridRes, dirichletBoundary
         device.queue.writeBuffer(buf, 0, ab);
         pmProlongUniform.push(buf);
       }
@@ -2118,6 +2277,269 @@ function createPhysicsSimulation() {
   for (let l = 0; l < PM_MULTIGRID_LEVELS; l++) {
     pmWgCount.push(Math.max(1, (PM_GRID_RES >> l) / 4));
   }
+
+  // ── OUTER PM GRID (nested zoom-in scheme — fully live) ───────────────────
+  // Second grid at 1/2 linear resolution covering the full periodic domain.
+  // Together with the inner grid (above), delivers sharp central gravity +
+  // cheap long-range coupling. Pipelines are reused from the inner grid —
+  // only buffers, uniforms, and bind groups are outer-specific.
+  //
+  // Live per-frame role:
+  //   1. Receives CIC deposit from every particle in the scene (filterOutOfDomain=0).
+  //   2. Runs its own full V-cycle → fully-solved pmOuterPotential[0].
+  //   3. pm.boundary_sample reads outerPhi and writes values into the inner
+  //      grid's level-0 face cells (the inner grid's Dirichlet BC).
+  //   4. pm.interpolate_nested reads outerPhi and smoothstep-blends it into
+  //      the per-particle PM force outside the inner ±14 shell.
+  // See CLAUDE.md "PM Solver (nested grids, full V-cycle per frame)" for
+  // the top-level architecture summary.
+  const PM_OUTER_GRID_RES = 64;
+  const PM_OUTER_DOMAIN_HALF = 64.0;
+  const PM_OUTER_DOMAIN_SIZE = PM_OUTER_DOMAIN_HALF * 2;  // 128
+  const PM_OUTER_CELL_SIZE = PM_OUTER_DOMAIN_SIZE / PM_OUTER_GRID_RES;  // 2.0
+  const PM_OUTER_LEVELS = 5;  // 64³, 32³, 16³, 8³, 4³
+
+  const pmOuterLevel0Cells = PM_OUTER_GRID_RES * PM_OUTER_GRID_RES * PM_OUTER_GRID_RES;
+  const pmOuterDensityU32 = device.createBuffer({ size: pmOuterLevel0Cells * 4, usage: PM_BUF_USAGE });
+  const pmOuterDensityF32 = device.createBuffer({ size: pmOuterLevel0Cells * 4, usage: PM_BUF_USAGE });
+  const pmOuterPotential: GPUBuffer[] = [];
+  const pmOuterResidual: GPUBuffer[] = [];
+  for (let l = 0; l < PM_OUTER_LEVELS; l++) {
+    const sizeL = PM_OUTER_GRID_RES >> l;
+    const bytesL = sizeL * sizeL * sizeL * 4;
+    pmOuterPotential.push(device.createBuffer({ size: bytesL, usage: PM_BUF_USAGE }));
+    pmOuterResidual.push(device.createBuffer({ size: bytesL, usage: PM_BUF_USAGE }));
+  }
+  const pmOuterRho: GPUBuffer[] = [pmOuterDensityF32];
+  for (let l = 1; l < PM_OUTER_LEVELS; l++) {
+    const sizeL = PM_OUTER_GRID_RES >> l;
+    pmOuterRho.push(device.createBuffer({ size: sizeL * sizeL * sizeL * 4, usage: PM_BUF_USAGE }));
+  }
+  const pmOuterMeanScratch = device.createBuffer({ size: 16, usage: PM_BUF_USAGE });
+
+  // Outer deposit/convert/interpolate params (same 32-byte struct as inner).
+  const pmOuterParamsBuffer = device.createBuffer({ size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+  const pmOuterParamsData = new ArrayBuffer(32);
+  const pmOuterParamsF32 = new Float32Array(pmOuterParamsData);
+  const pmOuterParamsU32 = new Uint32Array(pmOuterParamsData);
+  pmOuterParamsU32[1] = count;
+  pmOuterParamsU32[2] = PM_OUTER_GRID_RES;
+  pmOuterParamsF32[3] = PM_OUTER_DOMAIN_HALF;
+  pmOuterParamsF32[4] = PM_OUTER_CELL_SIZE;
+  pmOuterParamsF32[5] = PM_FIXED_POINT_SCALE;
+  pmOuterParamsU32[6] = pmOuterLevel0Cells;
+  pmOuterParamsU32[7] = 0;  // filterOutOfDomain = 0 (outer is the full 3-torus; wrapIdx handles near-boundary posHalf)
+
+
+  // Per-level uniform buffers for the outer multigrid (matches inner pattern).
+  const pmOuterSmoothUniform: GPUBuffer[][] = [];
+  const pmOuterResidualUniform: GPUBuffer[] = [];
+  const pmOuterRestrictUniform: GPUBuffer[] = [];
+  const pmOuterProlongUniform: GPUBuffer[] = [];
+  // Outer grid keeps periodic BC (flag = 0). Shares shader modules/pipelines
+  // with the inner grid, but its uniforms pin dirichletBoundary to 0 so the
+  // smoother/residual/prolong behave exactly as before this BC wiring landed.
+  const PM_OUTER_DIRICHLET = 0;
+  for (let l = 0; l < PM_OUTER_LEVELS; l++) {
+    const sizeL = PM_OUTER_GRID_RES >> l;
+    const hL = PM_OUTER_DOMAIN_SIZE / sizeL;
+    const hSqL = hL * hL;
+    pmOuterSmoothUniform.push([0, 1].map(parity => {
+      const buf = device.createBuffer({ size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+      const ab = new ArrayBuffer(32);
+      new Uint32Array(ab, 0, 2).set([sizeL, parity]);
+      new Float32Array(ab, 8, 2).set([hSqL, PM_FOUR_PI_G]);
+      new Uint32Array(ab, 16, 1).set([PM_OUTER_DIRICHLET]);
+      device.queue.writeBuffer(buf, 0, ab);
+      return buf;
+    }));
+    {
+      const buf = device.createBuffer({ size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+      const ab = new ArrayBuffer(32);
+      new Uint32Array(ab, 0, 2).set([sizeL, 0]);
+      new Float32Array(ab, 8, 2).set([hSqL, PM_FOUR_PI_G]);
+      new Uint32Array(ab, 16, 1).set([PM_OUTER_DIRICHLET]);
+      device.queue.writeBuffer(buf, 0, ab);
+      pmOuterResidualUniform.push(buf);
+    }
+    if (l + 1 < PM_OUTER_LEVELS) {
+      const coarseSize = PM_OUTER_GRID_RES >> (l + 1);
+      {
+        const buf = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+        const ab = new ArrayBuffer(16);
+        new Uint32Array(ab, 0, 1).set([coarseSize]);
+        device.queue.writeBuffer(buf, 0, ab);
+        pmOuterRestrictUniform.push(buf);
+      }
+      {
+        const buf = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+        const ab = new ArrayBuffer(16);
+        new Uint32Array(ab, 0, 2).set([sizeL, PM_OUTER_DIRICHLET]);
+        device.queue.writeBuffer(buf, 0, ab);
+        pmOuterProlongUniform.push(buf);
+      }
+    }
+  }
+
+  // Outer-grid bind groups (reuse existing BGLs from the inner pipelines).
+  const pmOuterDepositBG = [bufferA, bufferB].map(buf => device.createBindGroup({
+    layout: pmDepositBGL, entries: [
+      { binding: 0, resource: { buffer: buf } },
+      { binding: 1, resource: { buffer: pmOuterDensityU32 } },
+      { binding: 2, resource: { buffer: pmOuterParamsBuffer } },
+    ]
+  }));
+  const pmOuterConvertBG = device.createBindGroup({
+    layout: pmConvertBGL, entries: [
+      { binding: 0, resource: { buffer: pmOuterDensityU32 } },
+      { binding: 1, resource: { buffer: pmOuterDensityF32 } },
+      { binding: 2, resource: { buffer: pmOuterMeanScratch } },
+      { binding: 3, resource: { buffer: pmOuterParamsBuffer } },
+    ]
+  });
+  const pmOuterSmoothBG: GPUBindGroup[][] = [];
+  const pmOuterResidualBG: GPUBindGroup[] = [];
+  const pmOuterRestrictBG: GPUBindGroup[] = [];
+  const pmOuterProlongBG: GPUBindGroup[] = [];
+  for (let l = 0; l < PM_OUTER_LEVELS; l++) {
+    pmOuterSmoothBG.push([0, 1].map(parity => device.createBindGroup({
+      layout: pmSmoothBGL, entries: [
+        { binding: 0, resource: { buffer: pmOuterPotential[l] } },
+        { binding: 1, resource: { buffer: pmOuterRho[l] } },
+        { binding: 2, resource: { buffer: pmOuterSmoothUniform[l][parity] } },
+      ]
+    })));
+    pmOuterResidualBG.push(device.createBindGroup({
+      layout: pmResidualBGL, entries: [
+        { binding: 0, resource: { buffer: pmOuterPotential[l] } },
+        { binding: 1, resource: { buffer: pmOuterRho[l] } },
+        { binding: 2, resource: { buffer: pmOuterResidual[l] } },
+        { binding: 3, resource: { buffer: pmOuterResidualUniform[l] } },
+      ]
+    }));
+    if (l + 1 < PM_OUTER_LEVELS) {
+      pmOuterRestrictBG.push(device.createBindGroup({
+        layout: pmRestrictBGL, entries: [
+          { binding: 0, resource: { buffer: pmOuterResidual[l] } },
+          { binding: 1, resource: { buffer: pmOuterRho[l + 1] } },
+          { binding: 2, resource: { buffer: pmOuterRestrictUniform[l] } },
+        ]
+      }));
+      pmOuterProlongBG.push(device.createBindGroup({
+        layout: pmProlongBGL, entries: [
+          { binding: 0, resource: { buffer: pmOuterPotential[l + 1] } },
+          { binding: 1, resource: { buffer: pmOuterPotential[l] } },
+          { binding: 2, resource: { buffer: pmOuterProlongUniform[l] } },
+        ]
+      }));
+    }
+  }
+
+  const pmOuterWgCount: number[] = [];
+  for (let l = 0; l < PM_OUTER_LEVELS; l++) {
+    pmOuterWgCount.push(Math.max(1, (PM_OUTER_GRID_RES >> l) / 4));
+  }
+
+  // Dev-only staging for __pmDumpOuter diagnostics (matches inner pattern).
+  const pmOuterDensityStaging = device.createBuffer({
+    size: pmOuterLevel0Cells * 4,
+    usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+  });
+  let pmOuterDiagPending = false;
+
+  // ── Boundary-sample pass: outer φ → inner φ face cells ────────────────────
+  // [LAW:single-enforcer] Sole bridge between the two grids during the inner
+  // solve. Runs AFTER the outer V-cycle (so outerPhi[0] is fully solved) and
+  // BEFORE the inner V-cycle (so the smoother sees valid BC on face cells).
+  // [LAW:one-source-of-truth] The uniform is written once at init — inner
+  // and outer grid geometry are immutable after createPhysicsSimulation ends.
+  const pmBoundarySampleModule = createShaderModuleChecked('pm.boundary_sample', SHADER_PM_BOUNDARY_SAMPLE);
+  const pmBoundarySampleBGL = device.createBindGroupLayout({
+    entries: [
+      { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } }, // outerPhi
+      { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },           // innerPhi (rw)
+      { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
+    ]
+  });
+  const pmBoundarySamplePipeline = device.createComputePipeline({
+    layout: device.createPipelineLayout({ bindGroupLayouts: [pmBoundarySampleBGL] }),
+    compute: { module: pmBoundarySampleModule, entryPoint: 'main' }
+  });
+  const pmBoundarySampleParams = device.createBuffer({ size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+  {
+    const ab = new ArrayBuffer(32);
+    const bsU32 = new Uint32Array(ab);
+    const bsF32 = new Float32Array(ab);
+    bsU32[0] = PM_GRID_RES;
+    bsF32[2] = PM_DOMAIN_HALF;
+    bsF32[3] = PM_CELL_SIZE;
+    bsU32[4] = PM_OUTER_GRID_RES;
+    bsF32[6] = PM_OUTER_DOMAIN_HALF;
+    bsF32[7] = PM_OUTER_CELL_SIZE;
+    device.queue.writeBuffer(pmBoundarySampleParams, 0, ab);
+  }
+  const pmBoundarySampleBG = device.createBindGroup({
+    layout: pmBoundarySampleBGL,
+    entries: [
+      { binding: 0, resource: { buffer: pmOuterPotential[0] } },
+      { binding: 1, resource: { buffer: pmPotential[0] } },
+      { binding: 2, resource: { buffer: pmBoundarySampleParams } },
+    ]
+  });
+  const pmBoundarySampleWg = pmWgCount[0];  // same as finest inner level
+
+  // Deferred interpolate bind groups — all dependencies now in scope.
+  // Per-ping-pong: binds whichever body buffer is the current frame's input,
+  // both grids' level-0 potentials, both param buffers, and the blend shell.
+  const pmInterpolateBG = [
+    device.createBindGroup({ layout: pmInterpolateBGL, entries: [
+      { binding: 0, resource: { buffer: bufferA } },
+      { binding: 1, resource: { buffer: pmPotential[0] } },
+      { binding: 2, resource: { buffer: pmOuterPotential[0] } },
+      { binding: 3, resource: { buffer: pmForce } },
+      { binding: 4, resource: { buffer: pmParamsBuffer } },
+      { binding: 5, resource: { buffer: pmOuterParamsBuffer } },
+      { binding: 6, resource: { buffer: pmBlendBuffer } },
+    ]}),
+    device.createBindGroup({ layout: pmInterpolateBGL, entries: [
+      { binding: 0, resource: { buffer: bufferB } },
+      { binding: 1, resource: { buffer: pmPotential[0] } },
+      { binding: 2, resource: { buffer: pmOuterPotential[0] } },
+      { binding: 3, resource: { buffer: pmForce } },
+      { binding: 4, resource: { buffer: pmParamsBuffer } },
+      { binding: 5, resource: { buffer: pmOuterParamsBuffer } },
+      { binding: 6, resource: { buffer: pmBlendBuffer } },
+    ]}),
+  ];
+
+  // [LAW:locality-or-seam] Gas reservoir owns its buffers/shaders in
+  // gasReservoir.ts; main.ts only dispatches it at the existing PM seams.
+  const gas = createGasReservoir({
+    device,
+    createShaderModuleChecked,
+    renderTargetFormat,
+    renderSampleCount,
+    cameraBuffer,
+    cameraStride: CAMERA_STRIDE,
+    cameraSize: CAMERA_SIZE,
+    starCount: count,
+    starBuffers: [bufferA, bufferB],
+    totalStarMass,
+    gasMassFraction,
+    pmBufUsage: PM_BUF_USAGE,
+    fixedPointScale: PM_FIXED_POINT_SCALE,
+    pmDepositBGL,
+    pmDepositPipeline,
+    pmInterpolateBGL,
+    pmInterpolatePipeline,
+    innerDensityU32: pmDensityU32,
+    innerPotential: pmPotential[0],
+    innerParams: { gridRes: PM_GRID_RES, domainHalf: PM_DOMAIN_HALF, cellSize: PM_CELL_SIZE, cellCount: pmLevel0Cells, filterOutOfDomain: 1 },
+    outerDensityU32: pmOuterDensityU32,
+    outerPotential: pmOuterPotential[0],
+    outerParams: { gridRes: PM_OUTER_GRID_RES, domainHalf: PM_OUTER_DOMAIN_HALF, cellSize: PM_OUTER_CELL_SIZE, cellCount: pmOuterLevel0Cells, filterOutOfDomain: 0 },
+    pmBlendBuffer,
+  });
 
   const computeModule = createShaderModuleChecked('nbody.compute', SHADER_NBODY_COMPUTE_EDIT || SHADER_NBODY_COMPUTE);
   const renderModule = createShaderModuleChecked('nbody.render', SHADER_NBODY_RENDER_EDIT || SHADER_NBODY_RENDER);
@@ -2439,89 +2861,135 @@ function createPhysicsSimulation() {
       // or not the density is consumed downstream.
       pmParamsF32[0] = dt;  // only field that varies per-frame
       device.queue.writeBuffer(pmParamsBuffer, 0, pmParamsData);
+      pmOuterParamsF32[0] = dt;
+      device.queue.writeBuffer(pmOuterParamsBuffer, 0, pmOuterParamsData);
+      gas.prepareFrame(dt, p.gasSoundSpeed ?? 2.0);
+
       encoder.clearBuffer(pmDensityU32);
       encoder.clearBuffer(pmMeanScratch);
-      const pmPass = encoder.beginComputePass();
+      encoder.clearBuffer(pmOuterDensityU32);
+      encoder.clearBuffer(pmOuterMeanScratch);
+      gas.clear(encoder);
+      const pmTsw = tsWrites('pmDepositConvert');
+      const pmPass = encoder.beginComputePass(pmTsw ? { timestampWrites: pmTsw } : undefined);
+      // Inner grid: CIC deposit → mean reduce → mean-subtract convert.
       pmPass.setPipeline(pmDepositPipeline);
       pmPass.setBindGroup(0, pmDepositBG[pingPong]);
       pmPass.dispatchWorkgroups(Math.ceil(count / 256));
+      gas.depositInnerPm(pmPass, pingPong);
       pmPass.setPipeline(pmReducePipeline);
       pmPass.setBindGroup(0, pmConvertBG);
       pmPass.dispatchWorkgroups(Math.ceil(pmLevel0Cells / 256));
       pmPass.setPipeline(pmConvertPipeline);
       pmPass.dispatchWorkgroups(Math.ceil(pmLevel0Cells / 256));
+      // Outer grid: same pipeline instances, separate bind groups + params.
+      // [LAW:one-source-of-truth] Every particle contributes mass to both grids
+      // IF it is inside the grid's domain. Deposit's domain filter (in
+      // pm.deposit.wgsl) makes the inner grid see only particles within ±16;
+      // the outer grid (domainHalf = periodic-wrap radius) sees all of them.
+      // The nested interpolate shader reads the same particles back against
+      // whichever grid's force contribution its blend weight selects — so
+      // mass-source and force-target are consistent per grid.
+      pmPass.setPipeline(pmDepositPipeline);
+      pmPass.setBindGroup(0, pmOuterDepositBG[pingPong]);
+      pmPass.dispatchWorkgroups(Math.ceil(count / 256));
+      gas.depositOuterPm(pmPass, pingPong);
+      pmPass.setPipeline(pmReducePipeline);
+      pmPass.setBindGroup(0, pmOuterConvertBG);
+      pmPass.dispatchWorkgroups(Math.ceil(pmOuterLevel0Cells / 256));
+      pmPass.setPipeline(pmConvertPipeline);
+      pmPass.dispatchWorkgroups(Math.ceil(pmOuterLevel0Cells / 256));
+      gas.depositGasAndBuildPressure(pmPass, pingPong);
       pmPass.end();
 
-      // ── Multigrid V-cycle Poisson solver (phase-split across 2 frames) ────
-      // Input:  pmDensityF32 (mean-zero RHS at level 0)
-      // Output: pmPotential[0] (φ satisfying ∇²φ = 4πGρ on the 3-torus)
-      // [LAW:dataflow-not-control-flow] Phase is a deterministic function of
-      // simStep (parity), so the same dispatch sequence runs in fwd and rev.
-      // Phase A (descent) and Phase B (ascent + coarsest) each do roughly
-      // 8M level-0 cell-updates — half the un-split V-cycle, matched per
-      // frame so the worst frame fits the 90 Hz budget.
-      const pmMaxLevel = PM_MULTIGRID_LEVELS - 1;
+      // ── Multigrid V-cycle Poisson solver (full cycle per frame) ──────────
+      // Input:  pmRho[0] = pmDensityF32 (mean-zero RHS at level 0)
+      // Output: pmPotential[0] (φ satisfying ∇²φ = 4πGρ)
+      //
+      // [LAW:single-enforcer] runPmVCycle is the sole dispatcher of the
+      // multigrid V-cycle; both grids use it. It owns the descent → coarsest
+      // → ascent sequence and the level-0 warm-start convention.
+      //
+      // [LAW:one-source-of-truth] Each V-cycle completes within ONE frame.
+      // pmPotential[0] is always a fully-solved state when the interpolate
+      // reads it — no mid-solve snapshots bleed to consumers.
+      //
+      // Ordering matters: the outer grid solves first (periodic BC on the
+      // full ±64 box), then pm.boundary_sample writes outer φ values into
+      // the inner grid's level-0 face cells, then the inner V-cycle runs
+      // with Dirichlet BC (smoother / residual / prolong freeze face cells).
+      // This is the nested-PM scheme: inner resolution is driven by outer
+      // long-range φ at its boundary, not by periodic wrap of ±16.
+      //
+      // Levels 1..maxLevel are cleared at the start of each cycle because
+      // they accumulate corrections; level 0 keeps the previous frame's
+      // solution as warm-start (density evolves slowly frame-to-frame,
+      // so the prior phi is a near-converged initial guess).
       const PM_COARSEST_SWEEPS = 16;
-      const pmDescent = (simStep & 1) === 0;
-      const vPass = encoder.beginComputePass();
-      if (pmDescent) {
-        // Phase A: zero coarse correction state (start of new V-cycle), then
-        // pre-smooth → residual → restrict down to the coarsest grid. Level 0
-        // is NOT cleared — it carries the warm-start from the previous V-cycle.
-        for (let l = 1; l < PM_MULTIGRID_LEVELS; l++) encoder.clearBuffer(pmPotential[l]);
-        for (let l = 0; l < pmMaxLevel; l++) {
-          vPass.setPipeline(pmSmoothPipeline);
-          for (let s = 0; s < PM_SMOOTH_PRE; s++) {
-            vPass.setBindGroup(0, pmSmoothBG[l][0]);
-            vPass.dispatchWorkgroups(pmWgCount[l], pmWgCount[l], pmWgCount[l]);
-            vPass.setBindGroup(0, pmSmoothBG[l][1]);
-            vPass.dispatchWorkgroups(pmWgCount[l], pmWgCount[l], pmWgCount[l]);
-          }
-          vPass.setPipeline(pmResidualPipeline);
-          vPass.setBindGroup(0, pmResidualBG[l]);
-          vPass.dispatchWorkgroups(pmWgCount[l], pmWgCount[l], pmWgCount[l]);
-          vPass.setPipeline(pmRestrictPipeline);
-          vPass.setBindGroup(0, pmRestrictBG[l]);
-          vPass.dispatchWorkgroups(pmWgCount[l + 1], pmWgCount[l + 1], pmWgCount[l + 1]);
-        }
-      } else {
-        // Phase B: coarsest exact-ish solve, then prolong + post-smooth back
-        // up to level 0. Reads pmRhs[1..5] and pmPotential[1..5] left by the
-        // previous frame's Phase A; writes the final solution into pmPotential[0].
-        vPass.setPipeline(pmSmoothPipeline);
-        for (let s = 0; s < PM_COARSEST_SWEEPS; s++) {
-          vPass.setBindGroup(0, pmSmoothBG[pmMaxLevel][0]);
-          vPass.dispatchWorkgroups(pmWgCount[pmMaxLevel], pmWgCount[pmMaxLevel], pmWgCount[pmMaxLevel]);
-          vPass.setBindGroup(0, pmSmoothBG[pmMaxLevel][1]);
-          vPass.dispatchWorkgroups(pmWgCount[pmMaxLevel], pmWgCount[pmMaxLevel], pmWgCount[pmMaxLevel]);
-        }
-        for (let l = pmMaxLevel - 1; l >= 0; l--) {
-          vPass.setPipeline(pmProlongPipeline);
-          vPass.setBindGroup(0, pmProlongBG[l]);
-          vPass.dispatchWorkgroups(pmWgCount[l], pmWgCount[l], pmWgCount[l]);
-          vPass.setPipeline(pmSmoothPipeline);
-          for (let s = 0; s < PM_SMOOTH_POST; s++) {
-            vPass.setBindGroup(0, pmSmoothBG[l][0]);
-            vPass.dispatchWorkgroups(pmWgCount[l], pmWgCount[l], pmWgCount[l]);
-            vPass.setBindGroup(0, pmSmoothBG[l][1]);
-            vPass.dispatchWorkgroups(pmWgCount[l], pmWgCount[l], pmWgCount[l]);
-          }
-        }
+
+      // Outer first — its fully-solved φ becomes the inner grid's Dirichlet BC.
+      runPmVCycle(encoder, {
+        levels: PM_OUTER_LEVELS,
+        wgCount: pmOuterWgCount,
+        potential: pmOuterPotential,
+        smoothBG: pmOuterSmoothBG,
+        residualBG: pmOuterResidualBG,
+        restrictBG: pmOuterRestrictBG,
+        prolongBG: pmOuterProlongBG,
+        preSmooth: PM_SMOOTH_PRE,
+        postSmooth: PM_SMOOTH_POST,
+        coarsestSweeps: PM_COARSEST_SWEEPS,
+        timingBucket: 'outerVCycle',
+      });
+
+      // Boundary-sample: write outer φ into inner φ's level-0 face cells.
+      // Separate pass so WebGPU's implicit pass-boundary barriers serialize
+      // the outer-write vs. outer-read dependency without any explicit sync.
+      {
+        const bsTsw = tsWrites('boundarySample');
+        const bsPass = encoder.beginComputePass(bsTsw ? { timestampWrites: bsTsw } : undefined);
+        bsPass.setPipeline(pmBoundarySamplePipeline);
+        bsPass.setBindGroup(0, pmBoundarySampleBG);
+        bsPass.dispatchWorkgroups(pmBoundarySampleWg, pmBoundarySampleWg, pmBoundarySampleWg);
+        bsPass.end();
       }
-      vPass.end();
+
+      // Inner V-cycle — reads face cells as Dirichlet BC (flag = 1 in uniforms).
+      runPmVCycle(encoder, {
+        levels: PM_MULTIGRID_LEVELS,
+        wgCount: pmWgCount,
+        potential: pmPotential,
+        smoothBG: pmSmoothBG,
+        residualBG: pmResidualBG,
+        restrictBG: pmRestrictBG,
+        prolongBG: pmProlongBG,
+        preSmooth: PM_SMOOTH_PRE,
+        postSmooth: PM_SMOOTH_POST,
+        coarsestSweeps: PM_COARSEST_SWEEPS,
+        timingBucket: 'innerVCycle',
+      });
 
       // ── PM force interpolation ─────────────────────────────────────────
       // Sample the freshly-solved pmPotential[0] at each particle via the CIC
       // transpose kernel; write vec4 force to pmForce. Dispatched AFTER the
       // V-cycle (reads phi) and BEFORE the main n-body compute (reads pmForce).
-      const iPass = encoder.beginComputePass();
+      const iTsw = tsWrites('starInterpolate');
+      const iPass = encoder.beginComputePass(iTsw ? { timestampWrites: iTsw } : undefined);
       iPass.setPipeline(pmInterpolatePipeline);
       iPass.setBindGroup(0, pmInterpolateBG[pingPong]);
       iPass.dispatchWorkgroups(Math.ceil(count / 256));
       iPass.end();
 
-      const cTsw = tsWrites(0);
+      const gTsw = tsWrites('gasInterpolatePressure');
+      const gPass = encoder.beginComputePass(gTsw ? { timestampWrites: gTsw } : undefined);
+      gas.interpolateForces(gPass, pingPong);
+      gPass.end();
+
+      const cTsw = tsWrites('starGasIntegrate');
       const pass = encoder.beginComputePass(cTsw ? { timestampWrites: cTsw } : undefined);
+      // [LAW:dataflow-not-control-flow] Gas and stars integrate every frame in
+      // a fixed order; gasMassFraction=0 makes gas forces zero by value.
+      gas.integrate(pass, pingPong);
       pass.setPipeline(computePipeline);
       pass.setBindGroup(0, computeBG[pingPong]);
       pass.dispatchWorkgroups(Math.ceil(count / 256));
@@ -2605,7 +3073,7 @@ function createPhysicsSimulation() {
         device.queue.writeBuffer(attractorFieldBuffer, 0, attractorFieldData);
       }
 
-      const rTsw = tsWrites(1);
+      const rTsw = tsWrites('starsRender');
       const pass = encoder.beginRenderPass({
         colorAttachments: [getColorAttachment(depthRef, textureView, viewport)],
         depthStencilAttachment: getDepthAttachment(depthRef, viewport),
@@ -2625,6 +3093,32 @@ function createPhysicsSimulation() {
 
       renderMarkers(pass, viewIndex);
       pass.end();
+
+      const gasVisible = state.physics.gasVisible;
+      const gasColorView = gasVisible ? getCurrentSceneView() : postFx.nullColorView!;
+      const gasDepthView = gasVisible ? (xrDepthOverride ?? postFx.depth!.createView()) : postFx.nullDepthView!;
+      const gasViewport = gasVisible ? renderViewport : null;
+      const gTsw = tsWrites('gasRender');
+      const gasPass = encoder.beginRenderPass({
+        colorAttachments: [{
+          view: gasColorView,
+          clearValue: DEFAULT_CLEAR_COLOR,
+          loadOp: 'load',
+          storeOp: 'store',
+        }],
+        depthStencilAttachment: {
+          view: gasDepthView,
+          depthClearValue: 1.0,
+          depthLoadOp: 'load',
+          depthStoreOp: 'store',
+        },
+        ...(gTsw ? { timestampWrites: gTsw } : {}),
+      });
+      if (gasViewport) {
+        gasPass.setViewport(gasViewport[0], gasViewport[1], gasViewport[2], gasViewport[3], 0, 1);
+      }
+      gas.render(gasPass, viewIndex, gasVisible);
+      gasPass.end();
     },
 
     getCount() { return count; },
@@ -2773,23 +3267,109 @@ function createPhysicsSimulation() {
 
     // Max |residual| at level 0 — the convergence metric for the V-cycle.
     // Below ~1% of peak density value after 4 V-cycles indicates good solve.
-    async maxResidual(): Promise<number | null> {
-      if (pmDiagPending) return null;
+    async maxResidual(): Promise<{ inner: number; outer: number } | null> {
+      if (pmDiagPending || pmOuterDiagPending) return null;
       pmDiagPending = true;
+      pmOuterDiagPending = true;
       const enc = device.createCommandEncoder();
       enc.copyBufferToBuffer(pmResidual[0], 0, pmDensityStaging, 0, pmLevel0Cells * 4);
+      enc.copyBufferToBuffer(pmOuterResidual[0], 0, pmOuterDensityStaging, 0, pmOuterLevel0Cells * 4);
       device.queue.submit([enc.finish()]);
       await device.queue.onSubmittedWorkDone();
       await pmDensityStaging.mapAsync(GPUMapMode.READ);
-      const arr = new Float32Array(pmDensityStaging.getMappedRange());
-      let maxAbs = 0;
-      for (let i = 0; i < arr.length; i++) {
-        const a = Math.abs(arr[i]);
-        if (a > maxAbs) maxAbs = a;
+      const innerArr = new Float32Array(pmDensityStaging.getMappedRange());
+      let inner = 0;
+      for (let i = 0; i < innerArr.length; i++) {
+        const a = Math.abs(innerArr[i]);
+        if (a > inner) inner = a;
       }
       pmDensityStaging.unmap();
       pmDiagPending = false;
-      return maxAbs;
+
+      await pmOuterDensityStaging.mapAsync(GPUMapMode.READ);
+      const outerArr = new Float32Array(pmOuterDensityStaging.getMappedRange());
+      let outer = 0;
+      for (let i = 0; i < outerArr.length; i++) {
+        const a = Math.abs(outerArr[i]);
+        if (a > outer) outer = a;
+      }
+      pmOuterDensityStaging.unmap();
+      pmOuterDiagPending = false;
+      return { inner, outer };
+    },
+
+    // Outer-grid density + potential dumps. Separate staging buffer keeps
+    // these independent of the inner-grid diagnostic in-flight flag.
+    async dumpOuterDensity(): Promise<Float32Array | null> {
+      if (pmOuterDiagPending) return null;
+      pmOuterDiagPending = true;
+      const enc = device.createCommandEncoder();
+      enc.copyBufferToBuffer(pmOuterDensityF32, 0, pmOuterDensityStaging, 0, pmOuterLevel0Cells * 4);
+      device.queue.submit([enc.finish()]);
+      await device.queue.onSubmittedWorkDone();
+      await pmOuterDensityStaging.mapAsync(GPUMapMode.READ);
+      const out = new Float32Array(pmOuterDensityStaging.getMappedRange().slice(0));
+      pmOuterDensityStaging.unmap();
+      pmOuterDiagPending = false;
+      return out;
+    },
+    async dumpOuterPotential(): Promise<Float32Array | null> {
+      if (pmOuterDiagPending) return null;
+      pmOuterDiagPending = true;
+      const enc = device.createCommandEncoder();
+      enc.copyBufferToBuffer(pmOuterPotential[0], 0, pmOuterDensityStaging, 0, pmOuterLevel0Cells * 4);
+      device.queue.submit([enc.finish()]);
+      await device.queue.onSubmittedWorkDone();
+      await pmOuterDensityStaging.mapAsync(GPUMapMode.READ);
+      const out = new Float32Array(pmOuterDensityStaging.getMappedRange().slice(0));
+      pmOuterDensityStaging.unmap();
+      pmOuterDiagPending = false;
+      return out;
+    },
+
+    gasDumpDensity: () => gas.dumpDensity(),
+
+    gasEnergyBreakdown: () => gas.energyBreakdown(pingPong, state.physics.gasSoundSpeed ?? 2.0),
+
+    gasWakeProbe: (starIdx = 0) => gas.wakeProbe(pingPong, starIdx),
+
+    async gasReversibilityTest(nSteps: number): Promise<{ maxPosErr: number; maxVelErr: number; count: number } | null> {
+      const wasPaused = state.paused;
+      const savedDir = timeDirection;
+      state.paused = true;
+      const start = await gas.snapshot(pingPong);
+      if (!start) {
+        timeDirection = savedDir;
+        state.paused = wasPaused;
+        return null;
+      }
+      timeDirection = 1;
+      for (let i = 0; i < nSteps; i++) {
+        const e = device.createCommandEncoder();
+        this.compute(e);
+        device.queue.submit([e.finish()]);
+      }
+      timeDirection = -1;
+      for (let i = 0; i < nSteps; i++) {
+        const e = device.createCommandEncoder();
+        this.compute(e);
+        device.queue.submit([e.finish()]);
+      }
+      timeDirection = savedDir;
+      state.paused = wasPaused;
+
+      const end = await gas.snapshot(pingPong);
+      if (!end) return null;
+      let maxPosErr = 0;
+      let maxVelErr = 0;
+      for (let i = 0; i < gas.count; i++) {
+        const o = i * 12;
+        const posErr = Math.hypot(end[o] - start[o], end[o + 1] - start[o + 1], end[o + 2] - start[o + 2]);
+        const velErr = Math.hypot(end[o + 4] - start[o + 4], end[o + 5] - start[o + 5], end[o + 6] - start[o + 6]);
+        if (posErr > maxPosErr) maxPosErr = posErr;
+        if (velErr > maxVelErr) maxVelErr = velErr;
+      }
+      return { maxPosErr, maxVelErr, count: gas.count };
     },
 
     // PM reversibility harness. Snapshots particle positions, runs N forward
@@ -2866,6 +3446,7 @@ function createPhysicsSimulation() {
 
     destroy() {
       bufferA.destroy(); bufferB.destroy();
+      gas.destroy();
       paramsBuffer.destroy(); cameraBuffer.destroy(); blurBuffer.destroy();
       attractorFieldBuffer.destroy(); markerBuffer.destroy();
       statsOutBuffer.destroy(); statsStaging.destroy(); statsParamsBuffer.destroy();
@@ -2875,7 +3456,8 @@ function createPhysicsSimulation() {
       pmDensityU32.destroy(); pmDensityF32.destroy();
       for (const b of pmPotential) b.destroy();
       for (const b of pmResidual) b.destroy();
-      pmForce.destroy(); pmMeanScratch.destroy();
+      pmForce.destroy();
+      pmMeanScratch.destroy();
       pmParamsBuffer.destroy(); pmDensityStaging.destroy();
       // V-cycle: coarse-level RHS buffers (pmRho[0] aliases pmDensityF32, skip).
       for (let l = 1; l < pmRho.length; l++) pmRho[l].destroy();
@@ -2884,6 +3466,18 @@ function createPhysicsSimulation() {
       for (const b of pmResidualUniform) b.destroy();
       for (const b of pmRestrictUniform) b.destroy();
       for (const b of pmProlongUniform) b.destroy();
+      // Outer grid (same resource bundle — mirrors the inner cleanup above).
+      pmOuterDensityU32.destroy(); pmOuterDensityF32.destroy();
+      for (const b of pmOuterPotential) b.destroy();
+      for (const b of pmOuterResidual) b.destroy();
+      pmOuterMeanScratch.destroy();
+      pmOuterParamsBuffer.destroy(); pmOuterDensityStaging.destroy();
+      for (let l = 1; l < pmOuterRho.length; l++) pmOuterRho[l].destroy();
+      for (const pair of pmOuterSmoothUniform) for (const b of pair) b.destroy();
+      for (const b of pmOuterResidualUniform) b.destroy();
+      for (const b of pmOuterRestrictUniform) b.destroy();
+      for (const b of pmOuterProlongUniform) b.destroy();
+      pmBlendBuffer.destroy();
       destroyDepthRef(depthRef);
     },
     // PM internal state — not read by external callers today. Future tickets
@@ -3922,6 +4516,17 @@ function buildParamRow(container: HTMLElement, mode: SimMode, param: ParamDef) {
       updateAll();
     });
     row.appendChild(select);
+  } else if (param.type === 'toggle') {
+    const input = document.createElement('input');
+    input.type = 'checkbox';
+    input.dataset.mode = mode;
+    input.dataset.key = param.key;
+    input.checked = Boolean(modeParams(mode)[param.key]);
+    input.addEventListener('change', () => {
+      modeParams(mode)[param.key] = input.checked;
+      updateAll();
+    });
+    row.appendChild(input);
   } else {
     const input = document.createElement('input');
     input.type = 'range';
@@ -5069,7 +5674,7 @@ const MODE_LABELS = {
 function updatePrompt() {
   const mode = state.mode;
   const params = modeParams(mode);
-  const defaultParams = DEFAULTS[mode] as unknown as Record<string, number | string>;
+  const defaultParams = DEFAULTS[mode] as unknown as Record<string, number | string | boolean>;
   const parts: (string | null)[] = [];
 
   for (const [key, val] of Object.entries(params)) {
@@ -5090,7 +5695,7 @@ function updatePrompt() {
   document.getElementById('prompt-text')!.textContent = prompt;
 }
 
-function describeParam(_mode: string, key: string, val: number | string): string | null {
+function describeParam(_mode: string, key: string, val: number | string | boolean): string | null {
   const n = Number(val);
   const descriptions: Record<string, () => string | null> = {
     count: () => `${val} particles`,
@@ -5108,6 +5713,9 @@ function describeParam(_mode: string, key: string, val: number | string): string
     diskMass: () => n < 0.1 ? `no disk potential` : `disk mass ${val}`,
     diskScaleA: () => `disk scale A ${val}`,
     diskScaleB: () => `disk scale B ${val}`,
+    gasMassFraction: () => n < 0.01 ? 'no gas reservoir' : `gas mass fraction ${val}`,
+    gasSoundSpeed: () => `gas sound speed ${val}`,
+    gasVisible: () => val ? null : 'gas hidden',
     distribution: () => `${val} distribution`,
     resolution: () => `${val}x${val} grid`,
     viscosity: () => n > 0.5 ? `thick fluid (viscosity ${val})` : n < 0.05 ? `thin fluid (viscosity ${val})` : `viscosity ${val}`,
@@ -5151,6 +5759,7 @@ function getShaderSources(mode: SimMode): Record<string, string> {
     physics: {
       'Compute (Gravity)': SHADER_NBODY_COMPUTE,
       'Render (Vert+Frag)': SHADER_NBODY_RENDER,
+      ...GAS_SHADER_SOURCES,
     },
     physics_classic: {
       'Compute (Classic)': SHADER_NBODY_CLASSIC_COMPUTE,
@@ -6908,16 +7517,39 @@ let currentFps = 0;
 let lastFrameTimestamp = -1;
 
 // --- GPU profiling ---
-// Two paths: GPU timestamp queries (Safari/Metal) give per-pass C/R/P breakdown.
-// JS-side onSubmittedWorkDone fallback (Chrome/all) gives total frame GPU time.
+// Two paths: GPU timestamp queries give named per-bucket breakdowns when
+// supported. JS-side onSubmittedWorkDone fallback gives total frame GPU time.
 let gpuFrameMs = 0;
-let gpuTimingDetail = { compute: 0, render: 0, post: 0 };
+const GPU_TIMING_BUCKETS = [
+  'pmDepositConvert',
+  'outerVCycle',
+  'boundarySample',
+  'innerVCycle',
+  'starInterpolate',
+  'gasInterpolatePressure',
+  'starGasIntegrate',
+  'starsRender',
+  'gasRender',
+  'bloomComposite',
+] as const;
+type GpuTimingBucket = typeof GPU_TIMING_BUCKETS[number];
+// [LAW:one-source-of-truth] This registry is the only source for GPU timing
+// query indices, public bucket names, and the zero-valued fallback shape.
+const GPU_TIMING_INDEX: Record<GpuTimingBucket, number> = Object.fromEntries(
+  GPU_TIMING_BUCKETS.map((bucket, index) => [bucket, index])
+) as Record<GpuTimingBucket, number>;
+function makeZeroGpuTimingDetail(): Record<GpuTimingBucket, number> {
+  return Object.fromEntries(GPU_TIMING_BUCKETS.map(bucket => [bucket, 0])) as Record<GpuTimingBucket, number>;
+}
+let gpuTimingDetail: Record<GpuTimingBucket, number> = makeZeroGpuTimingDetail();
+let activeGpuTimingBuckets = new Set<GpuTimingBucket>();
+let gpuTimingFrameActive = false;
 let profilingPending = false;
 let lastProfileTime = 0;
 const PROFILE_INTERVAL_MS = 2000;
 
 // GPU timestamp query state (null if unsupported)
-const GPU_TS_COUNT = 6; // 3 pass pairs (begin/end): compute, render, composite
+const GPU_TS_COUNT = GPU_TIMING_BUCKETS.length * 2; // begin/end pair per bucket
 let gpuTs: { querySet: GPUQuerySet; resolveBuf: GPUBuffer; stagingBuf: GPUBuffer; pending: boolean } | null = null;
 
 function initGpuTimestamps() {
@@ -6930,13 +7562,37 @@ function initGpuTimestamps() {
   };
 }
 
-function tsWrites(slotPair: number): { querySet: GPUQuerySet; beginningOfPassWriteIndex: number; endOfPassWriteIndex: number } | undefined {
-  if (!gpuTs) return undefined;
+function beginGpuTimingFrame() {
+  activeGpuTimingBuckets = new Set<GpuTimingBucket>();
+  gpuTimingFrameActive = true;
+}
+
+type TimestampWrites = { querySet: GPUQuerySet; beginningOfPassWriteIndex?: number; endOfPassWriteIndex?: number };
+
+function tsWrites(bucket: GpuTimingBucket): TimestampWrites | undefined {
+  if (!gpuTs || !gpuTimingFrameActive) return undefined;
+  activeGpuTimingBuckets.add(bucket);
+  const slotPair = GPU_TIMING_INDEX[bucket];
   return { querySet: gpuTs.querySet, beginningOfPassWriteIndex: slotPair * 2, endOfPassWriteIndex: slotPair * 2 + 1 };
 }
 
+function tsBegin(bucket: GpuTimingBucket): TimestampWrites | undefined {
+  if (!gpuTs || !gpuTimingFrameActive) return undefined;
+  activeGpuTimingBuckets.add(bucket);
+  return { querySet: gpuTs.querySet, beginningOfPassWriteIndex: GPU_TIMING_INDEX[bucket] * 2 };
+}
+
+function tsEnd(bucket: GpuTimingBucket): TimestampWrites | undefined {
+  if (!gpuTs || !gpuTimingFrameActive) return undefined;
+  activeGpuTimingBuckets.add(bucket);
+  return { querySet: gpuTs.querySet, endOfPassWriteIndex: GPU_TIMING_INDEX[bucket] * 2 + 1 };
+}
+
 function resolveTimestamps(encoder: GPUCommandEncoder, now: number) {
+  gpuTimingFrameActive = false;
   if (!gpuTs || gpuTs.pending || now - lastProfileTime < PROFILE_INTERVAL_MS) return;
+  const activeBuckets = Array.from(activeGpuTimingBuckets);
+  if (activeBuckets.length === 0) return;
   lastProfileTime = now;
   encoder.resolveQuerySet(gpuTs.querySet, 0, GPU_TS_COUNT, gpuTs.resolveBuf, 0);
   encoder.copyBufferToBuffer(gpuTs.resolveBuf, 0, gpuTs.stagingBuf, 0, GPU_TS_COUNT * 8);
@@ -6949,13 +7605,20 @@ function resolveTimestamps(encoder: GPUCommandEncoder, now: number) {
       const ns = new BigUint64Array(ts.stagingBuf.getMappedRange().slice(0));
       ts.stagingBuf.unmap();
       ts.pending = false;
-      const toMs = (a: bigint, b: bigint) => Number(b - a) / 1_000_000;
-      gpuTimingDetail = {
-        compute: toMs(ns[0], ns[1]),
-        render: toMs(ns[2], ns[3]),
-        post: toMs(ns[4], ns[5]),
-      };
-      gpuFrameMs = toMs(ns[0], ns[5]);
+      const toMs = (a: bigint, b: bigint) => b > a ? Number(b - a) / 1_000_000 : 0;
+      const detail = makeZeroGpuTimingDetail();
+      let first = 0n;
+      let last = 0n;
+      for (const bucket of activeBuckets) {
+        const idx = GPU_TIMING_INDEX[bucket] * 2;
+        const begin = ns[idx];
+        const end = ns[idx + 1];
+        detail[bucket] = toMs(begin, end);
+        if (begin > 0n && (first === 0n || begin < first)) first = begin;
+        if (end > last) last = end;
+      }
+      gpuTimingDetail = detail;
+      gpuFrameMs = first > 0n && last > first ? Number(last - first) / 1_000_000 : 0;
     }).catch(() => { ts.pending = false; });
   });
 }
@@ -7057,8 +7720,9 @@ function resetCurrentSim() {
 function updateStats() {
   const msPerFrame = currentFps > 0 ? (1000 / currentFps).toFixed(1) : '--';
   const d = gpuTimingDetail;
-  const gpuDetail = d.compute > 0
-    ? ` (C:${d.compute.toFixed(1)} R:${d.render.toFixed(1)} P:${d.post.toFixed(1)})`
+  const hasDetailedTiming = GPU_TIMING_BUCKETS.some(bucket => d[bucket] > 0);
+  const gpuDetail = hasDetailedTiming
+    ? ` (PM:${d.pmDepositConvert.toFixed(1)} V:${(d.outerVCycle + d.innerVCycle).toFixed(1)} R:${(d.starsRender + d.gasRender).toFixed(1)} P:${d.bloomComposite.toFixed(1)})`
     : gpuFrameMs > 0 ? ` gpu:${gpuFrameMs.toFixed(1)}ms` : '';
   document.getElementById('stat-fps')!.textContent = `${currentFps} fps ${msPerFrame}ms${gpuDetail}`;
   const sim = simulations[state.mode];
@@ -7115,7 +7779,7 @@ function runFadePass(encoder: GPUCommandEncoder, prevSceneIdx: number, currScene
   pass.end();
 }
 
-function runBloomChain(encoder: GPUCommandEncoder) {
+function runBloomChain(encoder: GPUCommandEncoder, timingBucket?: GpuTimingBucket) {
   const fx = state.fx;
   // Downsample chain: scene → mip0 → mip1 → ... → mipN
   const sceneIdx = postFx.sceneIdx;
@@ -7128,12 +7792,16 @@ function runBloomChain(encoder: GPUCommandEncoder) {
     // [LAW:single-enforcer] downsampleBGs cache layout: [0]=mip0 reading scene[0], [1]=mip0 reading scene[1],
     // [2..BLOOM_LEVELS]=mipK reading mipK-1. Keyed from (sceneIdx, i) here.
     const bg = postFx.downsampleBGs[i === 0 ? sceneIdx : i + 1];
-    const pass = encoder.beginRenderPass({ colorAttachments: [{
-      view: postFx.bloomMipViews[i],
-      clearValue: { r: 0, g: 0, b: 0, a: 1 },
-      loadOp: 'clear',
-      storeOp: 'store',
-    }]});
+    const bTsw = timingBucket && i === 0 ? tsBegin(timingBucket) : undefined;
+    const pass = encoder.beginRenderPass({
+      colorAttachments: [{
+        view: postFx.bloomMipViews[i],
+        clearValue: { r: 0, g: 0, b: 0, a: 1 },
+        loadOp: 'clear',
+        storeOp: 'store',
+      }],
+      ...(bTsw ? { timestampWrites: bTsw } : {}),
+    });
     pass.setPipeline(postFx.downsamplePipeline!);
     pass.setBindGroup(0, bg);
     pass.draw(3);
@@ -7159,7 +7827,13 @@ function runBloomChain(encoder: GPUCommandEncoder) {
   }
 }
 
-function runComposite(encoder: GPUCommandEncoder, finalView: GPUTextureView, finalFormat: GPUTextureFormat, viewport: number[] | null = null) {
+function runComposite(
+  encoder: GPUCommandEncoder,
+  finalView: GPUTextureView,
+  finalFormat: GPUTextureFormat,
+  viewport: number[] | null = null,
+  timingBucket?: GpuTimingBucket
+) {
   const fx = state.fx;
   const tc = getThemeColors();
   const buf = postFx.compositeParams;
@@ -7178,7 +7852,7 @@ function runComposite(encoder: GPUCommandEncoder, finalView: GPUTextureView, fin
   const pipeline = ensureCompositePipeline(finalFormat);
   // [LAW:single-enforcer] compositeBGs cache is indexed by scene ping-pong slot; allocate-on-resize, reuse-per-frame.
   const bg = postFx.compositeBGs[postFx.sceneIdx];
-  const pTsw = tsWrites(2);
+  const pTsw = timingBucket ? tsEnd(timingBucket) : undefined;
   const pass = encoder.beginRenderPass({
     colorAttachments: [{
       view: finalView,
@@ -7238,6 +7912,7 @@ function frame(now: DOMHighResTimeStamp) {
   const mode = state.mode;
 
   try {
+    beginGpuTimingFrame();
     const encoder = device.createCommandEncoder();
 
     // Debug stepping/skipping and normal play both funnel through runDebugCompute so the
@@ -7253,9 +7928,9 @@ function frame(now: DOMHighResTimeStamp) {
 
     sim.render(encoder, postFx.sceneViews[currIdx], null);
 
-    runBloomChain(encoder);
+    runBloomChain(encoder, 'bloomComposite');
     const swapchainView = context.getCurrentTexture().createView();
-    runComposite(encoder, swapchainView, canvasFormat);
+    runComposite(encoder, swapchainView, canvasFormat, null, 'bloomComposite');
 
     resolveTimestamps(encoder, now);
     device.queue.submit([encoder.finish()]);
@@ -7335,6 +8010,10 @@ function syncUIFromState() {
         if (valueSpan) valueSpan.textContent = formatValueWithMax(realVal, paramDef);
       }
     });
+    container.querySelectorAll<HTMLInputElement>('input[type="checkbox"]').forEach(input => {
+      const key = input.dataset.key!;
+      if (key && key in params) input.checked = Boolean(params[key]);
+    });
     container.querySelectorAll<HTMLSelectElement>('select').forEach(sel => {
       const key = sel.dataset.key!;
       if (key && key in params) sel.value = String(params[key]);
@@ -7384,6 +8063,15 @@ function initBindings(): void {
               target[param.key] = typeof current === 'number' ? Number(v) : v;
             },
             options: (param.options ?? []).map(o => ({ value: String(o), label: String(o) })),
+          });
+        } else if (param.type === 'toggle') {
+          bindingRegistry.register({
+            kind: 'toggle',
+            id: `${mode}.${param.key}`,
+            label: param.label,
+            group: mode,
+            get: () => Boolean(modeParams(mode)[param.key]),
+            set: (v) => { modeParams(mode)[param.key] = v; },
           });
         } else if (param.min !== undefined && param.max !== undefined) {
           bindingRegistry.register({
@@ -7515,8 +8203,14 @@ async function main() {
   type PmDiag = {
     dumpDensity?: () => Promise<Float32Array | null>,
     dumpPotential?: () => Promise<Float32Array | null>,
-    maxResidual?: () => Promise<number | null>,
+    dumpOuterDensity?: () => Promise<Float32Array | null>,
+    dumpOuterPotential?: () => Promise<Float32Array | null>,
+    maxResidual?: () => Promise<{ inner: number; outer: number } | null>,
     reversibilityTest?: (n: number) => Promise<{ maxErr: number; meanErr: number; count: number } | null>,
+    gasDumpDensity?: () => Promise<Float32Array | null>,
+    gasEnergyBreakdown?: () => Promise<{ starKinetic: number; gasKinetic: number; gasInternal: number; total: number } | null>,
+    gasWakeProbe?: (starIdx?: number) => Promise<{ aheadDensity: number; behindDensity: number; asymmetry: number } | null>,
+    gasReversibilityTest?: (n: number) => Promise<{ maxPosErr: number; maxVelErr: number; count: number } | null>,
   };
   (window as any).__pmDumpDensity = () => {
     const sim = simulations[state.mode] as unknown as PmDiag;
@@ -7525,6 +8219,14 @@ async function main() {
   (window as any).__pmDumpPotential = () => {
     const sim = simulations[state.mode] as unknown as PmDiag;
     return sim?.dumpPotential ? sim.dumpPotential() : Promise.resolve(null);
+  };
+  (window as any).__pmDumpOuterDensity = () => {
+    const sim = simulations[state.mode] as unknown as PmDiag;
+    return sim?.dumpOuterDensity ? sim.dumpOuterDensity() : Promise.resolve(null);
+  };
+  (window as any).__pmDumpOuterPotential = () => {
+    const sim = simulations[state.mode] as unknown as PmDiag;
+    return sim?.dumpOuterPotential ? sim.dumpOuterPotential() : Promise.resolve(null);
   };
   (window as any).__pmMaxResidual = () => {
     const sim = simulations[state.mode] as unknown as PmDiag;
@@ -7536,6 +8238,22 @@ async function main() {
   (window as any).__pmReversibilityTest = (n = 1000) => {
     const sim = simulations[state.mode] as unknown as PmDiag;
     return sim?.reversibilityTest ? sim.reversibilityTest(n) : Promise.resolve(null);
+  };
+  (window as any).__gasDumpDensity = () => {
+    const sim = simulations[state.mode] as unknown as PmDiag;
+    return sim?.gasDumpDensity ? sim.gasDumpDensity() : Promise.resolve(null);
+  };
+  (window as any).__gasEnergyBreakdown = () => {
+    const sim = simulations[state.mode] as unknown as PmDiag;
+    return sim?.gasEnergyBreakdown ? sim.gasEnergyBreakdown() : Promise.resolve(null);
+  };
+  (window as any).__gasWakeProbe = (starIdx = 0) => {
+    const sim = simulations[state.mode] as unknown as PmDiag;
+    return sim?.gasWakeProbe ? sim.gasWakeProbe(starIdx) : Promise.resolve(null);
+  };
+  (window as any).__gasReversibilityTest = (n = 1000) => {
+    const sim = simulations[state.mode] as unknown as PmDiag;
+    return sim?.gasReversibilityTest ? sim.gasReversibilityTest(n) : Promise.resolve(null);
   };
   (window as any).__bindings = bindingRegistry;
   (window as any).__anchors = { evaluateAnchor, handFrames: xrHandFrames };
