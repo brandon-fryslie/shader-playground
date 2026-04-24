@@ -149,7 +149,7 @@ The code detects and handles both via capability checks (`binding.getViewSubImag
 
 ## Architecture
 
-`src/main.ts` is a single-file application (~2400 lines). WGSL shaders live in `src/shaders/` and are imported as raw strings via Vite's `?raw` suffix. `src/types.ts` contains all TypeScript types.
+`src/main.ts` is now a thin entrypoint that calls `src/app/bootstrap.ts`. The remaining legacy runtime is isolated in `src/app/legacy-runtime.ts` while extracted subsystems own shader source/edit state (`src/gpu/shaders.ts`), math (`src/math/`), metrics (`src/metrics/bus.ts`), persistence (`src/persistence/local-storage.ts`), prompt rendering (`src/ui/prompt.ts`), initial state (`src/app/state.ts`), and DevTools globals (`src/diagnostics/devtools.ts`).
 
 Each simulation implements:
 ```typescript
@@ -157,3 +157,5 @@ Each simulation implements:
 ```
 
 Simulations are lazy-initialized on first tab switch and reuse GPU buffers until destroyed. Boids and N-body use ping-pong (A/B) storage buffers; fluid uses staged copy-back.
+
+Run `npm run check` to enforce the bootstrap-size and dependency-direction guardrails before the production build.

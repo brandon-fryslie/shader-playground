@@ -25,29 +25,25 @@ The Vision Pro user tests against PR previews — they do **not** run `npm run d
 
 ## Architecture
 
-WebGPU compute shader playground with 4 simulation modes (boids, N-body physics, fluid dynamics, parametric shapes), a color theme system, shader debug editor, and WebXR stereo rendering for Apple Vision Pro.
+WebGPU compute shader playground with 6 simulation modes (boids, N-body physics, classic N-body, fluid dynamics, parametric shapes, reaction diffusion), a color theme system, shader debug editor, and WebXR stereo rendering for Apple Vision Pro.
 
-### Current State: Monolith with Shader Extraction
+### Current State: Thin Entrypoint With Legacy Runtime Seam
 
-`src/main.ts` contains all application logic (~5000 lines). WGSL shaders are in individual files under `src/shaders/` imported via Vite's `?raw` suffix. Types are in `src/types.ts`. The codebase uses strict TypeScript (no `@ts-nocheck`).
+`src/main.ts` is a bootstrap-only entrypoint. `src/app/bootstrap.ts` composes the app and calls `src/app/legacy-runtime.ts`, which is the explicit migration seam for remaining runtime code. Extracted ownership exists for state creation, WGSL originals/edits, math, metrics, persistence, prompt generation, and DevTools globals. The codebase uses strict TypeScript.
 
-### Section Map of main.ts
+### Module Map
 
-| Section | Content |
-|---------|---------|
-| 1: Constants | DEFAULTS, PRESETS, PARAM_DEFS, COLOR_THEMES, SHAPE_IDS, SHAPE_PARAMS, state object |
-| Attractor Lifecycle | `attractorStrength`, `attractorDead`, `attractorDecayDuration`, `pruneAttractors`, `createAttractor`, `moveAttractor`, `releaseAttractor` |
-| 2: (empty) | Shader strings were here, now imported from .wgsl files |
-| 3: Math | mat4 library, vec3 utilities, orbit camera, camera uniform packing, depth texture management, screen-to-world projection |
-| 4: WebGPU Init | Device/adapter/canvas setup with fallback messaging |
-| Grid Renderer | Shared animated grid background rendered before each simulation |
-| 5: Simulations | Factory functions: createBoidsSimulation, createPhysicsSimulation, createFluidSimulation, createParametricSimulation |
-| 6: UI & Controls | DOM construction for sliders/dropdowns/presets, theme selector, mouse/touch handling, time-reverse controls |
-| 7: Prompt Generator | Natural language description of current config |
-| 7b: Shader Panel | Live WGSL editor with compile/reset |
-| 8: WebXR | Session management for Vision Pro (XRGPUBinding, stereo rendering) |
-| 9: Render Loop | requestAnimationFrame loop, FPS counter, step counter, canvas resize |
-| 10: Persistence | localStorage save/load/sync |
+| Module | Content |
+|--------|---------|
+| `src/main.ts` | Thin entrypoint |
+| `src/app/bootstrap.ts` | Composition root |
+| `src/app/legacy-runtime.ts` | Remaining runtime seam during extraction |
+| `src/gpu/shaders.ts` | WGSL originals, edited sources, shader tab mapping |
+| `src/math/` | Matrix/vector helpers |
+| `src/metrics/bus.ts` | Typed metrics channels and burst recording |
+| `src/persistence/local-storage.ts` | localStorage serialization/hydration |
+| `src/ui/prompt.ts` | Prompt text derivation |
+| `src/diagnostics/devtools.ts` | Diagnostic `window.__*` globals |
 
 ### Key Patterns
 
