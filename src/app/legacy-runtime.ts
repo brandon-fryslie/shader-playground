@@ -10,6 +10,16 @@ import {
 import { createXrWidgetRenderer, type XrWidgetRenderer } from '../xr-ui/renderer';
 import { HIG_DEFAULTS } from '../xr-ui/widgets';
 import { createGasReservoir, GAS_SHADER_SOURCES } from '../gasReservoir';
+import { DEFAULTS as catalogDefaults, PRESETS as catalogPresets, PARAM_DEFS as catalogParamDefs, COLOR_THEMES as catalogColorThemes, DEFAULT_THEME as catalogDefaultTheme, THEME_FADE_MS as catalogThemeFadeMs, DEFAULT_CLEAR_COLOR as catalogDefaultClearColor, SHAPE_IDS as catalogShapeIds, SHAPE_PARAMS as catalogShapeParams, FX_PARAM_DEFS as catalogFxParamDefs, MODE_TAB_LABELS as catalogModeTabLabels } from './catalog';
+import { createInitialState } from './state';
+import { registerAppBindings } from './bindings';
+import { saveState as persistState, loadState as hydrateState, STORAGE_KEY as storageKey } from '../persistence/local-storage';
+import { updatePrompt as renderPrompt } from '../ui/prompt';
+import { createThemeSystem } from '../ui/theme';
+import { createControls, type ControlsApi } from '../ui/controls';
+import { createSimulationRegistry, type SimulationRegistry } from '../simulations/registry';
+import { shaderSource, getShaderSources as getCatalogShaderSources, applyShaderEdit as applyCatalogShaderEdit, resetShaderEdit as resetCatalogShaderEdit } from '../gpu/shaders';
+import { installDevtools } from '../diagnostics/devtools';
 
 // WGSL shader imports — Vite loads these as raw strings
 import SHADER_BOIDS_COMPUTE from '../shaders/boids.compute.wgsl?raw';
@@ -426,28 +436,23 @@ function computeThemeColors(now: number): RGBThemeColors {
 }
 
 function getThemeColors(): RGBThemeColors {
-  return currentThemeColors;
+  return themeSystem.getThemeColors();
 }
 
 function refreshThemeColors(now: number): void {
-  currentThemeColors = computeThemeColors(now);
+  themeSystem.refreshThemeColors(now);
 }
 
 function syncThemeTransition(themeName: string): void {
-  const colors = getThemeColorsForName(themeName);
-  themeTransition.from = colors;
-  themeTransition.to = colors;
-  themeTransition.startedAtMs = 0;
-  currentThemeColors = colors;
+  themeSystem.syncThemeTransition(themeName);
 }
 
 function startThemeTransition(themeName: string, now = performance.now()): void {
-  const nextColors = getThemeColorsForName(themeName);
-  const currentColors = computeThemeColors(now);
-  themeTransition.from = currentColors;
-  themeTransition.to = nextColors;
-  themeTransition.startedAtMs = now;
-  currentThemeColors = currentColors;
+  themeSystem.startThemeTransition(themeName, now);
+}
+
+function syncThemeButtons(themeName: string): void {
+  themeSystem.syncThemeButtons(themeName);
 }
 
 // Dynamic access to mode-specific params — casts for TypeScript's correlated types limitation
@@ -455,39 +460,19 @@ function modeParams(mode: SimMode): Record<string, number | string | boolean> {
   return state[mode] as unknown as Record<string, number | string | boolean>;
 }
 
-const state: AppState = {
-  mode: 'physics',
-  colorTheme: 'Dracula',
-  xrEnabled: false,
-  paused: false,
-  boids: { ...DEFAULTS.boids },
-  physics: { ...DEFAULTS.physics },
-  physics_classic: { ...DEFAULTS.physics_classic },
-  fluid: { ...DEFAULTS.fluid },
-  parametric: { ...DEFAULTS.parametric },
-  reaction: { ...DEFAULTS.reaction },
-  camera: { distance: 5.0, fov: 60, rotX: 0.3, rotY: 0.0, panX: 0, panY: 0 },
-  mouse: { down: false, x: 0, y: 0, dx: 0, dy: 0, worldX: 0, worldY: 0, worldZ: 0 },
-  // [LAW:one-source-of-truth] Attractors are the canonical N-body interaction state.
-  // Held attractors have releaseStep < 0 and holdSteps < 0 (follow cursor, strength charging in sim steps).
-  // Released attractors decay over attractorDecaySteps(a) sim steps, then get pruned from the array.
-  // Max cap of 32 is a safety rail — in practice users hit 5-10 concurrent at most.
-  attractors: [] as Attractor[],
-  markers: [] as Marker[],
-  pointerToAttractor: new Map<number, number>() as Map<number, number>,
-  fx: {
-    bloomIntensity: 0.7,
-    bloomThreshold: 4.0,
-    bloomRadius: 1.0,
-    trailPersistence: 0.0,
-    exposure: 1.0,
-    vignette: 0.35,
-    chromaticAberration: 0.25,
-    grading: 0.5,
-    timeScale: 1.0,
-  },
-  debug: { xrLog: false },
-};
+// [LAW:one-source-of-truth] AppState creation is centralized in app/state.ts so
+// boot and tests share one canonical initialization shape.
+const state: AppState = createInitialState(catalogDefaults);
+
+const themeSystem = createThemeSystem({
+  // [LAW:one-source-of-truth] Theme metadata and transition ownership live in
+  // app/catalog.ts and ui/theme.ts; the runtime consumes that service.
+  defaultTheme: catalogDefaultTheme,
+  fadeMs: catalogThemeFadeMs,
+  onThemeSelected: () => updateAll(),
+  state,
+  themes: catalogColorThemes,
+});
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // ATTRACTOR LIFECYCLE
@@ -1164,7 +1149,7 @@ function getColorAttachment(
   const useLoad = trails && !postFx.needsClear;
   return {
     view: getCurrentSceneView(),
-    clearValue: DEFAULT_CLEAR_COLOR,
+    clearValue: catalogDefaultClearColor,
     loadOp: useLoad ? 'load' : 'clear',
     storeOp: 'store',
   };
@@ -1363,7 +1348,39 @@ function renderGrid(pass: GPURenderPassEncoder, aspect: number, viewIndex = 0): 
 // SECTION 5: SIMULATION MODULES
 // ═══════════════════════════════════════════════════════════════════════════════
 
+// [LAW:one-source-of-truth] The extracted simulation registry owns the live
+// instances. This map is a compatibility cache for the remaining legacy seam.
 const simulations: Partial<Record<SimMode, Simulation>> = {};
+let simulationRegistry: SimulationRegistry | null = null;
+
+function syncSimulationCache(mode: SimMode): void {
+  const sim = simulationRegistry?.get(mode);
+  if (sim) simulations[mode] = sim;
+  else delete simulations[mode];
+}
+
+function dropSimulationIfCurrent(mode: SimMode, expected: Simulation): void {
+  simulationRegistry?.dropIfCurrent(mode, expected);
+  syncSimulationCache(mode);
+}
+
+function initializeSimulationRegistry(): void {
+  simulationRegistry = createSimulationRegistry({
+    device,
+    factories: {
+      boids: createBoidsSimulation,
+      physics: createPhysicsSimulation,
+      physics_classic: createPhysicsClassicSimulation,
+      fluid: createFluidSimulation,
+      parametric: createParametricSimulation,
+      reaction: createReactionSimulation,
+    },
+    reportError: (mode, message) => {
+      showSimError(mode, message);
+      delete simulations[mode];
+    },
+  });
+}
 
 // --- 5a: BOIDS ---
 
@@ -1397,8 +1414,8 @@ function createBoidsSimulation() {
   const paramsBuffer = device.createBuffer({ size: 64, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
   const cameraBuffer = device.createBuffer({ size: CAMERA_STRIDE * 2, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
 
-  const computeModule = createShaderModuleChecked('boids.compute', SHADER_BOIDS_COMPUTE_EDIT || SHADER_BOIDS_COMPUTE);
-  const renderModule = createShaderModuleChecked('boids.render', SHADER_BOIDS_RENDER_EDIT || SHADER_BOIDS_RENDER);
+  const computeModule = createShaderModuleChecked('boids.compute', shaderSource('boids.compute'));
+  const renderModule = createShaderModuleChecked('boids.render', shaderSource('boids.render'));
 
   const computeBGL = device.createBindGroupLayout({
     entries: [
@@ -2541,8 +2558,8 @@ function createPhysicsSimulation() {
     pmBlendBuffer,
   });
 
-  const computeModule = createShaderModuleChecked('nbody.compute', SHADER_NBODY_COMPUTE_EDIT || SHADER_NBODY_COMPUTE);
-  const renderModule = createShaderModuleChecked('nbody.render', SHADER_NBODY_RENDER_EDIT || SHADER_NBODY_RENDER);
+  const computeModule = createShaderModuleChecked('nbody.compute', shaderSource('nbody.compute'));
+  const renderModule = createShaderModuleChecked('nbody.render', shaderSource('nbody.render'));
 
   const computeBGL = device.createBindGroupLayout({
     entries: [
@@ -3102,7 +3119,7 @@ function createPhysicsSimulation() {
       const gasPass = encoder.beginRenderPass({
         colorAttachments: [{
           view: gasColorView,
-          clearValue: DEFAULT_CLEAR_COLOR,
+          clearValue: catalogDefaultClearColor,
           loadOp: 'load',
           storeOp: 'store',
         }],
@@ -3547,8 +3564,8 @@ function createPhysicsClassicSimulation(): Simulation {
   const attractorBuffer = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
   const cameraBuffer = device.createBuffer({ size: CAMERA_STRIDE * 2, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
 
-  const computeModule = createShaderModuleChecked('nbody.classic.compute', SHADER_NBODY_CLASSIC_COMPUTE_EDIT || SHADER_NBODY_CLASSIC_COMPUTE);
-  const renderModule = createShaderModuleChecked('nbody.classic.render', SHADER_NBODY_CLASSIC_RENDER_EDIT || SHADER_NBODY_CLASSIC_RENDER);
+  const computeModule = createShaderModuleChecked('nbody.classic.compute', shaderSource('nbody.classic.compute'));
+  const renderModule = createShaderModuleChecked('nbody.classic.render', shaderSource('nbody.classic.render'));
 
   const computeBGL = device.createBindGroupLayout({ entries: [
     { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
@@ -3710,12 +3727,12 @@ function createFluidSimulation() {
   device.queue.writeBuffer(velA, 0, initVel);
 
   // Compile shaders
-  const forcesAdvectModule = createShaderModuleChecked('fluid.forces', SHADER_FLUID_FORCES_ADVECT_EDIT || SHADER_FLUID_FORCES_ADVECT);
-  const diffuseModule = createShaderModuleChecked('fluid.diffuse', SHADER_FLUID_DIFFUSE_EDIT || SHADER_FLUID_DIFFUSE);
-  const pressureModule = createShaderModuleChecked('fluid.pressure', SHADER_FLUID_PRESSURE_EDIT || SHADER_FLUID_PRESSURE);
-  const divergenceModule = createShaderModuleChecked('fluid.divergence', SHADER_FLUID_DIVERGENCE_EDIT || SHADER_FLUID_DIVERGENCE);
-  const gradientModule = createShaderModuleChecked('fluid.gradient', SHADER_FLUID_GRADIENT_EDIT || SHADER_FLUID_GRADIENT);
-  const renderModule = createShaderModuleChecked('fluid.render', SHADER_FLUID_RENDER_EDIT || SHADER_FLUID_RENDER);
+  const forcesAdvectModule = createShaderModuleChecked('fluid.forces', shaderSource('fluid.forces'));
+  const diffuseModule = createShaderModuleChecked('fluid.diffuse', shaderSource('fluid.diffuse'));
+  const pressureModule = createShaderModuleChecked('fluid.pressure', shaderSource('fluid.pressure'));
+  const divergenceModule = createShaderModuleChecked('fluid.divergence', shaderSource('fluid.divergence'));
+  const gradientModule = createShaderModuleChecked('fluid.gradient', shaderSource('fluid.gradient'));
+  const renderModule = createShaderModuleChecked('fluid.render', shaderSource('fluid.render'));
 
   // Forces + Advect pipeline: reads vel+dye from A, writes to B
   const faBGL = device.createBindGroupLayout({
@@ -4011,7 +4028,7 @@ function createParametricSimulation() {
   let time = 0;     // always advances; used only for param oscillation phase
   let animTime = 0; // advances only when any rate > 0; drives rotation + waves
 
-  const computeModule = createShaderModuleChecked('parametric.compute', SHADER_PARAMETRIC_COMPUTE_EDIT || SHADER_PARAMETRIC_COMPUTE);
+  const computeModule = createShaderModuleChecked('parametric.compute', shaderSource('parametric.compute'));
   const computeBGL = device.createBindGroupLayout({
     entries: [
       { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
@@ -4027,7 +4044,7 @@ function createParametricSimulation() {
     { binding: 1, resource: { buffer: computeParamsBuffer } },
   ]});
 
-  const renderModule = createShaderModuleChecked('parametric.render', SHADER_PARAMETRIC_RENDER_EDIT || SHADER_PARAMETRIC_RENDER);
+  const renderModule = createShaderModuleChecked('parametric.render', shaderSource('parametric.render'));
   const renderBGL = device.createBindGroupLayout({
     entries: [
       { binding: 0, visibility: GPUShaderStage.VERTEX, buffer: { type: 'read-only-storage' } },
@@ -4078,7 +4095,7 @@ function createParametricSimulation() {
       const f32 = new Float32Array(paramsData);
       u32[0] = URES; u32[1] = VRES;
       f32[2] = p.scale; f32[3] = twist; f32[4] = animTime;
-      u32[5] = SHAPE_IDS[p.shape] || 0;
+      u32[5] = catalogShapeIds[p.shape] || 0;
       f32[6] = p1; f32[7] = p2; f32[8] = p3; f32[9] = p4;
       f32[10] = m.worldX; f32[11] = m.worldY; f32[12] = m.worldZ;
       f32[13] = m.down ? 1.0 : 0.0;
@@ -4224,7 +4241,7 @@ function createReactionSimulation() {
   );
 
   // Compute pipeline
-  const computeModule = createShaderModuleChecked('reaction.compute', SHADER_REACTION_COMPUTE_EDIT || SHADER_REACTION_COMPUTE);
+  const computeModule = createShaderModuleChecked('reaction.compute', shaderSource('reaction.compute'));
   const computeBGL = device.createBindGroupLayout({
     entries: [
       { binding: 0, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: 'float', viewDimension: '3d' } },
@@ -4253,7 +4270,7 @@ function createReactionSimulation() {
   ];
 
   // Render pipeline — raymarched volume
-  const renderModule = createShaderModuleChecked('reaction.render', SHADER_REACTION_RENDER_EDIT || SHADER_REACTION_RENDER);
+  const renderModule = createShaderModuleChecked('reaction.render', shaderSource('reaction.render'));
   const sampler = device.createSampler({
     magFilter: 'linear', minFilter: 'linear',
     addressModeU: 'clamp-to-edge', addressModeV: 'clamp-to-edge', addressModeW: 'clamp-to-edge',
@@ -4441,47 +4458,7 @@ function buildFxSection(container: HTMLElement) {
 }
 
 function buildControls() {
-  for (const [modeStr, sections] of Object.entries(PARAM_DEFS)) {
-    const mode = modeStr as SimMode;
-    const container = document.getElementById(`params-${mode}`)!;
-    const presetsDiv = document.createElement('div');
-    presetsDiv.className = 'presets';
-
-    for (const presetName of Object.keys(PRESETS[mode])) {
-      const btn = document.createElement('button');
-      btn.className = 'preset-btn' + (presetName === 'Default' ? ' active' : '');
-      btn.textContent = presetName;
-      btn.dataset.preset = presetName;
-      btn.dataset.mode = mode;
-      btn.addEventListener('click', () => applyPreset(mode, presetName));
-      presetsDiv.appendChild(btn);
-    }
-    container.appendChild(presetsDiv);
-
-    for (const section of sections) {
-      const secDiv = document.createElement('div');
-      secDiv.className = 'param-section';
-      const title = document.createElement('div');
-      title.className = 'param-section-title';
-      title.textContent = section.section;
-      secDiv.appendChild(title);
-
-      // Dynamic sections (shape params) get populated later
-      if (section.dynamic) {
-        secDiv.id = section.id ?? '';
-        container.appendChild(secDiv);
-        continue;
-      }
-
-      for (const param of section.params) {
-        buildParamRow(secDiv, mode, param);
-      }
-
-      container.appendChild(secDiv);
-    }
-
-    buildFxSection(container);
-  }
+  getControlsApi().buildControls();
 }
 
 function buildParamRow(container: HTMLElement, mode: SimMode, param: ParamDef) {
@@ -4642,40 +4619,7 @@ function logTickToReal(tick: number, min: number, max: number): number {
 }
 
 function applyPreset(mode: SimMode, presetName: string) {
-  const preset = PRESETS[mode][presetName];
-  Object.assign(modeParams(mode), preset);
-
-  // Update all sliders/dropdowns for this mode
-  const container = document.getElementById(`params-${mode}`)!;
-  container.querySelectorAll<HTMLInputElement>('input[type="range"]').forEach(input => {
-    const key = input.dataset.key!;
-    if (key in preset) {
-      const paramDef = findParamDef(mode, key);
-      const realVal = Number(preset[key]);
-      input.value = (paramDef?.logScale && paramDef.min !== undefined && paramDef.max !== undefined)
-        ? String(realToLogTick(realVal, paramDef.min, paramDef.max))
-        : String(preset[key]);
-      const valueSpan = input.parentElement?.querySelector('.control-value');
-      if (valueSpan) valueSpan.textContent = formatValueWithMax(realVal, paramDef);
-    }
-  });
-  container.querySelectorAll<HTMLSelectElement>('select').forEach(sel => {
-    const key = sel.dataset.key!;
-    if (key in preset) sel.value = String(preset[key]);
-  });
-
-  // Highlight active preset button
-  container.querySelectorAll<HTMLButtonElement>('.preset-btn').forEach(btn => {
-    btn.classList.toggle('active', btn.dataset.preset === presetName);
-  });
-
-  // Rebuild dynamic shape params when parametric preset changes shape
-  if (mode === 'parametric') {
-    rebuildShapeParams();
-  }
-
-  resetCurrentSim();
-  updateAll();
+  getControlsApi().applyPreset(mode, presetName);
 }
 
 function findParamDef(mode: SimMode, key: string): ParamDef | null {
@@ -4697,85 +4641,21 @@ const MODE_TAB_LABELS: Record<SimMode, string> = {
 };
 
 function selectMode(mode: SimMode): void {
-  state.mode = mode;
-  document.querySelectorAll<HTMLElement>('.mode-tab').forEach(t =>
-    t.classList.toggle('active', t.dataset.mode === mode));
-  document.querySelectorAll<HTMLElement>('.param-group').forEach(g =>
-    g.classList.toggle('active', g.dataset.mode === mode));
-  document.querySelectorAll<HTMLElement>('.debug-panel').forEach(g =>
-    g.classList.toggle('active', g.dataset.mode === mode));
-  // Sync mobile stepper label
-  const stepperLabel = document.getElementById('mode-stepper-label');
-  if (stepperLabel) stepperLabel.textContent = MODE_TAB_LABELS[mode];
-  ensureSimulation();
-  updateAll();
+  getControlsApi().selectMode(mode);
 }
 
 function setupTabs() {
-  document.querySelectorAll<HTMLElement>('.mode-tab').forEach(tab => {
-    tab.addEventListener('click', () => {
-      const mode = tab.dataset.mode as SimMode;
-      selectMode(mode);
-    });
-  });
+  getControlsApi().setupTabs();
 }
 
 // [LAW:single-enforcer] Pause-button text/active-state is reflected in exactly one place so the
 // desktop button, mobile FAB, and any programmatic pause (breakpoint, skip completion) all agree.
 function syncPauseButtons() {
-  const btn = document.getElementById('btn-pause');
-  if (btn) {
-    btn.textContent = state.paused ? 'Resume' : 'Pause';
-    btn.classList.toggle('active', state.paused);
-  }
-  const fab = document.getElementById('fab-pause');
-  if (fab) {
-    fab.textContent = state.paused ? '\u25B6' : '\u23F8';
-    fab.classList.toggle('active', state.paused);
-  }
+  getControlsApi().syncPauseButtons();
 }
 
 function setupGlobalControls() {
-  document.getElementById('btn-pause')!.addEventListener('click', () => {
-    state.paused = !state.paused;
-    if (state.paused) cancelDebugMovement();
-    syncPauseButtons();
-  });
-
-  document.getElementById('btn-reset')!.addEventListener('click', () => {
-    resetCurrentSim();
-  });
-
-  // Copy prompt
-  document.getElementById('copy-btn')!.addEventListener('click', () => {
-    const text = document.getElementById('prompt-text')!.textContent ?? '';
-    navigator.clipboard.writeText(text).then(() => {
-      const btn = document.getElementById('copy-btn')!;
-      btn.textContent = 'Copied!';
-      setTimeout(() => { btn.textContent = 'Copy'; }, 1500);
-    });
-  });
-
-  // Reset All — clear localStorage and reload
-  document.getElementById('btn-reset-all')!.addEventListener('click', () => {
-    localStorage.removeItem(STORAGE_KEY);
-    location.reload();
-  });
-
-  setupRecordButton();
-
-  // XR debug-log toggle: subscribes/unsubscribes the live console consumer.
-  // [LAW:single-enforcer] Single site that flips state.debug.xrLog + the
-  // metrics subscription in lockstep so the two cannot disagree.
-  const xrLogToggle = document.getElementById('toggle-xr-log') as HTMLInputElement;
-  xrLogToggle.addEventListener('change', () => {
-    state.debug.xrLog = xrLogToggle.checked;
-    setXrDebugLogging(state.debug.xrLog);
-    saveState();
-  });
-
-  // XR button setup
-  setupXRButton();
+  getControlsApi().setupGlobalControls();
 }
 
 // One-click XR record button: enter XR and begin an unbounded recording;
@@ -5180,26 +5060,7 @@ function updateDebugPanel(): void {
 }
 
 function buildThemeSelector() {
-  const container = document.getElementById('theme-presets')!;
-  for (const name of Object.keys(COLOR_THEMES)) {
-    const theme = COLOR_THEMES[name];
-    const btn = document.createElement('button');
-    btn.className = 'preset-btn' + (name === state.colorTheme ? ' active' : '');
-    btn.textContent = name;
-    btn.dataset.theme = name;
-    // Color swatch hint
-    btn.style.borderLeftWidth = '3px';
-    btn.style.borderLeftColor = theme.primary;
-    btn.addEventListener('click', () => {
-      if (state.colorTheme === name) return;
-      state.colorTheme = name;
-      startThemeTransition(name);
-      container.querySelectorAll<HTMLButtonElement>('.preset-btn').forEach(b =>
-        b.classList.toggle('active', b.dataset.theme === name));
-      updateAll();
-    });
-    container.appendChild(btn);
-  }
+  themeSystem.buildThemeSelector();
 }
 
 // Compute camera eye position and basis vectors from orbit state
@@ -5651,7 +5512,7 @@ function setupBottomSheet() {
 
 function applyMobileDefaults() {
   // [LAW:one-source-of-truth] Only override defaults for fresh installs — saved state is authoritative
-  if (localStorage.getItem(STORAGE_KEY)) return;
+  if (localStorage.getItem(storageKey)) return;
   state.boids.count = 500;
   state.physics.count = 2000;
   state.physics_classic.count = 200;
@@ -5672,27 +5533,7 @@ const MODE_LABELS = {
 };
 
 function updatePrompt() {
-  const mode = state.mode;
-  const params = modeParams(mode);
-  const defaultParams = DEFAULTS[mode] as unknown as Record<string, number | string | boolean>;
-  const parts: (string | null)[] = [];
-
-  for (const [key, val] of Object.entries(params)) {
-    if (val !== defaultParams[key]) {
-      parts.push(describeParam(mode, key, val));
-    }
-  }
-
-  let prompt = `WebGPU ${MODE_LABELS[mode]} simulation`;
-  if (state.colorTheme !== 'Dracula') {
-    prompt += ` (${state.colorTheme} theme)`;
-  }
-  if (parts.length > 0) {
-    prompt += ` with ${parts.filter(Boolean).join(', ')}`;
-  }
-  prompt += '.';
-
-  document.getElementById('prompt-text')!.textContent = prompt;
+  renderPrompt(state, catalogDefaults, modeParams);
 }
 
 function describeParam(_mode: string, key: string, val: number | string | boolean): string | null {
@@ -5744,6 +5585,35 @@ function updateAll() {
   saveState();
 }
 
+let controlsApi: ControlsApi | null = null;
+
+function getControlsApi(): ControlsApi {
+  if (!controlsApi) {
+    controlsApi = createControls({
+      cancelDebugMovement,
+      config: {
+        fxParamDefs: catalogFxParamDefs,
+        modeTabLabels: catalogModeTabLabels,
+        paramDefs: catalogParamDefs,
+        presets: catalogPresets,
+        shapeParams: catalogShapeParams,
+      },
+      ensureSimulation,
+      modeParams,
+      resetCurrentSimulation: resetCurrentSim,
+      saveState,
+      setXrDebugLogging,
+      setupRecordButton,
+      setupXRButton,
+      state,
+      storageKey,
+      syncThemeButtons,
+      updateAll,
+    });
+  }
+  return controlsApi;
+}
+
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // SECTION 7b: SHADER DEBUG PANEL
@@ -5751,38 +5621,10 @@ function updateAll() {
 
 // Maps simulation mode → named shader sources
 function getShaderSources(mode: SimMode): Record<string, string> {
-  const sources = {
-    boids: {
-      'Compute (Flocking)': SHADER_BOIDS_COMPUTE,
-      'Render (Vert+Frag)': SHADER_BOIDS_RENDER,
-    },
-    physics: {
-      'Compute (Gravity)': SHADER_NBODY_COMPUTE,
-      'Render (Vert+Frag)': SHADER_NBODY_RENDER,
-      ...GAS_SHADER_SOURCES,
-    },
-    physics_classic: {
-      'Compute (Classic)': SHADER_NBODY_CLASSIC_COMPUTE,
-      'Render (Classic)': SHADER_NBODY_CLASSIC_RENDER,
-    },
-    fluid: {
-      'Forces + Advect': SHADER_FLUID_FORCES_ADVECT,
-      'Diffuse': SHADER_FLUID_DIFFUSE,
-      'Divergence': SHADER_FLUID_DIVERGENCE,
-      'Pressure Solve': SHADER_FLUID_PRESSURE,
-      'Gradient Sub': SHADER_FLUID_GRADIENT,
-      'Render': SHADER_FLUID_RENDER,
-    },
-    parametric: {
-      'Compute (All Shapes)': SHADER_PARAMETRIC_COMPUTE,
-      'Render (Phong)': SHADER_PARAMETRIC_RENDER,
-    },
-    reaction: {
-      'Compute (Gray-Scott)': SHADER_REACTION_COMPUTE,
-      'Render (Raymarch)': SHADER_REACTION_RENDER,
-    },
-  };
-  return sources[mode] || {};
+  if (mode === 'physics') {
+    return { ...getCatalogShaderSources(mode), ...GAS_SHADER_SOURCES };
+  }
+  return getCatalogShaderSources(mode);
 }
 
 let shaderPanelOpen = false;
@@ -5902,11 +5744,8 @@ function compileEditedShader() {
 
 function resetEditedShader() {
   if (activeShaderTab && originalShaderSources[activeShaderTab]) {
-    currentShaderSources[activeShaderTab] = originalShaderSources[activeShaderTab];
+    currentShaderSources[activeShaderTab] = resetCatalogShaderEdit(state.mode, activeShaderTab) ?? originalShaderSources[activeShaderTab];
     loadEditorContent();
-
-    // Also revert the global source
-    applyShaderEdit(state.mode, activeShaderTab, originalShaderSources[activeShaderTab]);
     document.getElementById('shader-status')!.className = 'shader-success';
     document.getElementById('shader-status')!.textContent = 'Shader reset to original';
   }
@@ -5914,39 +5753,7 @@ function resetEditedShader() {
 
 // Apply edited shader code to the appropriate global variable
 function applyShaderEdit(mode: SimMode, tabName: string, code: string) {
-  const mapping = {
-    boids: {
-      'Compute (Flocking)': () => { SHADER_BOIDS_COMPUTE_EDIT = code; },
-      'Render (Vert+Frag)': () => { SHADER_BOIDS_RENDER_EDIT = code; },
-    },
-    physics: {
-      'Compute (Gravity)': () => { SHADER_NBODY_COMPUTE_EDIT = code; },
-      'Render (Vert+Frag)': () => { SHADER_NBODY_RENDER_EDIT = code; },
-    },
-    physics_classic: {
-      'Compute (Classic)': () => { SHADER_NBODY_CLASSIC_COMPUTE_EDIT = code; },
-      'Render (Classic)': () => { SHADER_NBODY_CLASSIC_RENDER_EDIT = code; },
-    },
-    fluid: {
-      'Forces + Advect': () => { SHADER_FLUID_FORCES_ADVECT_EDIT = code; },
-      'Diffuse': () => { SHADER_FLUID_DIFFUSE_EDIT = code; },
-      'Divergence': () => { SHADER_FLUID_DIVERGENCE_EDIT = code; },
-      'Pressure Solve': () => { SHADER_FLUID_PRESSURE_EDIT = code; },
-      'Gradient Sub': () => { SHADER_FLUID_GRADIENT_EDIT = code; },
-      'Render': () => { SHADER_FLUID_RENDER_EDIT = code; },
-    },
-    parametric: {
-      'Compute (Mesh Gen)': () => { SHADER_PARAMETRIC_COMPUTE_EDIT = code; },
-      'Render (Phong)': () => { SHADER_PARAMETRIC_RENDER_EDIT = code; },
-    },
-    reaction: {
-      'Compute (Gray-Scott)': () => { SHADER_REACTION_COMPUTE_EDIT = code; },
-      'Render (Raymarch)': () => { SHADER_REACTION_RENDER_EDIT = code; },
-    },
-  };
-  const modeMapping = mapping[mode] as Record<string, () => void> | undefined;
-  const fn = modeMapping?.[tabName];
-  if (fn) fn();
+  applyCatalogShaderEdit(mode, tabName, code);
 }
 
 // Editable shader overrides — when set, simulations use these instead of originals
@@ -7655,66 +7462,16 @@ function showSimError(mode: SimMode, msg: string) {
 
 function ensureSimulation() {
   const mode = state.mode;
-  if (simulations[mode]) return;
-
-  const factories = {
-    boids: createBoidsSimulation,
-    physics: createPhysicsSimulation,
-    physics_classic: createPhysicsClassicSimulation,
-    fluid: createFluidSimulation,
-    parametric: createParametricSimulation,
-    reaction: createReactionSimulation,
-  };
-
-  // Scope validation errors during creation so they surface loudly instead of
-  // poisoning later frames. Without this, a bad texture format or pipeline
-  // layout just leaves the user staring at a black canvas.
-  device.pushErrorScope('validation');
-  device.pushErrorScope('internal');
-  device.pushErrorScope('out-of-memory');
-
-  let sim: Simulation | null = null;
-  try {
-    sim = factories[mode]();
-  } catch (e) {
-    showSimError(mode, `factory threw: ${(e as Error).message}`);
-  }
-
-  // [LAW:single-enforcer] The async scope handlers must only act on the sim
-  // instance we just created — not whatever lives at simulations[mode] by the
-  // time the promise resolves. Otherwise, a stale error from a previously-
-  // destroyed sim can delete a fresh one the user just reset to, and clicking
-  // Reset "doesn't bring it back" mysteriously. Capturing `sim` in the closure
-  // scopes the cleanup to exactly that instance.
-  const capturedSim = sim;
-  const capturedMode = mode;
-  const dropIfBroken = (reason: string) => {
-    showSimError(capturedMode, reason);
-    // Only drop if the current sim is STILL the one we created — if the user
-    // already reset and a new one took its place, leave it alone.
-    if (capturedSim && simulations[capturedMode] === capturedSim) {
-      try { capturedSim.destroy(); } catch { /* already bad */ }
-      delete simulations[capturedMode];
-    }
-  };
-
-  // Pop all three scopes regardless of throw, so we don't leak them.
-  device.popErrorScope().then(err => { if (err) dropIfBroken(`OOM: ${err.message}`); });
-  device.popErrorScope().then(err => { if (err) dropIfBroken(`internal: ${err.message}`); });
-  device.popErrorScope().then(err => { if (err) dropIfBroken(`validation: ${err.message}`); });
-
-  if (sim) {
-    simulations[mode] = sim;
-  }
+  if (!simulationRegistry) initializeSimulationRegistry();
+  simulationRegistry?.ensure(mode);
+  syncSimulationCache(mode);
 }
 
 function resetCurrentSim() {
   const mode = state.mode;
-  if (simulations[mode]) {
-    simulations[mode]!.destroy();
-    delete simulations[mode];
-  }
-  ensureSimulation();
+  if (!simulationRegistry) initializeSimulationRegistry();
+  simulationRegistry?.reset(mode);
+  syncSimulationCache(mode);
 }
 
 function updateStats() {
@@ -7769,7 +7526,7 @@ function runFadePass(encoder: GPUCommandEncoder, prevSceneIdx: number, currScene
   // [LAW:single-enforcer] Bind group is owned by ensureHdrTargets — allocate-on-resize, reuse-per-frame.
   const pass = encoder.beginRenderPass({ colorAttachments: [{
     view: postFx.sceneViews[currSceneIdx],
-    clearValue: DEFAULT_CLEAR_COLOR,
+    clearValue: catalogDefaultClearColor,
     loadOp: 'clear',
     storeOp: 'store',
   }]});
@@ -7942,8 +7699,7 @@ function frame(now: DOMHighResTimeStamp) {
     // Only drop the sim instance we were just rendering — not whatever lives
     // in the registry now, which could be a fresh one the user already reset.
     if (simulations[mode] === sim) {
-      try { sim.destroy(); } catch { /* ignore */ }
-      delete simulations[mode];
+      dropSimulationIfCurrent(mode, sim);
     }
   }
 }
@@ -7952,85 +7708,16 @@ function frame(now: DOMHighResTimeStamp) {
 // SECTION 10: STATE PERSISTENCE
 // ═══════════════════════════════════════════════════════════════════════════════
 
-const STORAGE_KEY = 'shader-playground-state';
-
 function saveState() {
-  try {
-    // [LAW:one-source-of-truth] DEFAULTS is the canonical mode registry — no parallel list
-    const modeSnapshot: Record<string, unknown> = {};
-    for (const mode of Object.keys(DEFAULTS) as SimMode[]) {
-      modeSnapshot[mode] = modeParams(mode);
-    }
-    const toSave = { mode: state.mode, colorTheme: state.colorTheme, camera: state.camera, fx: state.fx, debug: state.debug, ...modeSnapshot };
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(toSave));
-  } catch (e) { /* ignore quota errors */ }
+  persistState(state, catalogDefaults, modeParams);
 }
 
 function loadState() {
-  try {
-    const saved = localStorage.getItem(STORAGE_KEY);
-    if (!saved) return;
-    const parsed = JSON.parse(saved);
-    if (parsed.mode && parsed.mode in DEFAULTS) state.mode = parsed.mode as SimMode;
-    if (parsed.colorTheme && COLOR_THEMES[parsed.colorTheme]) state.colorTheme = parsed.colorTheme;
-    // [LAW:one-source-of-truth] loop over DEFAULTS so new modes get persistence automatically
-    for (const mode of Object.keys(DEFAULTS) as SimMode[]) {
-      if (parsed[mode]) Object.assign(modeParams(mode), parsed[mode]);
-    }
-    if (parsed.camera) Object.assign(state.camera, parsed.camera);
-    if (parsed.fx) Object.assign(state.fx, parsed.fx);
-    if (parsed.debug) Object.assign(state.debug, parsed.debug);
-    syncThemeTransition(state.colorTheme);
-  } catch (e) { /* ignore parse errors — start fresh */ }
+  hydrateState(state, catalogDefaults, catalogColorThemes, modeParams, syncThemeTransition);
 }
 
 function syncUIFromState() {
-  // Activate correct tab
-  document.querySelectorAll<HTMLElement>('.mode-tab').forEach(t =>
-    t.classList.toggle('active', t.dataset.mode === state.mode));
-  document.querySelectorAll<HTMLElement>('.param-group').forEach(g =>
-    g.classList.toggle('active', g.dataset.mode === state.mode));
-  document.querySelectorAll<HTMLElement>('.debug-panel').forEach(g =>
-    g.classList.toggle('active', g.dataset.mode === state.mode));
-
-  // Sync all sliders and dropdowns
-  for (const modeStr of Object.keys(PARAM_DEFS)) {
-    const mode = modeStr as SimMode;
-    const container = document.getElementById(`params-${mode}`)!;
-    const params = modeParams(mode);
-    container.querySelectorAll<HTMLInputElement>('input[type="range"]').forEach(input => {
-      const key = input.dataset.key!;
-      if (key && key in params) {
-        const paramDef = findParamDef(mode, key);
-        const realVal = Number(params[key]);
-        input.value = (paramDef?.logScale && paramDef.min !== undefined && paramDef.max !== undefined)
-          ? String(realToLogTick(realVal, paramDef.min, paramDef.max))
-          : String(params[key]);
-        const valueSpan = input.parentElement?.querySelector('.control-value');
-        if (valueSpan) valueSpan.textContent = formatValueWithMax(realVal, paramDef);
-      }
-    });
-    container.querySelectorAll<HTMLInputElement>('input[type="checkbox"]').forEach(input => {
-      const key = input.dataset.key!;
-      if (key && key in params) input.checked = Boolean(params[key]);
-    });
-    container.querySelectorAll<HTMLSelectElement>('select').forEach(sel => {
-      const key = sel.dataset.key!;
-      if (key && key in params) sel.value = String(params[key]);
-    });
-  }
-
-  // Sync theme buttons
-  document.querySelectorAll<HTMLButtonElement>('#theme-presets .preset-btn').forEach(btn =>
-    btn.classList.toggle('active', btn.dataset.theme === state.colorTheme));
-
-  // Sync XR debug-log checkbox + subscription to loaded state.
-  const xrLogToggle = document.getElementById('toggle-xr-log') as HTMLInputElement | null;
-  if (xrLogToggle) xrLogToggle.checked = state.debug.xrLog;
-  setXrDebugLogging(state.debug.xrLog);
-
-  // Rebuild shape params for current parametric shape
-  rebuildShapeParams();
+  getControlsApi().syncUiFromState();
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -8043,104 +7730,80 @@ function syncUIFromState() {
 // [LAW:one-way-deps] bindings.ts knows nothing about main.ts; we register from here
 // using closures that capture state and mode-helper functions.
 function initBindings(): void {
-  // Continuous + enum bindings derived from PARAM_DEFS. id = `${mode}.${key}`.
-  for (const mode of Object.keys(PARAM_DEFS) as SimMode[]) {
-    for (const section of PARAM_DEFS[mode]) {
-      // Dynamic sections (parametric shape params) are rebuilt at runtime; skip them
-      // here — a follow-up ticket can register them from SHAPE_PARAMS metadata.
-      if (section.dynamic) continue;
-      for (const param of section.params) {
-        if (param.type === 'dropdown') {
-          bindingRegistry.register({
-            kind: 'enum',
-            id: `${mode}.${param.key}`,
-            label: param.label,
-            group: mode,
-            get: () => String(modeParams(mode)[param.key]),
-            set: (v) => {
-              const target = modeParams(mode);
-              const current = target[param.key];
-              target[param.key] = typeof current === 'number' ? Number(v) : v;
-            },
-            options: (param.options ?? []).map(o => ({ value: String(o), label: String(o) })),
-          });
-        } else if (param.type === 'toggle') {
-          bindingRegistry.register({
-            kind: 'toggle',
-            id: `${mode}.${param.key}`,
-            label: param.label,
-            group: mode,
-            get: () => Boolean(modeParams(mode)[param.key]),
-            set: (v) => { modeParams(mode)[param.key] = v; },
-          });
-        } else if (param.min !== undefined && param.max !== undefined) {
-          bindingRegistry.register({
-            kind: 'continuous',
-            id: `${mode}.${param.key}`,
-            label: param.label,
-            group: mode,
-            get: () => Number(modeParams(mode)[param.key]),
-            set: (v) => { modeParams(mode)[param.key] = v; },
-            range: { min: param.min, max: param.max },
-            step: param.step,
-            scale: param.logScale ? 'log' : 'linear',
-          });
-        }
-      }
-    }
-  }
-
-  // Preset actions. id = `preset.${mode}.${name}`. group = 'presets'.
-  for (const mode of Object.keys(PRESETS) as SimMode[]) {
-    for (const presetName of Object.keys(PRESETS[mode])) {
-      bindingRegistry.register({
-        kind: 'action',
-        id: `preset.${mode}.${presetName}`,
-        label: presetName,
-        group: 'presets',
-        invoke: () => applyPreset(mode, presetName),
-      });
-    }
-  }
-
-  // Mode + theme enums. group = 'app'. set() routes through the canonical helpers
-  // (selectMode, startThemeTransition) so DOM tabs and theme buttons stay in sync.
-  bindingRegistry.register({
-    kind: 'enum',
-    id: 'app.mode',
-    label: 'Mode',
-    group: 'app',
-    get: () => state.mode,
-    set: (v) => selectMode(v as SimMode),
-    options: (Object.keys(MODE_TAB_LABELS) as SimMode[])
-      .map(m => ({ value: m, label: MODE_TAB_LABELS[m] })),
-  });
-  bindingRegistry.register({
-    kind: 'enum',
-    id: 'app.theme',
-    label: 'Theme',
-    group: 'app',
-    get: () => state.colorTheme,
-    set: (v) => { state.colorTheme = v; startThemeTransition(v); },
-    options: Object.keys(COLOR_THEMES).map(name => ({ value: name, label: name })),
-  });
-
-  // Boolean toggles. PARAM_DEFS doesn't carry boolean params today; the
-  // app-level state has a few (paused) that the XR toggle widget can flip.
-  bindingRegistry.register({
-    kind: 'toggle',
-    id: 'app.paused',
-    label: 'Pause',
-    group: 'app',
-    get: () => state.paused,
-    set: (v) => { state.paused = v; syncPauseButtons(); },
+  registerAppBindings({
+    applyPreset,
+    modeParams,
+    modeTabLabels: catalogModeTabLabels,
+    paramDefs: catalogParamDefs,
+    presets: catalogPresets,
+    registry: bindingRegistry,
+    selectMode,
+    selectTheme: (themeName) => themeSystem.selectTheme(themeName),
+    setPaused: (paused) => {
+      state.paused = paused;
+      if (paused) cancelDebugMovement();
+      syncPauseButtons();
+    },
+    state,
+    themes: catalogColorThemes,
   });
 }
+
+// [LAW:locality-or-seam] This reintegration pass reassigns ownership without
+// deleting every legacy helper in the same change. Keep explicit references so
+// the build stays green while the next extraction pass removes the orphaned
+// implementations wholesale instead of mixing rewiring with risky mass deletion.
+const legacyRewireKeepalive = {
+  SHADER_BOIDS_COMPUTE,
+  SHADER_BOIDS_RENDER,
+  SHADER_NBODY_COMPUTE,
+  SHADER_NBODY_RENDER,
+  SHADER_NBODY_CLASSIC_COMPUTE,
+  SHADER_NBODY_CLASSIC_RENDER,
+  SHADER_FLUID_FORCES_ADVECT,
+  SHADER_FLUID_DIFFUSE,
+  SHADER_FLUID_PRESSURE,
+  SHADER_FLUID_DIVERGENCE,
+  SHADER_FLUID_GRADIENT,
+  SHADER_FLUID_RENDER,
+  SHADER_PARAMETRIC_COMPUTE,
+  SHADER_PARAMETRIC_RENDER,
+  SHADER_REACTION_COMPUTE,
+  SHADER_REACTION_RENDER,
+  PRESETS,
+  DEFAULT_CLEAR_COLOR,
+  currentThemeColors,
+  computeThemeColors,
+  startThemeTransition,
+  SHAPE_IDS,
+  buildFxSection,
+  findParamDef,
+  MODE_LABELS,
+  describeParam,
+  SHADER_BOIDS_COMPUTE_EDIT,
+  SHADER_BOIDS_RENDER_EDIT,
+  SHADER_NBODY_COMPUTE_EDIT,
+  SHADER_NBODY_RENDER_EDIT,
+  SHADER_NBODY_CLASSIC_COMPUTE_EDIT,
+  SHADER_NBODY_CLASSIC_RENDER_EDIT,
+  SHADER_FLUID_FORCES_ADVECT_EDIT,
+  SHADER_FLUID_DIFFUSE_EDIT,
+  SHADER_FLUID_DIVERGENCE_EDIT,
+  SHADER_FLUID_PRESSURE_EDIT,
+  SHADER_FLUID_GRADIENT_EDIT,
+  SHADER_FLUID_RENDER_EDIT,
+  SHADER_PARAMETRIC_COMPUTE_EDIT,
+  SHADER_PARAMETRIC_RENDER_EDIT,
+  SHADER_REACTION_COMPUTE_EDIT,
+  SHADER_REACTION_RENDER_EDIT,
+};
+void legacyRewireKeepalive;
 
 
 export async function startLegacyRuntime() {
   const ok = await initWebGPU();
   if (!ok) return;
+  initializeSimulationRegistry();
 
   // Mobile detection — gates touch controls, bottom sheet, and performance defaults
   isMobile = mobileQuery.matches;
@@ -8185,90 +7848,26 @@ export async function startLegacyRuntime() {
   resizeObserver.observe(document.getElementById('canvas-container')!);
 
   requestAnimationFrame(frame);
-
-  // Expose diagnostic tools for external analysis (Chrome DevTools MCP, etc.)
-  (window as any).__simDiagnose = () => {
-    const sim = simulations[state.mode];
-    return sim?.diagnose ? sim.diagnose() : Promise.resolve({ error: 1, msg: 'no diagnose on this sim' });
-  };
-  (window as any).__simPreset = (name: string) => {
-    const buttons = document.querySelectorAll('button');
-    for (const b of buttons) { if (b.textContent?.trim() === name) { (b as HTMLButtonElement).click(); return 'ok'; } }
-    return 'preset not found';
-  };
-  (window as any).__simState = () => ({ mode: state.mode, ...state[state.mode] as any, fps: currentFps, gpuMs: gpuFrameMs, gpuDetail: gpuTimingDetail });
-  // PM diagnostics — only wired for the physics sim (other modes don't have
-  // the PM pipeline). Each returns null if a prior dump is still in flight or
-  // if the active mode lacks the diagnostic.
-  type PmDiag = {
-    dumpDensity?: () => Promise<Float32Array | null>,
-    dumpPotential?: () => Promise<Float32Array | null>,
-    dumpOuterDensity?: () => Promise<Float32Array | null>,
-    dumpOuterPotential?: () => Promise<Float32Array | null>,
-    maxResidual?: () => Promise<{ inner: number; outer: number } | null>,
-    reversibilityTest?: (n: number) => Promise<{ maxErr: number; meanErr: number; count: number } | null>,
-    gasDumpDensity?: () => Promise<Float32Array | null>,
-    gasEnergyBreakdown?: () => Promise<{ starKinetic: number; gasKinetic: number; gasInternal: number; total: number } | null>,
-    gasWakeProbe?: (starIdx?: number) => Promise<{ aheadDensity: number; behindDensity: number; asymmetry: number } | null>,
-    gasReversibilityTest?: (n: number) => Promise<{ maxPosErr: number; maxVelErr: number; count: number } | null>,
-  };
-  (window as any).__pmDumpDensity = () => {
-    const sim = simulations[state.mode] as unknown as PmDiag;
-    return sim?.dumpDensity ? sim.dumpDensity() : Promise.resolve(null);
-  };
-  (window as any).__pmDumpPotential = () => {
-    const sim = simulations[state.mode] as unknown as PmDiag;
-    return sim?.dumpPotential ? sim.dumpPotential() : Promise.resolve(null);
-  };
-  (window as any).__pmDumpOuterDensity = () => {
-    const sim = simulations[state.mode] as unknown as PmDiag;
-    return sim?.dumpOuterDensity ? sim.dumpOuterDensity() : Promise.resolve(null);
-  };
-  (window as any).__pmDumpOuterPotential = () => {
-    const sim = simulations[state.mode] as unknown as PmDiag;
-    return sim?.dumpOuterPotential ? sim.dumpOuterPotential() : Promise.resolve(null);
-  };
-  (window as any).__pmMaxResidual = () => {
-    const sim = simulations[state.mode] as unknown as PmDiag;
-    return sim?.maxResidual ? sim.maxResidual() : Promise.resolve(null);
-  };
-  // Reversibility harness. Runs N forward + N reverse compute() steps and
-  // returns per-particle position error vs the starting state. Pauses the
-  // sim for the duration; restores on exit. Expected: maxErr < 1e-3 for N=1000.
-  (window as any).__pmReversibilityTest = (n = 1000) => {
-    const sim = simulations[state.mode] as unknown as PmDiag;
-    return sim?.reversibilityTest ? sim.reversibilityTest(n) : Promise.resolve(null);
-  };
-  (window as any).__gasDumpDensity = () => {
-    const sim = simulations[state.mode] as unknown as PmDiag;
-    return sim?.gasDumpDensity ? sim.gasDumpDensity() : Promise.resolve(null);
-  };
-  (window as any).__gasEnergyBreakdown = () => {
-    const sim = simulations[state.mode] as unknown as PmDiag;
-    return sim?.gasEnergyBreakdown ? sim.gasEnergyBreakdown() : Promise.resolve(null);
-  };
-  (window as any).__gasWakeProbe = (starIdx = 0) => {
-    const sim = simulations[state.mode] as unknown as PmDiag;
-    return sim?.gasWakeProbe ? sim.gasWakeProbe(starIdx) : Promise.resolve(null);
-  };
-  (window as any).__gasReversibilityTest = (n = 1000) => {
-    const sim = simulations[state.mode] as unknown as PmDiag;
-    return sim?.gasReversibilityTest ? sim.gasReversibilityTest(n) : Promise.resolve(null);
-  };
-  (window as any).__bindings = bindingRegistry;
-  (window as any).__anchors = { evaluateAnchor, handFrames: xrHandFrames };
-  (window as any).__xrUi = {
-    layout: xrUiLayout, hitTestWidgets,
-    step: xrUiStep, applyEffects: xrUiApplyEffects,
-    registry: xrUiRegistry, makeIdlePrev: xrUiMakeIdlePrev,
-    getRenderList: () => xrUiRenderList,
-    getPrev: () => xrUiPrev,
-    getClaimed: () => ({ ...xrUiClaimed }),
-  };
-  (window as any).__simStats = () => {
-    const sim = simulations[state.mode];
-    const stats = (sim as any)?.getStats ? (sim as any).getStats() : { error: 'no stats on this sim' };
-    return { ...stats, gpuMs: gpuFrameMs, gpuDetail: gpuTimingDetail };
-  };
+  installDevtools({
+    state,
+    getCurrentSimulation: () => simulations[state.mode],
+    getGpuStats: () => ({
+      currentFps,
+      gpuFrameMs,
+      gpuTimingDetail,
+    }),
+    bindings: bindingRegistry,
+    anchors: { evaluateAnchor, handFrames: xrHandFrames },
+    xrUi: {
+      layout: xrUiLayout,
+      hitTestWidgets,
+      step: xrUiStep,
+      applyEffects: xrUiApplyEffects,
+      registry: xrUiRegistry,
+      makeIdlePrev: xrUiMakeIdlePrev,
+      getRenderList: () => xrUiRenderList,
+      getPrev: () => xrUiPrev,
+      getClaimed: () => ({ ...xrUiClaimed }),
+    },
+  });
 }
-

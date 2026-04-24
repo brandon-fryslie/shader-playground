@@ -3,8 +3,14 @@ import type { AppState, Simulation } from '../types';
 type PmDiag = {
   dumpDensity?: () => Promise<Float32Array | null>;
   dumpPotential?: () => Promise<Float32Array | null>;
-  maxResidual?: () => Promise<number | null>;
+  dumpOuterDensity?: () => Promise<Float32Array | null>;
+  dumpOuterPotential?: () => Promise<Float32Array | null>;
+  maxResidual?: () => Promise<{ inner: number; outer: number } | null>;
   reversibilityTest?: (n: number) => Promise<{ maxErr: number; meanErr: number; count: number } | null>;
+  gasDumpDensity?: () => Promise<Float32Array | null>;
+  gasEnergyBreakdown?: () => Promise<{ starKinetic: number; gasKinetic: number; gasInternal: number; total: number } | null>;
+  gasWakeProbe?: (starIdx?: number) => Promise<{ aheadDensity: number; behindDensity: number; asymmetry: number } | null>;
+  gasReversibilityTest?: (n: number) => Promise<{ maxPosErr: number; maxVelErr: number; count: number } | null>;
 };
 
 export interface DevtoolsOptions {
@@ -13,7 +19,7 @@ export interface DevtoolsOptions {
   getGpuStats: () => {
     currentFps: number;
     gpuFrameMs: number;
-    gpuTimingDetail: { compute: number; render: number; post: number };
+    gpuTimingDetail: Record<string, number>;
   };
   bindings: unknown;
   anchors: unknown;
@@ -55,6 +61,14 @@ export function installDevtools(options: DevtoolsOptions): void {
     const sim = options.getCurrentSimulation() as unknown as PmDiag;
     return sim?.dumpPotential ? sim.dumpPotential() : Promise.resolve(null);
   };
+  target.__pmDumpOuterDensity = () => {
+    const sim = options.getCurrentSimulation() as unknown as PmDiag;
+    return sim?.dumpOuterDensity ? sim.dumpOuterDensity() : Promise.resolve(null);
+  };
+  target.__pmDumpOuterPotential = () => {
+    const sim = options.getCurrentSimulation() as unknown as PmDiag;
+    return sim?.dumpOuterPotential ? sim.dumpOuterPotential() : Promise.resolve(null);
+  };
   target.__pmMaxResidual = () => {
     const sim = options.getCurrentSimulation() as unknown as PmDiag;
     return sim?.maxResidual ? sim.maxResidual() : Promise.resolve(null);
@@ -62,6 +76,22 @@ export function installDevtools(options: DevtoolsOptions): void {
   target.__pmReversibilityTest = (n = 1000) => {
     const sim = options.getCurrentSimulation() as unknown as PmDiag;
     return sim?.reversibilityTest ? sim.reversibilityTest(n) : Promise.resolve(null);
+  };
+  target.__gasDumpDensity = () => {
+    const sim = options.getCurrentSimulation() as unknown as PmDiag;
+    return sim?.gasDumpDensity ? sim.gasDumpDensity() : Promise.resolve(null);
+  };
+  target.__gasEnergyBreakdown = () => {
+    const sim = options.getCurrentSimulation() as unknown as PmDiag;
+    return sim?.gasEnergyBreakdown ? sim.gasEnergyBreakdown() : Promise.resolve(null);
+  };
+  target.__gasWakeProbe = (starIdx = 0) => {
+    const sim = options.getCurrentSimulation() as unknown as PmDiag;
+    return sim?.gasWakeProbe ? sim.gasWakeProbe(starIdx) : Promise.resolve(null);
+  };
+  target.__gasReversibilityTest = (n = 1000) => {
+    const sim = options.getCurrentSimulation() as unknown as PmDiag;
+    return sim?.gasReversibilityTest ? sim.gasReversibilityTest(n) : Promise.resolve(null);
   };
   target.__bindings = options.bindings;
   target.__anchors = options.anchors;
