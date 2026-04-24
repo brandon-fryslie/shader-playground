@@ -8,6 +8,10 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
 - `npm run build` — Type-check with `tsc` then production build to `dist/`
 - `npm run preview` — Serve production build locally
 
+## Workflow
+
+- Always create a git commit after completing a unit of work. Do not leave finished work uncommitted.
+
 For Vision Pro testing, generate a self-signed cert first:
 ```
 openssl req -x509 -newkey rsa:2048 -keyout key.pem -out cert.pem -days 365 -nodes -subj "/CN=shader-playground"
