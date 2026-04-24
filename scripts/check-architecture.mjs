@@ -31,6 +31,14 @@ const allowedUpward = new Set([
   'app/bootstrap.ts->simulations',
 ]);
 
+const allowedRuntimeImporters = new Set([
+  'app/bootstrap.ts',
+  'app/legacy-runtime.ts',
+]);
+const allowedRuntimeImplImporters = new Set([
+  'app/runtime.ts',
+]);
+
 function walk(dir) {
   const entries = fs.readdirSync(dir, { withFileTypes: true });
   return entries.flatMap((entry) => {
@@ -74,9 +82,23 @@ for (const file of walk(srcRoot).filter((f) => sourceExt.has(path.extname(f)))) 
     if (fromLayer !== undefined && toLayer !== undefined && toLayer < fromLayer && !allowedUpward.has(exceptionKey)) {
       violations.push(`${rel} imports upward ${toRel}`);
     }
-    // [LAW:one-way-deps] Nothing imports bootstrap or main; they are composition roots.
-    if (toRel === 'main.ts' || (toRel === 'app/bootstrap.ts' && rel !== 'main.ts')) {
+    // [LAW:one-way-deps] Nothing imports main/bootstrap, and legacy/runtime remain
+    // composition-root seams rather than general behavior dependency targets.
+    if (
+      toRel === 'main.ts'
+      || (toRel === 'app/bootstrap.ts' && rel !== 'main.ts')
+      || toRel === 'app/legacy-runtime.ts'
+    ) {
       violations.push(`${rel} imports composition root ${toRel}`);
+    }
+    // [LAW:one-way-deps] app/runtime.ts is the active runtime entrypoint and
+    // must only be reached from the composition root or compatibility shim.
+    if (toRel === 'app/runtime.ts' && !allowedRuntimeImporters.has(rel)) {
+      violations.push(`${rel} imports active runtime entrypoint ${toRel}`);
+    }
+    // [LAW:one-way-deps] app/runtime-impl.ts is an internal implementation seam.
+    if (toRel === 'app/runtime-impl.ts' && !allowedRuntimeImplImporters.has(rel)) {
+      violations.push(`${rel} imports internal runtime implementation ${toRel}`);
     }
   }
 }

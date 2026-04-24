@@ -18,9 +18,9 @@ Then `npm run dev` auto-detects the cert and serves HTTPS.
 
 WebGPU compute shader playground with 6 simulation modes (boids, N-body physics, classic N-body, fluid dynamics, parametric shapes, reaction diffusion), a color theme system, shader debug editor, and WebXR stereo rendering for Apple Vision Pro.
 
-### Current State: Thin Entrypoint With Legacy Runtime Seam
+### Current State: Thin Entrypoints With Internal Runtime Implementation
 
-`src/main.ts` is a bootstrap-only entrypoint. `src/app/bootstrap.ts` composes the app and calls `src/app/legacy-runtime.ts`, which is the explicit migration seam for remaining runtime code. Extracted ownership already exists for state creation, WGSL originals/edits, math, metrics, persistence, prompt generation, and DevTools globals.
+`src/main.ts`, `src/app/bootstrap.ts`, `src/app/runtime.ts`, and `src/app/legacy-runtime.ts` are thin composition/compatibility seams. The remaining monolithic runtime implementation currently lives in `src/app/runtime-impl.ts`. Extracted ownership already exists for state creation, WGSL originals/edits, math, metrics, persistence, prompt generation, and DevTools globals.
 
 ### Module Map
 
@@ -28,7 +28,9 @@ WebGPU compute shader playground with 6 simulation modes (boids, N-body physics,
 |--------|---------|
 | `src/main.ts` | Thin entrypoint |
 | `src/app/bootstrap.ts` | Composition root |
-| `src/app/legacy-runtime.ts` | Remaining runtime seam during extraction |
+| `src/app/runtime.ts` | Thin active runtime entrypoint |
+| `src/app/runtime-impl.ts` | Current monolithic runtime implementation |
+| `src/app/legacy-runtime.ts` | Compatibility shim only |
 | `src/gpu/shaders.ts` | WGSL originals, edited sources, shader tab mapping |
 | `src/math/` | Matrix/vector helpers |
 | `src/metrics/bus.ts` | Typed metrics channels and burst recording |
