@@ -17,9 +17,17 @@ import { saveState as persistState, loadState as hydrateState, STORAGE_KEY as st
 import { updatePrompt as renderPrompt } from '../ui/prompt';
 import { createThemeSystem } from '../ui/theme';
 import { createControls, type ControlsApi } from '../ui/controls';
+import { createBoidsSimulation as createBoidsSimulationModule } from '../simulations/boids';
+import { createFluidSimulation as createFluidSimulationModule } from '../simulations/fluid';
+import { createParametricSimulation as createParametricSimulationModule } from '../simulations/parametric';
+import { createPhysicsClassicSimulation as createPhysicsClassicSimulationModule } from '../simulations/physics-classic';
+import { isPhysicsSimulation, type PhysicsSimulation } from '../simulations/types';
+import { runPmVCycle } from '../simulations/physics-vcycle';
+import { createReactionSimulation as createReactionSimulationModule } from '../simulations/reaction';
 import { createSimulationRegistry, type SimulationRegistry } from '../simulations/registry';
 import { shaderSource, getShaderSources as getCatalogShaderSources, applyShaderEdit as applyCatalogShaderEdit, resetShaderEdit as resetCatalogShaderEdit } from '../gpu/shaders';
 import { installDevtools } from '../diagnostics/devtools';
+import { createDiagnosticsLogger } from '../diagnostics/logging';
 
 // WGSL shader imports — Vite loads these as raw strings
 import SHADER_BOIDS_COMPUTE from '../shaders/boids.compute.wgsl?raw';
@@ -55,112 +63,13 @@ import SHADER_POST_DOWNSAMPLE from '../shaders/post.downsample.wgsl?raw';
 import SHADER_POST_UPSAMPLE from '../shaders/post.upsample.wgsl?raw';
 import SHADER_POST_COMPOSITE from '../shaders/post.composite.wgsl?raw';
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// SECTION 0: DIAGNOSTIC LOGGING
-// ═══════════════════════════════════════════════════════════════════════════════
-// [LAW:single-enforcer] All error paths funnel through logError so nothing
-// vanishes silently — the original motivation is that XR sessions on Vision Pro
-// ran into issues that produced no console output at all. Every error now:
-//   1. prints to console.error with a kind tag
-//   2. appends to window.__errorLog (inspectable from remote Safari Web Inspector)
-//   3. renders into the floating DOM overlay (visible on desktop; persistent)
-//   4. attributes itself to the most recent GPU phase via currentGpuPhase
-//
-// Attribution matters because WebGPU validation errors surface asynchronously
-// via onuncapturederror — without a phase tag, you can't tell which operation
-// produced them.
-
-interface ErrorLogEntry {
-  t: number;
-  kind: string;
-  phase: string;
-  msg: string;
-  stack?: string;
-}
-// Ring-buffer cap: a misbehaving shader or device-lost loop can fire logError hundreds
-// of times per second. Without a cap, __errorLog would grow unbounded and hold onto
-// old stack traces indefinitely. 200 entries is enough for post-mortem context while
-// keeping memory bounded to ~200KB worst-case.
-const ERROR_LOG_MAX = 200;
-const __errorLog: ErrorLogEntry[] = [];
-
-// Most recent GPU-touching operation. Update before risky calls so that
-// onuncapturederror and unhandledrejection can attribute blame.
 let currentGpuPhase = 'boot';
-
-function showErrorOverlay(line: string): void {
-  let overlay = document.getElementById('gpu-error-overlay');
-  if (!overlay) {
-    overlay = document.createElement('div');
-    overlay.id = 'gpu-error-overlay';
-    overlay.style.cssText = 'position:fixed;top:60px;left:10px;right:10px;max-height:60vh;overflow:auto;background:rgba(20,0,0,0.92);color:#ff8080;font:11px monospace;padding:10px;border:1px solid #ff4040;border-radius:4px;z-index:9999;white-space:pre-wrap;';
-    document.body.appendChild(overlay);
-  }
-  const stamp = new Date().toLocaleTimeString();
-  overlay.textContent = `[${stamp}] ${line}\n\n` + overlay.textContent;
-}
-
-function logError(kind: string, err: unknown, extra?: string): void {
-  const e = err instanceof Error ? err : new Error(typeof err === 'string' ? err : JSON.stringify(err));
-  const msg = extra ? `${extra}: ${e.message}` : e.message;
-  const entry: ErrorLogEntry = {
-    t: performance.now(),
-    kind,
-    phase: currentGpuPhase,
-    msg,
-    stack: e.stack,
-  };
-  __errorLog.push(entry);
-  if (__errorLog.length > ERROR_LOG_MAX) __errorLog.splice(0, __errorLog.length - ERROR_LOG_MAX);
-  console.error(`[${kind}] (phase=${currentGpuPhase})`, msg, e.stack || '');
-  showErrorOverlay(`[${kind}] (phase=${currentGpuPhase}) ${msg}`);
-}
-
-function logInfo(kind: string, msg: string, ...extra: unknown[]): void {
-  console.info(`[${kind}] (phase=${currentGpuPhase})`, msg, ...extra);
-}
-
-// Expose the log for ad-hoc inspection from Safari Web Inspector.
-(globalThis as unknown as { __errorLog: () => ErrorLogEntry[] }).__errorLog = () => __errorLog.slice();
-(globalThis as unknown as { __gpuPhase: () => string }).__gpuPhase = () => currentGpuPhase;
-
-// Catch anything that escapes our try/catch blocks or a rogue async path.
-// Registered at module load so they see everything, even errors during init.
-window.addEventListener('error', (ev) => {
-  logError('window.error', ev.error ?? ev.message, `at ${ev.filename}:${ev.lineno}:${ev.colno}`);
+const diagnosticsLogger = createDiagnosticsLogger({
+  getDevice: () => device,
+  getPhase: () => currentGpuPhase,
 });
-window.addEventListener('unhandledrejection', (ev) => {
-  logError('unhandledrejection', ev.reason);
-});
-
-// Wraps device.createShaderModule with async compilation-info reporting.
-// In WebGPU, shader compile failures do NOT throw from createShaderModule —
-// they surface later as pipeline-creation or render-time validation errors
-// with messages that rarely pinpoint the shader line. Surfacing them here,
-// with the offending source line quoted, is the only reliable diagnosis.
-function createShaderModuleChecked(label: string, code: string): GPUShaderModule {
-  const module = device.createShaderModule({ label, code });
-  module.getCompilationInfo().then(info => {
-    if (info.messages.length === 0) return;
-    const lines = code.split('\n');
-    let hasError = false;
-    for (const m of info.messages) {
-      const srcLine = (lines[m.lineNum - 1] || '').trimEnd();
-      const marker = ' '.repeat(Math.max(0, m.linePos - 1)) + '^';
-      const body = `[shader:${label}] ${m.type.toUpperCase()} line ${m.lineNum}:${m.linePos} ${m.message}\n  ${srcLine}\n  ${marker}`;
-      if (m.type === 'error') {
-        hasError = true;
-        logError(`shader:${label}`, new Error(body));
-      } else if (m.type === 'warning') {
-        console.warn(body);
-      } else {
-        console.info(body);
-      }
-    }
-    if (!hasError) logInfo(`shader:${label}`, `compiled with ${info.messages.length} non-error messages`);
-  }).catch(e => logError(`shader:${label}:compilationInfo`, e));
-  return module;
-}
+diagnosticsLogger.installGlobalHandlers();
+const { createShaderModuleChecked, logError, logInfo, showSimError } = diagnosticsLogger;
 
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -498,13 +407,13 @@ const ATTRACTOR_PERMANENT_THRESHOLD = 30.0;
 // always agrees with the physics sim's canonical clock. Returns safe defaults when physics is inactive.
 function currentSimStep(): number {
   const sim = simulations['physics'];
-  if (sim && 'getSimStep' in sim) return (sim as { getSimStep(): number }).getSimStep();
+  if (isPhysicsSimulation(sim)) return sim.getSimStep();
   return 0;
 }
 
 function currentTimeDirection(): number {
   const sim = simulations['physics'];
-  if (sim && 'getTimeDirection' in sim) return (sim as { getTimeDirection(): number }).getTimeDirection();
+  if (isPhysicsSimulation(sim)) return sim.getTimeDirection();
   return 1;
 }
 
@@ -1385,157 +1294,24 @@ function initializeSimulationRegistry(): void {
 // --- 5a: BOIDS ---
 
 function createBoidsSimulation() {
-  const count = state.boids.count;
-  const particleBytes = count * 32; // vec3f pos (12) + pad(4) + vec3f vel (12) + pad(4) = 32
-
-  // Initialize particles randomly in a cube
-  const initData = new Float32Array(count * 8);
-  const boundSize = 2.0;
-  for (let i = 0; i < count; i++) {
-    const off = i * 8;
-    initData[off]     = (Math.random() - 0.5) * boundSize * 2;
-    initData[off + 1] = (Math.random() - 0.5) * boundSize * 2;
-    initData[off + 2] = (Math.random() - 0.5) * boundSize * 2;
-    // pad
-    initData[off + 4] = (Math.random() - 0.5) * 0.5;
-    initData[off + 5] = (Math.random() - 0.5) * 0.5;
-    initData[off + 6] = (Math.random() - 0.5) * 0.5;
-    // pad
-  }
-
-  const bufferA = device.createBuffer({ size: particleBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST, mappedAtCreation: true });
-  new Float32Array(bufferA.getMappedRange()).set(initData);
-  bufferA.unmap();
-
-  const bufferB = device.createBuffer({ size: particleBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
-
-  // SimParams: dt, sepR, aliR, cohR, maxSpeed, maxForce, visualRange, count, boundSize,
-  //            attractorX, attractorY, attractorZ, attractorActive = 13 values → 64 bytes
-  const paramsBuffer = device.createBuffer({ size: 64, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-  const cameraBuffer = device.createBuffer({ size: CAMERA_STRIDE * 2, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-
-  const computeModule = createShaderModuleChecked('boids.compute', shaderSource('boids.compute'));
-  const renderModule = createShaderModuleChecked('boids.render', shaderSource('boids.render'));
-
-  const computeBGL = device.createBindGroupLayout({
-    entries: [
-      // [LAW:one-source-of-truth] Buffer access mirrors boids.compute.wgsl:
-      // particlesIn is read-only and particlesOut is the sole write target.
-      { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
-      { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
-      { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
-    ]
+  // [LAW:locality-or-seam] Boids now owns its own pipelines and buffers in
+  // simulations/boids.ts; runtime only supplies shared rendering capabilities.
+  return createBoidsSimulationModule({
+    cameraSize: CAMERA_SIZE,
+    cameraStride: CAMERA_STRIDE,
+    createShaderModuleChecked,
+    destroyDepthRef,
+    device,
+    getCameraUniformData,
+    getColorAttachment,
+    getDefaultAspect: () => canvas.width / canvas.height,
+    getDepthAttachment,
+    getRenderViewport,
+    renderGrid,
+    renderSampleCount,
+    renderTargetFormat,
+    state,
   });
-
-  const computePipeline = device.createComputePipeline({
-    layout: device.createPipelineLayout({ bindGroupLayouts: [computeBGL] }),
-    compute: { module: computeModule, entryPoint: 'main' }
-  });
-
-  const renderBGL = device.createBindGroupLayout({
-    entries: [
-      { binding: 0, visibility: GPUShaderStage.VERTEX, buffer: { type: 'read-only-storage' } },
-      { binding: 1, visibility: GPUShaderStage.VERTEX, buffer: { type: 'uniform' } },
-    ]
-  });
-
-  const renderPipeline = device.createRenderPipeline({
-    layout: device.createPipelineLayout({ bindGroupLayouts: [renderBGL] }),
-    vertex: { module: renderModule, entryPoint: 'vs_main' },
-    fragment: {
-      module: renderModule, entryPoint: 'fs_main',
-      targets: [{ format: renderTargetFormat }]
-    },
-    primitive: { topology: 'triangle-list' },
-    depthStencil: { format: 'depth24plus', depthWriteEnabled: true, depthCompare: 'less' },
-    multisample: { count: renderSampleCount },
-  });
-
-  // Create bind groups for ping-pong
-  const computeBG = [
-    device.createBindGroup({ layout: computeBGL, entries: [
-      { binding: 0, resource: { buffer: bufferA } },
-      { binding: 1, resource: { buffer: bufferB } },
-      { binding: 2, resource: { buffer: paramsBuffer } },
-    ]}),
-    device.createBindGroup({ layout: computeBGL, entries: [
-      { binding: 0, resource: { buffer: bufferB } },
-      { binding: 1, resource: { buffer: bufferA } },
-      { binding: 2, resource: { buffer: paramsBuffer } },
-    ]}),
-  ];
-
-  // renderBGs[viewIndex][pingPong] — per-eye camera offset × per-frame particle buffer
-  const renderBGs: GPUBindGroup[][] = [0, 1].map(vi =>
-    [bufferA, bufferB].map(buf => device.createBindGroup({ layout: renderBGL, entries: [
-      { binding: 0, resource: { buffer: buf } },
-      { binding: 1, resource: { buffer: cameraBuffer, offset: vi * CAMERA_STRIDE, size: CAMERA_SIZE } },
-    ]}))
-  );
-
-  let pingPong = 0;
-  const depthRef: DepthRef = {};
-
-  return {
-    compute(encoder: GPUCommandEncoder) {
-      const p = state.boids;
-      const m = state.mouse;
-      const fullParams = new Float32Array(16);
-      // [LAW:dataflow-not-control-flow] Time scaling lives in the dt value itself; the compute shader doesn't branch on pause/reverse.
-      fullParams[0] = 0.016 * state.fx.timeScale;
-      fullParams[1] = p.separationRadius / 50;
-      fullParams[2] = p.alignmentRadius / 50;
-      fullParams[3] = p.cohesionRadius / 50;
-      fullParams[4] = p.maxSpeed;
-      fullParams[5] = p.maxForce;
-      fullParams[6] = p.visualRange / 50;
-      // [7] = count (u32, set below)
-      fullParams[8] = 2.0; // boundSize
-      fullParams[9] = m.worldX;
-      fullParams[10] = m.worldY;
-      fullParams[11] = m.worldZ;
-      fullParams[12] = m.down ? 1.0 : 0.0;
-      new Uint32Array(fullParams.buffer)[7] = count;
-      device.queue.writeBuffer(paramsBuffer, 0, fullParams);
-
-      const pass = encoder.beginComputePass();
-      pass.setPipeline(computePipeline);
-      pass.setBindGroup(0, computeBG[pingPong]);
-      pass.dispatchWorkgroups(Math.ceil(count / 64));
-      pass.end();
-      pingPong = 1 - pingPong;
-    },
-
-    render(encoder: GPUCommandEncoder, textureView: GPUTextureView, viewport: number[] | null, viewIndex = 0) {
-      const aspect = viewport ? (viewport[2] / viewport[3]) : (canvas.width / canvas.height);
-      device.queue.writeBuffer(cameraBuffer, viewIndex * CAMERA_STRIDE, getCameraUniformData(aspect));
-
-      const pass = encoder.beginRenderPass({
-        colorAttachments: [getColorAttachment(depthRef, textureView, viewport)],
-        depthStencilAttachment: getDepthAttachment(depthRef, viewport),
-      });
-
-      const renderViewport = getRenderViewport(viewport);
-      if (renderViewport) {
-        pass.setViewport(renderViewport[0], renderViewport[1], renderViewport[2], renderViewport[3], 0, 1);
-      }
-
-      renderGrid(pass, aspect, viewIndex);
-
-      pass.setPipeline(renderPipeline);
-      pass.setBindGroup(0, renderBGs[viewIndex][pingPong]);
-      pass.draw(3, count);
-      pass.end();
-    },
-
-    getCount() { return count; },
-
-    destroy() {
-      bufferA.destroy(); bufferB.destroy();
-      paramsBuffer.destroy(); cameraBuffer.destroy();
-      destroyDepthRef(depthRef);
-    }
-  };
 }
 
 // --- 5b: N-BODY PHYSICS ---
@@ -1549,87 +1325,6 @@ function createBoidsSimulation() {
 //   3. Coarsest level (l = maxLevel): over-smooth toward exact solve.
 //   4. Ascent (l = maxLevel-1..0): prolong correction + post-smooth.
 //
-// Opens its own compute pass (WebGPU implicit-barrier boundary). The clear
-// ops MUST run outside any compute pass, which is why the clears live in
-// this helper rather than the caller.
-interface PmVCycleArgs {
-  levels: number;              // total multigrid levels (e.g. 6 → levels 0..5)
-  wgCount: number[];           // workgroup count per level (@workgroup_size(4,4,4))
-  potential: GPUBuffer[];      // phi[0..levels-1]
-  smoothBG: GPUBindGroup[][];  // smoothBG[level][parity]  (parity: 0=red, 1=black)
-  residualBG: GPUBindGroup[];  // residualBG[level]
-  restrictBG: GPUBindGroup[];  // restrictBG[level] = transition level → level+1
-  prolongBG: GPUBindGroup[];   // prolongBG[level]  = transition level+1 → level
-  preSmooth: number;           // red-black GS sweeps before restriction (per level)
-  postSmooth: number;          // red-black GS sweeps after prolongation (per level)
-  coarsestSweeps: number;      // red-black GS sweeps on the coarsest level
-  timingBucket?: GpuTimingBucket;
-}
-
-function runPmVCycle(encoder: GPUCommandEncoder, a: PmVCycleArgs): void {
-  const maxLevel = a.levels - 1;
-
-  // Clear coarse-level corrections. Level 0 is NOT cleared — its residual
-  // warm-start is the whole reason one V-cycle suffices each frame.
-  for (let l = 1; l < a.levels; l++) encoder.clearBuffer(a.potential[l]);
-
-  // [LAW:dataflow-not-control-flow] Every level runs the same operations
-  // every cycle; only the per-level bind group and workgroup count vary.
-  // No phase check, no branch on simStep — the solver is a pure function of
-  // (density, previous phi[0]).
-  const vTsw = a.timingBucket ? tsWrites(a.timingBucket) : undefined;
-  const pass = encoder.beginComputePass(vTsw ? { timestampWrites: vTsw } : undefined);
-
-  // Descent: smooth + residual + restrict at each level down to maxLevel-1.
-  for (let l = 0; l < maxLevel; l++) {
-    const n = a.wgCount[l];
-    pass.setPipeline(pmSmoothPipeline);
-    for (let s = 0; s < a.preSmooth; s++) {
-      pass.setBindGroup(0, a.smoothBG[l][0]); pass.dispatchWorkgroups(n, n, n);
-      pass.setBindGroup(0, a.smoothBG[l][1]); pass.dispatchWorkgroups(n, n, n);
-    }
-    pass.setPipeline(pmResidualPipeline);
-    pass.setBindGroup(0, a.residualBG[l]); pass.dispatchWorkgroups(n, n, n);
-    pass.setPipeline(pmRestrictPipeline);
-    pass.setBindGroup(0, a.restrictBG[l]);
-    const nNext = a.wgCount[l + 1];
-    pass.dispatchWorkgroups(nNext, nNext, nNext);
-  }
-
-  // Coarsest level: over-smooth toward exact solve. Level is tiny (4³ for
-  // inner, 4³ for outer with 5 levels) so many sweeps are cheap.
-  {
-    const n = a.wgCount[maxLevel];
-    pass.setPipeline(pmSmoothPipeline);
-    for (let s = 0; s < a.coarsestSweeps; s++) {
-      pass.setBindGroup(0, a.smoothBG[maxLevel][0]); pass.dispatchWorkgroups(n, n, n);
-      pass.setBindGroup(0, a.smoothBG[maxLevel][1]); pass.dispatchWorkgroups(n, n, n);
-    }
-  }
-
-  // Ascent: prolong correction up one level + post-smooth.
-  for (let l = maxLevel - 1; l >= 0; l--) {
-    const n = a.wgCount[l];
-    pass.setPipeline(pmProlongPipeline);
-    pass.setBindGroup(0, a.prolongBG[l]); pass.dispatchWorkgroups(n, n, n);
-    pass.setPipeline(pmSmoothPipeline);
-    for (let s = 0; s < a.postSmooth; s++) {
-      pass.setBindGroup(0, a.smoothBG[l][0]); pass.dispatchWorkgroups(n, n, n);
-      pass.setBindGroup(0, a.smoothBG[l][1]); pass.dispatchWorkgroups(n, n, n);
-    }
-  }
-
-  pass.end();
-}
-
-// Pipeline handles reused by runPmVCycle. Declared here so the helper can
-// reference them; populated once inside createPhysicsSimulation at init.
-// [LAW:one-source-of-truth] Single module-scope pipeline object per stage.
-let pmSmoothPipeline: GPUComputePipeline;
-let pmResidualPipeline: GPUComputePipeline;
-let pmRestrictPipeline: GPUComputePipeline;
-let pmProlongPipeline: GPUComputePipeline;
-
 function createPhysicsSimulation() {
   const count = state.physics.count;
   const bodyBytes = count * 48; // pos(12) + mass(4) + vel(12) + pad(4) + home(12) + pad(4) = 48
@@ -2146,13 +1841,10 @@ function createPhysicsSimulation() {
     ]
   });
 
-  // Assign to module-scope pipeline handles used by runPmVCycle().
-  // [LAW:single-enforcer] These pipelines are created once per simulation
-  // instance; the V-cycle helper at module scope references them.
-  pmSmoothPipeline   = device.createComputePipeline({ layout: device.createPipelineLayout({ bindGroupLayouts: [pmSmoothBGL] }),   compute: { module: pmSmoothModule,   entryPoint: 'main' } });
-  pmResidualPipeline = device.createComputePipeline({ layout: device.createPipelineLayout({ bindGroupLayouts: [pmResidualBGL] }), compute: { module: pmResidualModule, entryPoint: 'main' } });
-  pmRestrictPipeline = device.createComputePipeline({ layout: device.createPipelineLayout({ bindGroupLayouts: [pmRestrictBGL] }), compute: { module: pmRestrictModule, entryPoint: 'main' } });
-  pmProlongPipeline  = device.createComputePipeline({ layout: device.createPipelineLayout({ bindGroupLayouts: [pmProlongBGL] }),  compute: { module: pmProlongModule,  entryPoint: 'main' } });
+  const pmSmoothPipeline = device.createComputePipeline({ layout: device.createPipelineLayout({ bindGroupLayouts: [pmSmoothBGL] }), compute: { module: pmSmoothModule, entryPoint: 'main' } });
+  const pmResidualPipeline = device.createComputePipeline({ layout: device.createPipelineLayout({ bindGroupLayouts: [pmResidualBGL] }), compute: { module: pmResidualModule, entryPoint: 'main' } });
+  const pmRestrictPipeline = device.createComputePipeline({ layout: device.createPipelineLayout({ bindGroupLayouts: [pmRestrictBGL] }), compute: { module: pmRestrictModule, entryPoint: 'main' } });
+  const pmProlongPipeline = device.createComputePipeline({ layout: device.createPipelineLayout({ bindGroupLayouts: [pmProlongBGL] }), compute: { module: pmProlongModule, entryPoint: 'main' } });
 
   // PM nested force interpolation — reads BOTH grids' level-0 potential,
   // samples each at the particle position, and blends via smoothstep across
@@ -2947,6 +2639,12 @@ function createPhysicsSimulation() {
       // Outer first — its fully-solved φ becomes the inner grid's Dirichlet BC.
       runPmVCycle(encoder, {
         levels: PM_OUTER_LEVELS,
+        pipelines: {
+          prolong: pmProlongPipeline,
+          residual: pmResidualPipeline,
+          restrict: pmRestrictPipeline,
+          smooth: pmSmoothPipeline,
+        },
         wgCount: pmOuterWgCount,
         potential: pmOuterPotential,
         smoothBG: pmOuterSmoothBG,
@@ -2956,7 +2654,7 @@ function createPhysicsSimulation() {
         preSmooth: PM_SMOOTH_PRE,
         postSmooth: PM_SMOOTH_POST,
         coarsestSweeps: PM_COARSEST_SWEEPS,
-        timingBucket: 'outerVCycle',
+        timestampWrites: tsWrites('outerVCycle'),
       });
 
       // Boundary-sample: write outer φ into inner φ's level-0 face cells.
@@ -2974,6 +2672,12 @@ function createPhysicsSimulation() {
       // Inner V-cycle — reads face cells as Dirichlet BC (flag = 1 in uniforms).
       runPmVCycle(encoder, {
         levels: PM_MULTIGRID_LEVELS,
+        pipelines: {
+          prolong: pmProlongPipeline,
+          residual: pmResidualPipeline,
+          restrict: pmRestrictPipeline,
+          smooth: pmSmoothPipeline,
+        },
         wgCount: pmWgCount,
         potential: pmPotential,
         smoothBG: pmSmoothBG,
@@ -2983,7 +2687,7 @@ function createPhysicsSimulation() {
         preSmooth: PM_SMOOTH_PRE,
         postSmooth: PM_SMOOTH_POST,
         coarsestSweeps: PM_COARSEST_SWEEPS,
-        timingBucket: 'innerVCycle',
+        timestampWrites: tsWrites('innerVCycle'),
       });
 
       // ── PM force interpolation ─────────────────────────────────────────
@@ -3515,892 +3219,89 @@ function createPhysicsSimulation() {
 // Renders into the shared HDR scene like every other sim, so bloom/tonemap still apply.
 
 function createPhysicsClassicSimulation(): Simulation {
-  const count = state.physics_classic.count;
-  const bodyBytes = count * 32; // pos(12) + mass(4) + vel(12) + pad(4) = 32
-
-  // [LAW:one-source-of-truth] Verbatim initial distribution from the original shader-playground.
-  const initData = new Float32Array(count * 8);
-  const dist = state.physics_classic.distribution;
-  for (let i = 0; i < count; i++) {
-    const off = i * 8;
-    let x: number, y: number, z: number, vx = 0, vy = 0, vz = 0;
-    if (dist === 'disk') {
-      const angle = Math.random() * Math.PI * 2;
-      const r = Math.random() * 2;
-      x = Math.cos(angle) * r;
-      y = (Math.random() - 0.5) * 0.1;
-      z = Math.sin(angle) * r;
-      // Orbital velocity
-      const speed = 0.5 / Math.sqrt(r + 0.1);
-      vx = -Math.sin(angle) * speed;
-      vz = Math.cos(angle) * speed;
-    } else if (dist === 'shell') {
-      const theta = Math.random() * Math.PI * 2;
-      const phi = Math.acos(2 * Math.random() - 1);
-      const r = 1.5 + Math.random() * 0.1;
-      x = r * Math.sin(phi) * Math.cos(theta);
-      y = r * Math.sin(phi) * Math.sin(theta);
-      z = r * Math.cos(phi);
-    } else {
-      x = (Math.random() - 0.5) * 4;
-      y = (Math.random() - 0.5) * 4;
-      z = (Math.random() - 0.5) * 4;
-    }
-    initData[off    ] = x;
-    initData[off + 1] = y;
-    initData[off + 2] = z;
-    initData[off + 3] = 0.5 + Math.random() * 2.0; // mass
-    initData[off + 4] = vx;
-    initData[off + 5] = vy;
-    initData[off + 6] = vz;
-  }
-
-  const bufferA = device.createBuffer({ size: bodyBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST, mappedAtCreation: true });
-  new Float32Array(bufferA.getMappedRange()).set(initData);
-  bufferA.unmap();
-  const bufferB = device.createBuffer({ size: bodyBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
-
-  const paramsBuffer = device.createBuffer({ size: 48, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-  const attractorBuffer = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-  const cameraBuffer = device.createBuffer({ size: CAMERA_STRIDE * 2, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-
-  const computeModule = createShaderModuleChecked('nbody.classic.compute', shaderSource('nbody.classic.compute'));
-  const renderModule = createShaderModuleChecked('nbody.classic.render', shaderSource('nbody.classic.render'));
-
-  const computeBGL = device.createBindGroupLayout({ entries: [
-    { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
-    { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
-    { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
-  ]});
-  const computePipeline = device.createComputePipeline({
-    layout: device.createPipelineLayout({ bindGroupLayouts: [computeBGL] }),
-    compute: { module: computeModule, entryPoint: 'main' },
+  return createPhysicsClassicSimulationModule({
+    cameraSize: CAMERA_SIZE,
+    cameraStride: CAMERA_STRIDE,
+    createShaderModuleChecked,
+    destroyDepthRef,
+    device,
+    getCameraUniformData,
+    getColorAttachment,
+    getDefaultAspect: () => canvas.width / canvas.height,
+    getDepthAttachment,
+    getRenderViewport,
+    renderGrid,
+    renderSampleCount,
+    renderTargetFormat,
+    state,
   });
-
-  const renderBGL = device.createBindGroupLayout({ entries: [
-    { binding: 0, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: 'read-only-storage' } },
-    { binding: 1, visibility: GPUShaderStage.VERTEX, buffer: { type: 'uniform' } },
-    { binding: 2, visibility: GPUShaderStage.VERTEX, buffer: { type: 'uniform' } },
-  ]});
-  const renderPipeline = device.createRenderPipeline({
-    layout: device.createPipelineLayout({ bindGroupLayouts: [renderBGL] }),
-    vertex: { module: renderModule, entryPoint: 'vs_main' },
-    fragment: {
-      module: renderModule, entryPoint: 'fs_main',
-      targets: [{
-        format: renderTargetFormat,
-        blend: {
-          color: { srcFactor: 'src-alpha', dstFactor: 'one', operation: 'add' },
-          alpha: { srcFactor: 'one', dstFactor: 'one', operation: 'add' },
-        },
-      }],
-    },
-    primitive: { topology: 'triangle-list' },
-    depthStencil: { format: 'depth24plus', depthWriteEnabled: false, depthCompare: 'always' },
-    multisample: { count: renderSampleCount },
-  });
-
-  const computeBG = [
-    device.createBindGroup({ layout: computeBGL, entries: [
-      { binding: 0, resource: { buffer: bufferA } },
-      { binding: 1, resource: { buffer: bufferB } },
-      { binding: 2, resource: { buffer: paramsBuffer } },
-    ]}),
-    device.createBindGroup({ layout: computeBGL, entries: [
-      { binding: 0, resource: { buffer: bufferB } },
-      { binding: 1, resource: { buffer: bufferA } },
-      { binding: 2, resource: { buffer: paramsBuffer } },
-    ]}),
-  ];
-
-  const renderBGs: GPUBindGroup[][] = [0, 1].map(vi =>
-    [bufferA, bufferB].map(buf => device.createBindGroup({ layout: renderBGL, entries: [
-      { binding: 0, resource: { buffer: buf } },
-      { binding: 1, resource: { buffer: cameraBuffer, offset: vi * CAMERA_STRIDE, size: CAMERA_SIZE } },
-      { binding: 2, resource: { buffer: attractorBuffer } },
-    ]}))
-  );
-
-  let pingPong = 0;
-  const depthRef: DepthRef = {};
-
-  return {
-    compute(encoder: GPUCommandEncoder) {
-      const p = state.physics_classic;
-      const m = state.mouse;
-      // Pack 12 floats: dt, G, softening, damping, count(u32), 3 pads, attractor.xyz, attractorActive
-      const buf = new ArrayBuffer(48);
-      const f32 = new Float32Array(buf);
-      const u32 = new Uint32Array(buf);
-      f32[0] = 0.016 * state.fx.timeScale;
-      f32[1] = p.G * 0.001;
-      f32[2] = p.softening;
-      f32[3] = p.damping;
-      u32[4] = count;
-      f32[8] = m.down ? m.worldX : 0.0;
-      f32[9] = m.down ? m.worldY : 0.0;
-      f32[10] = m.down ? m.worldZ : 0.0;
-      f32[11] = m.down ? 1.0 : 0.0;
-      device.queue.writeBuffer(paramsBuffer, 0, new Uint8Array(buf));
-
-      // Attractor uniform for the render pass (used for the per-body swell/glow effect).
-      device.queue.writeBuffer(attractorBuffer, 0, new Float32Array([
-        m.down ? m.worldX : 0.0,
-        m.down ? m.worldY : 0.0,
-        m.down ? m.worldZ : 0.0,
-        m.down ? 1.0 : 0.0,
-      ]));
-
-      const pass = encoder.beginComputePass();
-      pass.setPipeline(computePipeline);
-      pass.setBindGroup(0, computeBG[pingPong]);
-      pass.dispatchWorkgroups(Math.ceil(count / 64));
-      pass.end();
-      pingPong = 1 - pingPong;
-    },
-
-    render(encoder: GPUCommandEncoder, textureView: GPUTextureView, viewport: number[] | null, viewIndex = 0) {
-      const aspect = viewport ? (viewport[2] / viewport[3]) : (canvas.width / canvas.height);
-      device.queue.writeBuffer(cameraBuffer, viewIndex * CAMERA_STRIDE, getCameraUniformData(aspect));
-
-      const pass = encoder.beginRenderPass({
-        colorAttachments: [getColorAttachment(depthRef, textureView, viewport)],
-        depthStencilAttachment: getDepthAttachment(depthRef, viewport),
-      });
-      const renderViewport = getRenderViewport(viewport);
-      if (renderViewport) {
-        pass.setViewport(renderViewport[0], renderViewport[1], renderViewport[2], renderViewport[3], 0, 1);
-      }
-      renderGrid(pass, aspect, viewIndex);
-      pass.setPipeline(renderPipeline);
-      pass.setBindGroup(0, renderBGs[viewIndex][pingPong]);
-      pass.draw(6, count);
-      pass.end();
-    },
-
-    getCount() { return count; },
-
-    destroy() {
-      bufferA.destroy(); bufferB.destroy();
-      paramsBuffer.destroy(); attractorBuffer.destroy(); cameraBuffer.destroy();
-      destroyDepthRef(depthRef);
-    },
-  };
 }
 
 // --- 5c: FLUID DYNAMICS ---
 
 function createFluidSimulation() {
-  const FLUID_DT = 0.22;
-  const res = state.fluid.resolution;
-  const cellCount = res * res;
-  const velBytes = cellCount * 8;  // vec2f per cell
-  const scalarBytes = cellCount * 4; // f32 per cell
-  const dyeBytes = cellCount * 16; // vec4f per cell
-
-  // All buffers get COPY_SRC so we can copy results back to canonical A buffers
-  const BUF = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC;
-  const velA = device.createBuffer({ size: velBytes, usage: BUF });
-  const velB = device.createBuffer({ size: velBytes, usage: BUF });
-  const pressA = device.createBuffer({ size: scalarBytes, usage: BUF });
-  const pressB = device.createBuffer({ size: scalarBytes, usage: BUF });
-  const divergenceBuf = device.createBuffer({ size: scalarBytes, usage: BUF });
-  const dyeA = device.createBuffer({ size: dyeBytes, usage: BUF });
-  const dyeB = device.createBuffer({ size: dyeBytes, usage: BUF });
-  const paramsBuffer = device.createBuffer({ size: 48, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-  const cameraBuffer = device.createBuffer({ size: CAMERA_STRIDE * 2, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-
-  const initDye = new Float32Array(cellCount * 4);
-  // Also seed initial velocity for motion
-  const initVel = new Float32Array(cellCount * 2);
-  for (let y = 0; y < res; y++) {
-    for (let x = 0; x < res; x++) {
-      const i = y * res + x;
-      const fx = x / res, fy = y / res;
-      // Swirl velocity
-      const cx = fx - 0.5, cy = fy - 0.5;
-      initVel[i * 2]     = -cy * 3.0;
-      initVel[i * 2 + 1] =  cx * 3.0;
-    }
-  }
-  device.queue.writeBuffer(dyeA, 0, initDye);
-  device.queue.writeBuffer(velA, 0, initVel);
-
-  // Compile shaders
-  const forcesAdvectModule = createShaderModuleChecked('fluid.forces', shaderSource('fluid.forces'));
-  const diffuseModule = createShaderModuleChecked('fluid.diffuse', shaderSource('fluid.diffuse'));
-  const pressureModule = createShaderModuleChecked('fluid.pressure', shaderSource('fluid.pressure'));
-  const divergenceModule = createShaderModuleChecked('fluid.divergence', shaderSource('fluid.divergence'));
-  const gradientModule = createShaderModuleChecked('fluid.gradient', shaderSource('fluid.gradient'));
-  const renderModule = createShaderModuleChecked('fluid.render', shaderSource('fluid.render'));
-
-  // Forces + Advect pipeline: reads vel+dye from A, writes to B
-  const faBGL = device.createBindGroupLayout({
-    entries: [
-      { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
-      { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
-      { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
-      { binding: 3, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
-      { binding: 4, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
-    ]
+  return createFluidSimulationModule({
+    cameraSize: CAMERA_SIZE,
+    cameraStride: CAMERA_STRIDE,
+    createShaderModuleChecked,
+    destroyDepthRef,
+    device,
+    fluidGridResolution: FLUID_GRID_RES,
+    fluidWorldSize: FLUID_WORLD_SIZE,
+    getCameraUniformData,
+    getColorAttachment,
+    getDefaultAspect: () => canvas.width / canvas.height,
+    getDepthAttachment,
+    getRenderViewport,
+    renderGrid,
+    renderSampleCount,
+    renderTargetFormat,
+    state,
   });
-  const faPipeline = device.createComputePipeline({
-    layout: device.createPipelineLayout({ bindGroupLayouts: [faBGL] }),
-    compute: { module: forcesAdvectModule, entryPoint: 'main' }
-  });
-  // Always reads A → writes B
-  const faBG = device.createBindGroup({ layout: faBGL, entries: [
-    { binding: 0, resource: { buffer: velA } }, { binding: 1, resource: { buffer: velB } },
-    { binding: 2, resource: { buffer: dyeA } }, { binding: 3, resource: { buffer: dyeB } },
-    { binding: 4, resource: { buffer: paramsBuffer } },
-  ]});
-
-  // Diffuse pipeline: ping-pong velocity
-  const diffBGL = device.createBindGroupLayout({
-    entries: [
-      { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
-      { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
-      { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
-    ]
-  });
-  const diffPipeline = device.createComputePipeline({
-    layout: device.createPipelineLayout({ bindGroupLayouts: [diffBGL] }),
-    compute: { module: diffuseModule, entryPoint: 'main' }
-  });
-  const diffBGs = [
-    device.createBindGroup({ layout: diffBGL, entries: [
-      { binding: 0, resource: { buffer: velA } }, { binding: 1, resource: { buffer: velB } },
-      { binding: 2, resource: { buffer: paramsBuffer } },
-    ]}),
-    device.createBindGroup({ layout: diffBGL, entries: [
-      { binding: 0, resource: { buffer: velB } }, { binding: 1, resource: { buffer: velA } },
-      { binding: 2, resource: { buffer: paramsBuffer } },
-    ]}),
-  ];
-
-  // Divergence pipeline: reads vel, writes divergence
-  const divBGL = device.createBindGroupLayout({
-    entries: [
-      { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
-      { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
-      { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
-    ]
-  });
-  const divPipeline = device.createComputePipeline({
-    layout: device.createPipelineLayout({ bindGroupLayouts: [divBGL] }),
-    compute: { module: divergenceModule, entryPoint: 'main' }
-  });
-  // Always reads velA (we copy back to A before this step)
-  const divBG = device.createBindGroup({ layout: divBGL, entries: [
-    { binding: 0, resource: { buffer: velA } },
-    { binding: 1, resource: { buffer: divergenceBuf } },
-    { binding: 2, resource: { buffer: paramsBuffer } },
-  ]});
-
-  // Pressure pipeline: ping-pong pressure
-  const pressBGL = device.createBindGroupLayout({
-    entries: [
-      { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
-      { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
-      { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
-      { binding: 3, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
-    ]
-  });
-  const pressPipeline = device.createComputePipeline({
-    layout: device.createPipelineLayout({ bindGroupLayouts: [pressBGL] }),
-    compute: { module: pressureModule, entryPoint: 'main' }
-  });
-  const pressBGs = [
-    device.createBindGroup({ layout: pressBGL, entries: [
-      { binding: 0, resource: { buffer: pressA } }, { binding: 1, resource: { buffer: pressB } },
-      { binding: 2, resource: { buffer: divergenceBuf } }, { binding: 3, resource: { buffer: paramsBuffer } },
-    ]}),
-    device.createBindGroup({ layout: pressBGL, entries: [
-      { binding: 0, resource: { buffer: pressB } }, { binding: 1, resource: { buffer: pressA } },
-      { binding: 2, resource: { buffer: divergenceBuf } }, { binding: 3, resource: { buffer: paramsBuffer } },
-    ]}),
-  ];
-
-  // Gradient subtract pipeline: reads vel + pressure, writes corrected vel
-  const gradBGL = device.createBindGroupLayout({
-    entries: [
-      { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
-      { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
-      { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
-      { binding: 3, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
-    ]
-  });
-  const gradPipeline = device.createComputePipeline({
-    layout: device.createPipelineLayout({ bindGroupLayouts: [gradBGL] }),
-    compute: { module: gradientModule, entryPoint: 'main' }
-  });
-  // Always reads velA + pressA → writes velB (we copy back to A before divergence,
-  // and copy pressure back to A after pressure solve)
-  const gradBG = device.createBindGroup({ layout: gradBGL, entries: [
-    { binding: 0, resource: { buffer: velA } }, { binding: 1, resource: { buffer: velB } },
-    { binding: 2, resource: { buffer: pressA } }, { binding: 3, resource: { buffer: paramsBuffer } },
-  ]});
-
-  // [LAW:one-source-of-truth] The dye buffer remains the canonical fluid state; the volumetric look is derived entirely in the render shader.
-  // Render pipeline — extruded voxel columns derived from the 2D fluid field
-  const fluidRenderParamsBuffer = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-  device.queue.writeBuffer(fluidRenderParamsBuffer, 0, new Float32Array([res, FLUID_GRID_RES, state.fluid.volumeScale, FLUID_WORLD_SIZE]));
-
-  const renderBGL = device.createBindGroupLayout({
-    entries: [
-      { binding: 0, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: 'read-only-storage' } },
-      { binding: 1, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
-      { binding: 2, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
-    ]
-  });
-  const renderPipeline = device.createRenderPipeline({
-    layout: device.createPipelineLayout({ bindGroupLayouts: [renderBGL] }),
-    vertex: { module: renderModule, entryPoint: 'vs_main' },
-    fragment: {
-      module: renderModule, entryPoint: 'fs_main',
-      targets: [{ format: renderTargetFormat }]
-    },
-    primitive: { topology: 'triangle-list' },
-    depthStencil: { format: 'depth24plus', depthWriteEnabled: true, depthCompare: 'less' },
-    multisample: { count: renderSampleCount },
-  });
-  // renderBGs[viewIndex] — fluid has no particle ping-pong for rendering
-  const renderBGs: GPUBindGroup[] = [0, 1].map(vi => device.createBindGroup({ layout: renderBGL, entries: [
-    { binding: 0, resource: { buffer: dyeA } },
-    { binding: 1, resource: { buffer: fluidRenderParamsBuffer } },
-    { binding: 2, resource: { buffer: cameraBuffer, offset: vi * CAMERA_STRIDE, size: CAMERA_SIZE } },
-  ]}));
-
-  const workgroups = Math.ceil(res / 8);
-  const depthRef: DepthRef = {};
-  let simulationTime = 0;
-
-  // Buffer management strategy: always keep canonical data in A buffers.
-  // Each stage reads A → writes B, then we copy B → A.
-  // For Jacobi iterations, we ping-pong and copy final result back to A.
-  // This costs some copy bandwidth but makes bind group management trivial.
-
-  return {
-    compute(encoder: GPUCommandEncoder) {
-      const p = state.fluid;
-      const dyeModeNum = p.dyeMode === 'rainbow' ? 0 : p.dyeMode === 'single' ? 1 : 2;
-      simulationTime += 0.016 * state.fx.timeScale;
-      const paramsData = new Float32Array([
-        FLUID_DT * state.fx.timeScale, p.viscosity, p.diffusionRate, p.forceStrength,
-        res, state.mouse.x, state.mouse.y, state.mouse.dx,
-        state.mouse.dy, state.mouse.down ? 1.0 : 0.0, dyeModeNum, simulationTime
-      ]);
-      device.queue.writeBuffer(paramsBuffer, 0, paramsData);
-
-      // 1. Forces + advect: velA/dyeA → velB/dyeB
-      {
-        const pass = encoder.beginComputePass();
-        pass.setPipeline(faPipeline);
-        pass.setBindGroup(0, faBG);
-        pass.dispatchWorkgroups(workgroups, workgroups);
-        pass.end();
-      }
-      // Copy results back to A
-      encoder.copyBufferToBuffer(velB, 0, velA, 0, velBytes);
-      encoder.copyBufferToBuffer(dyeB, 0, dyeA, 0, dyeBytes);
-
-      // 2. Diffuse velocity (Jacobi iterations, ping-pong A↔B)
-      // After even iterations: last write is to A. After odd: last write is to B.
-      let velPong = 0; // 0 = A is current
-      for (let i = 0; i < p.jacobiIterations; i++) {
-        const pass = encoder.beginComputePass();
-        pass.setPipeline(diffPipeline);
-        pass.setBindGroup(0, diffBGs[velPong]);
-        pass.dispatchWorkgroups(workgroups, workgroups);
-        pass.end();
-        velPong = 1 - velPong;
-      }
-      // Ensure result is in A
-      if (velPong === 1) {
-        encoder.copyBufferToBuffer(velB, 0, velA, 0, velBytes);
-      }
-
-      // 3. Compute divergence from velA
-      {
-        const pass = encoder.beginComputePass();
-        pass.setPipeline(divPipeline);
-        pass.setBindGroup(0, divBG);
-        pass.dispatchWorkgroups(workgroups, workgroups);
-        pass.end();
-      }
-
-      // 4. Pressure solve (Jacobi iterations, ping-pong A↔B)
-      let pressPong = 0;
-      for (let i = 0; i < p.jacobiIterations; i++) {
-        const pass = encoder.beginComputePass();
-        pass.setPipeline(pressPipeline);
-        pass.setBindGroup(0, pressBGs[pressPong]);
-        pass.dispatchWorkgroups(workgroups, workgroups);
-        pass.end();
-        pressPong = 1 - pressPong;
-      }
-      // Ensure result is in A
-      if (pressPong === 1) {
-        encoder.copyBufferToBuffer(pressB, 0, pressA, 0, scalarBytes);
-      }
-
-      // 5. Gradient subtract: velA + pressA → velB, then copy to velA
-      {
-        const pass = encoder.beginComputePass();
-        pass.setPipeline(gradPipeline);
-        pass.setBindGroup(0, gradBG);
-        pass.dispatchWorkgroups(workgroups, workgroups);
-        pass.end();
-      }
-      encoder.copyBufferToBuffer(velB, 0, velA, 0, velBytes);
-
-      // Canonical data is now in A buffers for rendering
-    },
-
-    render(encoder: GPUCommandEncoder, textureView: GPUTextureView, viewport: number[] | null, viewIndex = 0) {
-      const aspect = viewport ? (viewport[2] / viewport[3]) : (canvas.width / canvas.height);
-      device.queue.writeBuffer(cameraBuffer, viewIndex * CAMERA_STRIDE, getCameraUniformData(aspect));
-      device.queue.writeBuffer(fluidRenderParamsBuffer, 0, new Float32Array([res, FLUID_GRID_RES, state.fluid.volumeScale, FLUID_WORLD_SIZE]));
-
-      const pass = encoder.beginRenderPass({
-        colorAttachments: [getColorAttachment(depthRef, textureView, viewport)],
-        depthStencilAttachment: getDepthAttachment(depthRef, viewport),
-      });
-
-      const renderViewport = getRenderViewport(viewport);
-      if (renderViewport) {
-        pass.setViewport(renderViewport[0], renderViewport[1], renderViewport[2], renderViewport[3], 0, 1);
-      }
-
-      renderGrid(pass, aspect, viewIndex);
-
-      pass.setPipeline(renderPipeline);
-      pass.setBindGroup(0, renderBGs[viewIndex]);
-      pass.draw(36, FLUID_GRID_RES * FLUID_GRID_RES);
-      pass.end();
-    },
-
-    getCount() { return res + 'x' + res; },
-
-    destroy() {
-      velA.destroy(); velB.destroy();
-      pressA.destroy(); pressB.destroy();
-      divergenceBuf.destroy();
-      dyeA.destroy(); dyeB.destroy();
-      paramsBuffer.destroy(); fluidRenderParamsBuffer.destroy();
-      cameraBuffer.destroy();
-      destroyDepthRef(depthRef);
-    }
-  };
 }
 
 // --- 5d: PARAMETRIC SHAPES ---
 
 function createParametricSimulation() {
-  // Fixed 256×256 resolution — no dynamic resizing needed
-  const URES = 256;
-  const VRES = 256;
-  const vertexBytes = URES * VRES * 32; // pos(12)+glow(4)+normal(12)+pad(4) = 32 bytes
-  const indexCount  = (URES - 1) * (VRES - 1) * 6;
-
-  const vertexBuffer = device.createBuffer({ size: vertexBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.VERTEX });
-  const indexBuffer  = device.createBuffer({ size: indexCount * 4, usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST });
-
-  // Generate index buffer once at creation
-  {
-    const indices = new Uint32Array(indexCount);
-    let i = 0;
-    for (let vi = 0; vi < VRES - 1; vi++) {
-      for (let ui = 0; ui < URES - 1; ui++) {
-        const tl = vi * URES + ui, tr = tl + 1;
-        const bl = (vi + 1) * URES + ui, br = bl + 1;
-        indices[i++] = tl; indices[i++] = bl; indices[i++] = tr;
-        indices[i++] = tr; indices[i++] = bl; indices[i++] = br;
-      }
-    }
-    device.queue.writeBuffer(indexBuffer, 0, indices);
-  }
-
-  const computeParamsBuffer = device.createBuffer({ size: 64, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-  const cameraBuffer = device.createBuffer({ size: CAMERA_STRIDE * 2, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-  const modelBuffer  = device.createBuffer({ size: 64, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-
-  let time = 0;     // always advances; used only for param oscillation phase
-  let animTime = 0; // advances only when any rate > 0; drives rotation + waves
-
-  const computeModule = createShaderModuleChecked('parametric.compute', shaderSource('parametric.compute'));
-  const computeBGL = device.createBindGroupLayout({
-    entries: [
-      { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
-      { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
-    ]
+  return createParametricSimulationModule({
+    cameraSize: CAMERA_SIZE,
+    cameraStride: CAMERA_STRIDE,
+    createShaderModuleChecked,
+    destroyDepthRef,
+    device,
+    getCameraUniformData,
+    getColorAttachment,
+    getDefaultAspect: () => canvas.width / canvas.height,
+    getDepthAttachment,
+    getRenderViewport,
+    renderGrid,
+    renderSampleCount,
+    renderTargetFormat,
+    shapeIds: catalogShapeIds,
+    state,
   });
-  const computePipeline = device.createComputePipeline({
-    layout: device.createPipelineLayout({ bindGroupLayouts: [computeBGL] }),
-    compute: { module: computeModule, entryPoint: 'main' }
-  });
-  const computeBG = device.createBindGroup({ layout: computeBGL, entries: [
-    { binding: 0, resource: { buffer: vertexBuffer } },
-    { binding: 1, resource: { buffer: computeParamsBuffer } },
-  ]});
-
-  const renderModule = createShaderModuleChecked('parametric.render', shaderSource('parametric.render'));
-  const renderBGL = device.createBindGroupLayout({
-    entries: [
-      { binding: 0, visibility: GPUShaderStage.VERTEX, buffer: { type: 'read-only-storage' } },
-      { binding: 1, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
-      { binding: 2, visibility: GPUShaderStage.VERTEX, buffer: { type: 'uniform' } },
-    ]
-  });
-  const renderPipeline = device.createRenderPipeline({
-    layout: device.createPipelineLayout({ bindGroupLayouts: [renderBGL] }),
-    vertex: { module: renderModule, entryPoint: 'vs_main' },
-    fragment: {
-      module: renderModule, entryPoint: 'fs_main',
-      targets: [{ format: renderTargetFormat }]
-    },
-    primitive: { topology: 'triangle-list', cullMode: 'none' },
-    depthStencil: { format: 'depth24plus', depthWriteEnabled: true, depthCompare: 'less' },
-    multisample: { count: renderSampleCount },
-  });
-  const renderBGs: GPUBindGroup[] = [0, 1].map(vi => device.createBindGroup({ layout: renderBGL, entries: [
-    { binding: 0, resource: { buffer: vertexBuffer } },
-    { binding: 1, resource: { buffer: cameraBuffer, offset: vi * CAMERA_STRIDE, size: CAMERA_SIZE } },
-    { binding: 2, resource: { buffer: modelBuffer } },
-  ]}));
-
-  const depthRef: DepthRef = {};
-
-  return {
-    compute(encoder: GPUCommandEncoder) {
-      const p = state.parametric;
-      time += 0.016 * state.fx.timeScale; // scaled by FX time slider so pause/reverse works on the parametric animation
-      const maxRate = Math.max(p.p1Rate, p.p2Rate, p.p3Rate, p.p4Rate, p.twistRate);
-      animTime += 0.016 * state.fx.timeScale * (maxRate > 0 ? 1 : 0); // frozen when all rates = 0
-
-      // Sinusoidal oscillation — natural ease-in-out at each extreme.
-      // Phase offsets stagger the peaks so params don't all sync up.
-      const osc = (mn: number, mx: number, rate: number, phase: number) =>
-        mn + (mx - mn) * (0.5 + 0.5 * Math.sin(time * rate + phase));
-
-      const p1    = osc(p.p1Min,    p.p1Max,    p.p1Rate,    0);
-      const p2    = osc(p.p2Min,    p.p2Max,    p.p2Rate,    Math.PI * 0.7);
-      const p3    = osc(p.p3Min,    p.p3Max,    p.p3Rate,    Math.PI * 1.3);
-      const p4    = osc(p.p4Min,    p.p4Max,    p.p4Rate,    Math.PI * 0.4);
-      const twist = osc(p.twistMin, p.twistMax, p.twistRate, Math.PI * 0.9);
-
-      const m = state.mouse;
-      const paramsData = new ArrayBuffer(64);
-      const u32 = new Uint32Array(paramsData);
-      const f32 = new Float32Array(paramsData);
-      u32[0] = URES; u32[1] = VRES;
-      f32[2] = p.scale; f32[3] = twist; f32[4] = animTime;
-      u32[5] = catalogShapeIds[p.shape] || 0;
-      f32[6] = p1; f32[7] = p2; f32[8] = p3; f32[9] = p4;
-      f32[10] = m.worldX; f32[11] = m.worldY; f32[12] = m.worldZ;
-      f32[13] = m.down ? 1.0 : 0.0;
-      device.queue.writeBuffer(computeParamsBuffer, 0, new Uint8Array(paramsData));
-
-      const pass = encoder.beginComputePass();
-      pass.setPipeline(computePipeline);
-      pass.setBindGroup(0, computeBG);
-      pass.dispatchWorkgroups(Math.ceil(URES / 8), Math.ceil(VRES / 8));
-      pass.end();
-    },
-
-    render(encoder: GPUCommandEncoder, textureView: GPUTextureView, viewport: number[] | null, viewIndex = 0) {
-      const aspect = viewport ? (viewport[2] / viewport[3]) : (canvas.width / canvas.height);
-      device.queue.writeBuffer(cameraBuffer, viewIndex * CAMERA_STRIDE, getCameraUniformData(aspect));
-
-      // Slow tumble: Y-axis at 0.1 speed, X-axis at 0.03 (different rates = non-repeating path)
-      const model = mat4.rotateX(mat4.rotateY(mat4.identity(), animTime * 0.1), animTime * 0.03);
-      device.queue.writeBuffer(modelBuffer, 0, model as Float32Array<ArrayBuffer>);
-
-      const pass = encoder.beginRenderPass({
-        colorAttachments: [getColorAttachment(depthRef, textureView, viewport)],
-        depthStencilAttachment: getDepthAttachment(depthRef, viewport),
-      });
-
-      const renderViewport = getRenderViewport(viewport);
-      if (renderViewport) {
-        pass.setViewport(renderViewport[0], renderViewport[1], renderViewport[2], renderViewport[3], 0, 1);
-      }
-
-      renderGrid(pass, aspect, viewIndex);
-
-      pass.setPipeline(renderPipeline);
-      pass.setBindGroup(0, renderBGs[viewIndex]);
-      pass.setIndexBuffer(indexBuffer, 'uint32');
-      pass.drawIndexed(indexCount);
-      pass.end();
-    },
-
-    getCount() { return `256×256 (${state.parametric.shape})`; },
-
-    destroy() {
-      vertexBuffer.destroy(); indexBuffer.destroy();
-      computeParamsBuffer.destroy(); cameraBuffer.destroy(); modelBuffer.destroy();
-      destroyDepthRef(depthRef);
-    }
-  };
 }
 
 
 // --- 5e: REACTION-DIFFUSION (Gray-Scott, 3D) ---
 
 function createReactionSimulation() {
-  // [LAW:one-source-of-truth] Volume resolution owned by state.reaction.resolution; everything else derives from it.
-  const N = state.reaction.resolution;
-  const WORLD_SIZE = 3.0;
-
-  // [LAW:one-source-of-truth] rgba16float is the baseline WebGPU storage-capable
-  // 16-bit float format. rg16float is NOT in the baseline storage-texture list,
-  // so attempting to use it silently failed texture creation. Use rgba16float and
-  // only read .rg in the shader — wastes 2 channels but plumbing stays simple.
-  const texDesc: GPUTextureDescriptor = {
-    size: [N, N, N],
-    dimension: '3d',
-    format: 'rgba16float',
-    usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
-  };
-  const uvTexA = device.createTexture(texDesc);
-  const uvTexB = device.createTexture(texDesc);
-
-  // Seed: u=1 everywhere, v=0 except a few random 3D blobs near the center.
-  // rgba16float upload: 4 half-float channels × 2 bytes = 8 bytes/texel.
-  const seed = new Uint16Array(N * N * N * 4);
-  // Half-float encoder (IEEE 754 binary16).
-  const f2h = (f: number): number => {
-    const buf = new Float32Array(1);
-    const i32 = new Int32Array(buf.buffer);
-    buf[0] = f;
-    const x = i32[0];
-    const sign = (x >> 16) & 0x8000;
-    let exp = ((x >> 23) & 0xff) - (127 - 15);
-    const mant = x & 0x7fffff;
-    if (exp <= 0) return sign;
-    if (exp >= 31) return sign | 0x7c00;
-    return sign | (exp << 10) | (mant >> 13);
-  };
-  const h_one = f2h(1.0);
-  const h_zero = f2h(0.0);
-  const h_half = f2h(0.5);
-  for (let z = 0; z < N; z++) {
-    for (let y = 0; y < N; y++) {
-      for (let x = 0; x < N; x++) {
-        const i = (z * N * N + y * N + x) * 4;
-        seed[i] = h_one;      // r = u
-        seed[i + 1] = h_zero; // g = v
-        seed[i + 2] = h_zero;
-        seed[i + 3] = h_zero;
-      }
-    }
-  }
-  // Scattered noise-style seed. Lots of tiny random points (radius 1-2) across
-  // a tight central region. Each reset genuinely looks different because the
-  // point set is different, and early-time the pattern is fine-grained instead
-  // of the obviously-spherical big-blob look. Using many small seeds also lets
-  // the reaction's pattern-formation regime dominate the final look rather
-  // than the initial geometry.
-  const seedCount = 80;
-  // Center 40% of the volume → patterns have lots of room to grow into the
-  // interior before the Dirichlet boundary's reservoir zone kicks in at ~80%.
-  const lo = 0.30, hi = 0.70;
-  for (let b = 0; b < seedCount; b++) {
-    const cx = Math.floor(N * (lo + Math.random() * (hi - lo)));
-    const cy = Math.floor(N * (lo + Math.random() * (hi - lo)));
-    const cz = Math.floor(N * (lo + Math.random() * (hi - lo)));
-    // Mix of point seeds and tiny 2-cell-radius blobs for variety.
-    const r = Math.random() < 0.5 ? 1 : 2;
-    for (let dz = -r; dz <= r; dz++) {
-      for (let dy = -r; dy <= r; dy++) {
-        for (let dx = -r; dx <= r; dx++) {
-          if (dx * dx + dy * dy + dz * dz > r * r) continue;
-          const x = cx + dx, y = cy + dy, z = cz + dz;
-          if (x < 0 || y < 0 || z < 0 || x >= N || y >= N || z >= N) continue;
-          const i = (z * N * N + y * N + x) * 4;
-          seed[i] = h_half;       // u → 0.5
-          seed[i + 1] = h_half;   // v → 0.5
-        }
-      }
-    }
-  }
-  // rgba16float = 8 bytes/texel, so bytesPerRow = N * 8.
-  device.queue.writeTexture(
-    { texture: uvTexA },
-    seed.buffer,
-    { bytesPerRow: N * 8, rowsPerImage: N },
-    [N, N, N],
-  );
-  // Also initialize B with the same state so the first render (before any steps) looks right.
-  device.queue.writeTexture(
-    { texture: uvTexB },
-    seed.buffer,
-    { bytesPerRow: N * 8, rowsPerImage: N },
-    [N, N, N],
-  );
-
-  // Compute pipeline
-  const computeModule = createShaderModuleChecked('reaction.compute', shaderSource('reaction.compute'));
-  const computeBGL = device.createBindGroupLayout({
-    entries: [
-      { binding: 0, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: 'float', viewDimension: '3d' } },
-      { binding: 1, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: 'write-only', format: 'rgba16float', viewDimension: '3d' } },
-      { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
-    ],
+  return createReactionSimulationModule({
+    cameraSize: CAMERA_SIZE,
+    cameraStride: CAMERA_STRIDE,
+    createShaderModuleChecked,
+    destroyDepthRef,
+    device,
+    getCameraUniformData,
+    getColorAttachment,
+    getDefaultAspect: () => canvas.width / canvas.height,
+    getDepthAttachment,
+    getRenderViewport,
+    renderGrid,
+    renderSampleCount,
+    renderTargetFormat,
+    state,
   });
-  const paramsBuffer = device.createBuffer({ size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-  const computePipeline = device.createComputePipeline({
-    layout: device.createPipelineLayout({ bindGroupLayouts: [computeBGL] }),
-    compute: { module: computeModule, entryPoint: 'main' },
-  });
-  const computeBGs = [
-    // pong=0: read A, write B
-    device.createBindGroup({ layout: computeBGL, entries: [
-      { binding: 0, resource: uvTexA.createView({ dimension: '3d' }) },
-      { binding: 1, resource: uvTexB.createView({ dimension: '3d' }) },
-      { binding: 2, resource: { buffer: paramsBuffer } },
-    ]}),
-    // pong=1: read B, write A
-    device.createBindGroup({ layout: computeBGL, entries: [
-      { binding: 0, resource: uvTexB.createView({ dimension: '3d' }) },
-      { binding: 1, resource: uvTexA.createView({ dimension: '3d' }) },
-      { binding: 2, resource: { buffer: paramsBuffer } },
-    ]}),
-  ];
-
-  // Render pipeline — raymarched volume
-  const renderModule = createShaderModuleChecked('reaction.render', shaderSource('reaction.render'));
-  const sampler = device.createSampler({
-    magFilter: 'linear', minFilter: 'linear',
-    addressModeU: 'clamp-to-edge', addressModeV: 'clamp-to-edge', addressModeW: 'clamp-to-edge',
-  });
-  const cameraBuffer = device.createBuffer({ size: CAMERA_STRIDE * 2, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-  const renderParamsBuffer = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-
-  const renderBGL = device.createBindGroupLayout({
-    entries: [
-      { binding: 0, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float', viewDimension: '3d' } },
-      { binding: 1, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'filtering' } },
-      { binding: 2, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
-      { binding: 3, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
-    ],
-  });
-  const renderPipeline = device.createRenderPipeline({
-    layout: device.createPipelineLayout({ bindGroupLayouts: [renderBGL] }),
-    vertex: { module: renderModule, entryPoint: 'vs_main' },
-    fragment: {
-      module: renderModule, entryPoint: 'fs_main',
-      targets: [{
-        format: renderTargetFormat,
-        blend: {
-          color: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha', operation: 'add' },
-          alpha: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha', operation: 'add' },
-        },
-      }],
-    },
-    primitive: { topology: 'triangle-list' },
-    // [LAW:feedback_nbody_depthstencil] Always declare depthStencil format to match the shared depth attachment.
-    depthStencil: { format: 'depth24plus', depthWriteEnabled: false, depthCompare: 'less' },
-    multisample: { count: renderSampleCount },
-  });
-
-  // renderBGs[viewIndex][pong] — pong is the value of the ping-pong counter
-  // AFTER the compute loop completes. It points at which compute BG would run
-  // NEXT, which equals which texture was READ last, which means the OTHER
-  // texture holds the latest write. So:
-  //   pong=0 → computeBGs[0] is "read A, write B" is next → last write was to A
-  //   pong=1 → computeBGs[1] is "read B, write A" is next → last write was to B
-  const renderBGs = [0, 1].map(vi => ([0, 1].map(pong => device.createBindGroup({
-    layout: renderBGL, entries: [
-      { binding: 0, resource: (pong === 0 ? uvTexA : uvTexB).createView({ dimension: '3d' }) },
-      { binding: 1, resource: sampler },
-      { binding: 2, resource: { buffer: cameraBuffer, offset: vi * CAMERA_STRIDE, size: CAMERA_SIZE } },
-      { binding: 3, resource: { buffer: renderParamsBuffer } },
-    ],
-  }))));
-
-  // Workgroup size: 8×8×4 = 256 (within default maxComputeInvocationsPerWorkgroup).
-  const wgX = Math.ceil(N / 8);
-  const wgY = Math.ceil(N / 8);
-  const wgZ = Math.ceil(N / 4);
-
-  const depthRef: DepthRef = {};
-  let pong = 0; // which compute BG to use NEXT; also selects which texture will be current after the step.
-
-  return {
-    compute(encoder: GPUCommandEncoder) {
-      const p = state.reaction;
-      const steps = Math.max(1, Math.floor(p.stepsPerFrame));
-      // [LAW:dataflow-not-control-flow] Explicit Euler stability bound is hard:
-      // dt < 1/(6·max(Du,Dv)) ≈ 0.79 for Du=0.2097. The FX timeScale slider
-      // globally modulates animation speed across all sims, but for reaction-
-      // diffusion we must clamp the effective dt — otherwise cranking time
-      // up (or going negative, which runs the reaction backward) instantly
-      // blows the field to NaN and the sim "disappears". Run more substeps
-      // to emulate "faster" time without violating stability.
-      const STABLE_DT = 0.65;
-      const requestedMul = Math.max(0, state.fx.timeScale); // no reverse for GS
-      const dt = STABLE_DT;
-      // When timeScale > 1, use more substeps within the same frame instead
-      // of making dt bigger. When timeScale < 1, scale the number of steps
-      // down (minimum 0 to honor pause-like semantics).
-      const effectiveSteps = Math.max(0, Math.round(steps * requestedMul));
-      device.queue.writeBuffer(paramsBuffer, 0, new Float32Array([
-        p.feed, p.kill, p.Du, p.Dv, dt, N, 0, 0,
-      ]));
-      for (let i = 0; i < effectiveSteps; i++) {
-        const pass = encoder.beginComputePass();
-        pass.setPipeline(computePipeline);
-        pass.setBindGroup(0, computeBGs[pong]);
-        pass.dispatchWorkgroups(wgX, wgY, wgZ);
-        pass.end();
-        pong = 1 - pong;
-      }
-    },
-
-    render(encoder: GPUCommandEncoder, textureView: GPUTextureView, viewport: number[] | null, viewIndex = 0) {
-      const aspect = viewport ? (viewport[2] / viewport[3]) : (canvas.width / canvas.height);
-      device.queue.writeBuffer(cameraBuffer, viewIndex * CAMERA_STRIDE, getCameraUniformData(aspect));
-      // stepCount=256: enough samples through a 3-unit volume at 128³ to give
-      // ~2 samples per texel along the longest ray, which combined with the
-      // per-pixel jitter in the shader keeps aliasing below the bloom threshold.
-      device.queue.writeBuffer(renderParamsBuffer, 0, new Float32Array([
-        N, state.reaction.isoThreshold, WORLD_SIZE, 256,
-      ]));
-
-      const pass = encoder.beginRenderPass({
-        colorAttachments: [getColorAttachment(depthRef, textureView, viewport)],
-        depthStencilAttachment: getDepthAttachment(depthRef, viewport),
-      });
-
-      const rv = getRenderViewport(viewport);
-      if (rv) {
-        pass.setViewport(rv[0], rv[1], rv[2], rv[3], 0, 1);
-      }
-
-      renderGrid(pass, aspect, viewIndex);
-
-      // `pong` is flipped after each compute step, so after the loop it points
-      // at the bind group / texture that would be used as the read side on the
-      // next step. The current reaction volume is therefore the opposite side.
-      pass.setPipeline(renderPipeline);
-      pass.setBindGroup(0, renderBGs[viewIndex][1 - pong]);
-      pass.draw(3);
-      pass.end();
-    },
-
-    getCount() { return `${N}³`; },
-
-    destroy() {
-      uvTexA.destroy();
-      uvTexB.destroy();
-      paramsBuffer.destroy();
-      cameraBuffer.destroy();
-      renderParamsBuffer.destroy();
-      destroyDepthRef(depthRef);
-    },
-  };
 }
 
 
@@ -4735,8 +3636,8 @@ function setupRecordButton(): void {
 function setupTimeReverseControls() {
   const setReverse = (active: boolean) => {
     const sim = simulations[state.mode];
-    if (!sim || !('setTimeDirection' in sim)) return;
-    (sim as any).setTimeDirection(active ? -1 : 1);
+    if (!isPhysicsSimulation(sim)) return;
+    sim.setTimeDirection(active ? -1 : 1);
     // Unblock pause if we were auto-paused at the journal boundary.
     if (!active && state.paused) state.paused = false;
   };
@@ -4827,19 +3728,14 @@ function cancelDebugMovement() {
 // What varies is (a) how many steps, (b) which direction, (c) whether motion blur is engaged — all pure
 // functions of debugState + pause state. Non-physics modes fall through to simple "compute iff not paused".
 function runDebugCompute(sim: Simulation, encoder: GPUCommandEncoder): void {
-  if (state.mode !== 'physics' || !('getSimStep' in sim)) {
+  if (state.mode !== 'physics' || !isPhysicsSimulation(sim)) {
     // Non-physics modes: no skip/step state applies; keep the adaptive-chunk feedback quiet so
     // mode-switch-during-skip doesn't leave a stale lastSkipDispatches value driving adjustments.
     debugState.lastSkipDispatches = 0;
     if (!state.paused) sim.compute(encoder);
     return;
   }
-  const pSim = sim as Simulation & {
-    getSimStep(): number;
-    getTimeDirection(): number;
-    setTimeDirection(d: number): void;
-    setBlurTime(t: number): void;
-  };
+  const pSim: PhysicsSimulation = sim;
 
   let stepCount = 0;
   let overrideDir: number | null = null;
@@ -5016,9 +3912,7 @@ function setupDebugControls() {
 
   byId('debug-screenshot')?.addEventListener('click', () => {
     const sim = simulations['physics'];
-    const step = sim && 'getSimStep' in sim
-      ? (sim as { getSimStep(): number }).getSimStep()
-      : 0;
+    const step = isPhysicsSimulation(sim) ? sim.getSimStep() : 0;
     canvas.toBlob((blob) => {
       if (!blob) return;
       const url = URL.createObjectURL(blob);
@@ -5037,11 +3931,10 @@ function setupDebugControls() {
 function updateDebugPanel(): void {
   if (state.mode !== 'physics') return;
   const sim = simulations['physics'];
-  if (!sim || !('getSimStep' in sim)) return;
-  const p = sim as unknown as { getSimStep(): number; getTimeDirection(): number; getJournalHighWater(): number };
-  const step = p.getSimStep();
-  const dir = p.getTimeDirection();
-  const highWater = p.getJournalHighWater();
+  if (!isPhysicsSimulation(sim)) return;
+  const step = sim.getSimStep();
+  const dir = sim.getTimeDirection();
+  const highWater = sim.getJournalHighWater();
 
   const numEl = document.getElementById('debug-step-num');
   if (numEl) numEl.textContent = String(step);
@@ -7443,23 +6336,6 @@ function measureGpuFrame(now: number) {
   }).catch(() => { profilingPending = false; });
 }
 
-// [LAW:single-enforcer] All sim creation funnels through here, so error surfacing
-// (both sync throws and async GPU validation errors) happens in exactly one place.
-// A failed factory leaves simulations[mode] unset so the render loop short-circuits
-// instead of repeatedly hitting the same bad GPU state.
-function showSimError(mode: SimMode, msg: string) {
-  console.error(`[sim:${mode}]`, msg);
-  let overlay = document.getElementById('gpu-error-overlay');
-  if (!overlay) {
-    overlay = document.createElement('div');
-    overlay.id = 'gpu-error-overlay';
-    overlay.style.cssText = 'position:fixed;top:60px;left:10px;right:10px;max-height:60vh;overflow:auto;background:rgba(20,0,0,0.92);color:#ff8080;font:11px monospace;padding:10px;border:1px solid #ff4040;border-radius:4px;z-index:9999;white-space:pre-wrap;';
-    document.body.appendChild(overlay);
-  }
-  const stamp = new Date().toLocaleTimeString();
-  overlay.textContent = `[${stamp}] [sim:${mode}] ${msg}\n\n` + overlay.textContent;
-}
-
 function ensureSimulation() {
   const mode = state.mode;
   if (!simulationRegistry) initializeSimulationRegistry();
@@ -7490,9 +6366,9 @@ function updateStats() {
   // Step counter: visible only in physics mode. Shows direction arrow.
   const stepEl = document.getElementById('stat-step');
   if (stepEl) {
-    if (state.mode === 'physics' && sim && 'getSimStep' in sim) {
-      const step = (sim as any).getSimStep();
-      const dir = (sim as any).getTimeDirection();
+    if (state.mode === 'physics' && isPhysicsSimulation(sim)) {
+      const step = sim.getSimStep();
+      const dir = sim.getTimeDirection();
       stepEl.style.display = '';
       stepEl.textContent = `Step: ${step} ${dir < 0 ? '\u25C0' : '\u25B6'}`;
     } else {
