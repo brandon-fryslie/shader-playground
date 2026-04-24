@@ -20,6 +20,7 @@ import { createControls, type ControlsApi } from '../ui/controls';
 import { createBoidsSimulation as createBoidsSimulationModule } from '../simulations/boids';
 import { createFluidSimulation as createFluidSimulationModule } from '../simulations/fluid';
 import { createParametricSimulation as createParametricSimulationModule } from '../simulations/parametric';
+import { createPhysicsDiagnostics } from '../simulations/physics/diagnostics';
 import { createPhysicsInitialConditions } from '../simulations/physics/initial-conditions';
 import { createPhysicsClassicSimulation as createPhysicsClassicSimulationModule } from '../simulations/physics-classic';
 import { isPhysicsSimulation, type PhysicsSimulation } from '../simulations/types';
@@ -2176,7 +2177,6 @@ function createPhysicsSimulation() {
   const DIAG_SAMPLE = 2048;
   const diagSampleBytes = Math.min(count, DIAG_SAMPLE) * 48;
   const diagStaging = device.createBuffer({ size: diagSampleBytes, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
-  let diagPending = false;
 
   let pingPong = 0;
   const depthRef: DepthRef = {};
@@ -2214,7 +2214,44 @@ function createPhysicsSimulation() {
   const u32 = new Uint32Array(paramsData);
   const paramsBytes = new Uint8Array(paramsData);
 
-  return {
+  let computeStepForDiagnostics: ((encoder: GPUCommandEncoder) => void) | null = null;
+  const physicsDiagnostics = createPhysicsDiagnostics({
+    bufferA,
+    bufferB,
+    computeStep: (encoder) => {
+      if (computeStepForDiagnostics) computeStepForDiagnostics(encoder);
+    },
+    count,
+    device,
+    diagSample: DIAG_SAMPLE,
+    diagStaging,
+    diskNormal,
+    gas,
+    getLastStats: () => lastStats,
+    getPingPong: () => pingPong,
+    getPmDiagPending: () => pmDiagPending,
+    getPmOuterDiagPending: () => pmOuterDiagPending,
+    getTimeDirection: () => timeDirection,
+    orbitalBitangent,
+    orbitalTangent,
+    pmDensityF32,
+    pmDensityStaging,
+    pmLevel0Cells,
+    pmOuterDensityF32,
+    pmOuterDensityStaging,
+    pmOuterLevel0Cells,
+    pmOuterPotential: pmOuterPotential[0],
+    pmOuterResidual: pmOuterResidual[0],
+    pmPotential: pmPotential[0],
+    pmResidual: pmResidual[0],
+    setPmDiagPending: (value) => { pmDiagPending = value; },
+    setPmOuterDiagPending: (value) => { pmOuterDiagPending = value; },
+    setPaused: (value) => { state.paused = value; },
+    setTimeDirection: (dir) => { timeDirection = dir; },
+    state,
+  });
+
+  const simulation = {
     setTimeDirection(dir: number) { timeDirection = dir; },
     getSimStep() { return simStep; },
     getTimeDirection() { return timeDirection; },
@@ -2587,326 +2624,7 @@ function createPhysicsSimulation() {
 
     getCount() { return count; },
 
-    getStats() { return lastStats; },
-
-    async diagnose(): Promise<Record<string, number | number[]>> {
-      if (diagPending) return { error: 1 };
-      diagPending = true;
-      // Copy several large chunks from evenly-spaced regions across the population.
-      // No source/tracer distinction — every particle is a sample candidate.
-      const sampleCount = Math.min(count, DIAG_SAMPLE);
-      const NUM_CHUNKS = 8;
-      const chunkBodies = Math.floor(sampleCount / NUM_CHUNKS);
-      const regionSize = Math.floor(count / NUM_CHUNKS);
-      const srcBuf = pingPong === 0 ? bufferA : bufferB;
-      const encoder = device.createCommandEncoder();
-      for (let c = 0; c < NUM_CHUNKS; c++) {
-        const srcIdx = c * regionSize;
-        encoder.copyBufferToBuffer(srcBuf, srcIdx * 48, diagStaging, c * chunkBodies * 48, chunkBodies * 48);
-      }
-      device.queue.submit([encoder.finish()]);
-      await device.queue.onSubmittedWorkDone();
-      await diagStaging.mapAsync(GPUMapMode.READ);
-      const raw = new Float32Array(diagStaging.getMappedRange().slice(0));
-      diagStaging.unmap();
-      diagPending = false;
-
-      // Body layout: pos(3) mass(1) vel(3) pad(1) home(3) pad(1) = 12 floats
-      const n = diskNormal;
-      let comX = 0, comY = 0, comZ = 0;
-      let rmsHeight = 0, rmsRadius = 0, rmsSpeed = 0;
-      let totalMass = 0, maxR = 0;
-      let tangVelSum = 0, tangVelCount = 0;
-      // Radial bins (10 bins from 0 to 5)
-      const radialBins = new Float64Array(10);
-      // Angular bins (12 bins, 30° each) for arm detection
-      const angularBins = new Float64Array(12);
-
-      for (let i = 0; i < sampleCount; i++) {
-        const o = i * 12;
-        const px = raw[o], py = raw[o+1], pz = raw[o+2], m = raw[o+3];
-        const vx = raw[o+4], vy = raw[o+5], vz = raw[o+6];
-        comX += px; comY += py; comZ += pz;
-        totalMass += m;
-
-        const r = Math.sqrt(px*px + py*py + pz*pz);
-        if (r > maxR) maxR = r;
-        rmsRadius += r * r;
-
-        // Height above disk plane
-        const h = px*n[0] + py*n[1] + pz*n[2];
-        rmsHeight += h * h;
-
-        // Speed
-        const spd = Math.sqrt(vx*vx + vy*vy + vz*vz);
-        rmsSpeed += spd * spd;
-
-        // Tangential velocity fraction (how circular are the orbits?)
-        if (r > 0.1) {
-          const rPlaneX = px - h*n[0], rPlaneY = py - h*n[1], rPlaneZ = pz - h*n[2];
-          const rPlane = Math.sqrt(rPlaneX*rPlaneX + rPlaneY*rPlaneY + rPlaneZ*rPlaneZ);
-          if (rPlane > 0.05) {
-            const eRx = rPlaneX/rPlane, eRy = rPlaneY/rPlane, eRz = rPlaneZ/rPlane;
-            const crossX = n[1]*eRz - n[2]*eRy, crossY = n[2]*eRx - n[0]*eRz, crossZ = n[0]*eRy - n[1]*eRx;
-            const crossLen = Math.sqrt(crossX*crossX + crossY*crossY + crossZ*crossZ) || 1;
-            const ePhiX = crossX/crossLen, ePhiY = crossY/crossLen, ePhiZ = crossZ/crossLen;
-            const vPhi = vx*ePhiX + vy*ePhiY + vz*ePhiZ;
-            tangVelSum += Math.abs(vPhi) / (spd + 0.001);
-            tangVelCount++;
-          }
-        }
-
-        // Radial bin
-        const bin = Math.min(9, Math.floor(r * 2));
-        radialBins[bin]++;
-
-        // Angular bin (project onto disk plane, compute angle)
-        const rPlaneX2 = px - h*n[0], rPlaneY2 = py - h*n[1], rPlaneZ2 = pz - h*n[2];
-        const ang = Math.atan2(
-          rPlaneX2 * orbitalBitangent[0] + rPlaneY2 * orbitalBitangent[1] + rPlaneZ2 * orbitalBitangent[2],
-          rPlaneX2 * orbitalTangent[0] + rPlaneY2 * orbitalTangent[1] + rPlaneZ2 * orbitalTangent[2]
-        );
-        const aBin = Math.floor(((ang + Math.PI) / (2 * Math.PI)) * 12) % 12;
-        angularBins[aBin]++;
-      }
-
-      const invN = 1 / sampleCount;
-      const angularArr = Array.from(angularBins);
-      const angMean = angularArr.reduce((a, b) => a + b, 0) / 12;
-      const angVar = angularArr.reduce((a, b) => a + (b - angMean) ** 2, 0) / 12;
-      const armContrast = angMean > 0 ? Math.sqrt(angVar) / angMean : 0;
-
-      return {
-        count,
-        sampleCount,
-        comX: comX * invN,
-        comY: comY * invN,
-        comZ: comZ * invN,
-        rmsHeight: Math.sqrt(rmsHeight * invN),
-        rmsRadius: Math.sqrt(rmsRadius * invN),
-        rmsSpeed: Math.sqrt(rmsSpeed * invN),
-        maxRadius: maxR,
-        totalMass: totalMass * (count / sampleCount),
-        tangentialFraction: tangVelCount > 0 ? tangVelSum / tangVelCount : 0,
-        armContrast,
-        radialProfile: Array.from(radialBins),
-        angularProfile: angularArr,
-        diskNormalX: n[0], diskNormalY: n[1], diskNormalZ: n[2],
-      };
-    },
-
-    // Dev diagnostic: copy pmDensityF32 → staging → host, return as Float32Array.
-    // Mirrors the diagnose() pattern: gated by a pending flag so overlapping
-    // calls return null rather than tangle the staging buffer. 128³ ≈ 2.1M
-    // floats returned per call.
-    async dumpDensity(): Promise<Float32Array | null> {
-      if (pmDiagPending) return null;
-      pmDiagPending = true;
-      const enc = device.createCommandEncoder();
-      enc.copyBufferToBuffer(pmDensityF32, 0, pmDensityStaging, 0, pmLevel0Cells * 4);
-      device.queue.submit([enc.finish()]);
-      await device.queue.onSubmittedWorkDone();
-      await pmDensityStaging.mapAsync(GPUMapMode.READ);
-      const out = new Float32Array(pmDensityStaging.getMappedRange().slice(0));
-      pmDensityStaging.unmap();
-      pmDiagPending = false;
-      return out;
-    },
-
-    // Dumps level-0 potential φ (128³ f32). Reuses pmDensityStaging since the
-    // buffer sizes match; diagPending flag serializes access.
-    async dumpPotential(): Promise<Float32Array | null> {
-      if (pmDiagPending) return null;
-      pmDiagPending = true;
-      const enc = device.createCommandEncoder();
-      enc.copyBufferToBuffer(pmPotential[0], 0, pmDensityStaging, 0, pmLevel0Cells * 4);
-      device.queue.submit([enc.finish()]);
-      await device.queue.onSubmittedWorkDone();
-      await pmDensityStaging.mapAsync(GPUMapMode.READ);
-      const out = new Float32Array(pmDensityStaging.getMappedRange().slice(0));
-      pmDensityStaging.unmap();
-      pmDiagPending = false;
-      return out;
-    },
-
-    // Max |residual| at level 0 — the convergence metric for the V-cycle.
-    // Below ~1% of peak density value after 4 V-cycles indicates good solve.
-    async maxResidual(): Promise<{ inner: number; outer: number } | null> {
-      if (pmDiagPending || pmOuterDiagPending) return null;
-      pmDiagPending = true;
-      pmOuterDiagPending = true;
-      const enc = device.createCommandEncoder();
-      enc.copyBufferToBuffer(pmResidual[0], 0, pmDensityStaging, 0, pmLevel0Cells * 4);
-      enc.copyBufferToBuffer(pmOuterResidual[0], 0, pmOuterDensityStaging, 0, pmOuterLevel0Cells * 4);
-      device.queue.submit([enc.finish()]);
-      await device.queue.onSubmittedWorkDone();
-      await pmDensityStaging.mapAsync(GPUMapMode.READ);
-      const innerArr = new Float32Array(pmDensityStaging.getMappedRange());
-      let inner = 0;
-      for (let i = 0; i < innerArr.length; i++) {
-        const a = Math.abs(innerArr[i]);
-        if (a > inner) inner = a;
-      }
-      pmDensityStaging.unmap();
-      pmDiagPending = false;
-
-      await pmOuterDensityStaging.mapAsync(GPUMapMode.READ);
-      const outerArr = new Float32Array(pmOuterDensityStaging.getMappedRange());
-      let outer = 0;
-      for (let i = 0; i < outerArr.length; i++) {
-        const a = Math.abs(outerArr[i]);
-        if (a > outer) outer = a;
-      }
-      pmOuterDensityStaging.unmap();
-      pmOuterDiagPending = false;
-      return { inner, outer };
-    },
-
-    // Outer-grid density + potential dumps. Separate staging buffer keeps
-    // these independent of the inner-grid diagnostic in-flight flag.
-    async dumpOuterDensity(): Promise<Float32Array | null> {
-      if (pmOuterDiagPending) return null;
-      pmOuterDiagPending = true;
-      const enc = device.createCommandEncoder();
-      enc.copyBufferToBuffer(pmOuterDensityF32, 0, pmOuterDensityStaging, 0, pmOuterLevel0Cells * 4);
-      device.queue.submit([enc.finish()]);
-      await device.queue.onSubmittedWorkDone();
-      await pmOuterDensityStaging.mapAsync(GPUMapMode.READ);
-      const out = new Float32Array(pmOuterDensityStaging.getMappedRange().slice(0));
-      pmOuterDensityStaging.unmap();
-      pmOuterDiagPending = false;
-      return out;
-    },
-    async dumpOuterPotential(): Promise<Float32Array | null> {
-      if (pmOuterDiagPending) return null;
-      pmOuterDiagPending = true;
-      const enc = device.createCommandEncoder();
-      enc.copyBufferToBuffer(pmOuterPotential[0], 0, pmOuterDensityStaging, 0, pmOuterLevel0Cells * 4);
-      device.queue.submit([enc.finish()]);
-      await device.queue.onSubmittedWorkDone();
-      await pmOuterDensityStaging.mapAsync(GPUMapMode.READ);
-      const out = new Float32Array(pmOuterDensityStaging.getMappedRange().slice(0));
-      pmOuterDensityStaging.unmap();
-      pmOuterDiagPending = false;
-      return out;
-    },
-
-    gasDumpDensity: () => gas.dumpDensity(),
-
-    gasEnergyBreakdown: () => gas.energyBreakdown(pingPong, state.physics.gasSoundSpeed ?? 2.0),
-
-    gasWakeProbe: (starIdx = 0) => gas.wakeProbe(pingPong, starIdx),
-
-    async gasReversibilityTest(nSteps: number): Promise<{ maxPosErr: number; maxVelErr: number; count: number } | null> {
-      const wasPaused = state.paused;
-      const savedDir = timeDirection;
-      state.paused = true;
-      const start = await gas.snapshot(pingPong);
-      if (!start) {
-        timeDirection = savedDir;
-        state.paused = wasPaused;
-        return null;
-      }
-      timeDirection = 1;
-      for (let i = 0; i < nSteps; i++) {
-        const e = device.createCommandEncoder();
-        this.compute(e);
-        device.queue.submit([e.finish()]);
-      }
-      timeDirection = -1;
-      for (let i = 0; i < nSteps; i++) {
-        const e = device.createCommandEncoder();
-        this.compute(e);
-        device.queue.submit([e.finish()]);
-      }
-      timeDirection = savedDir;
-      state.paused = wasPaused;
-
-      const end = await gas.snapshot(pingPong);
-      if (!end) return null;
-      let maxPosErr = 0;
-      let maxVelErr = 0;
-      for (let i = 0; i < gas.count; i++) {
-        const o = i * 12;
-        const posErr = Math.hypot(end[o] - start[o], end[o + 1] - start[o + 1], end[o + 2] - start[o + 2]);
-        const velErr = Math.hypot(end[o + 4] - start[o + 4], end[o + 5] - start[o + 5], end[o + 6] - start[o + 6]);
-        if (posErr > maxPosErr) maxPosErr = posErr;
-        if (velErr > maxVelErr) maxVelErr = velErr;
-      }
-      return { maxPosErr, maxVelErr, count: gas.count };
-    },
-
-    // PM reversibility harness. Snapshots particle positions, runs N forward
-    // steps, then N reverse steps, then compares. A sound PM implementation
-    // should return particles to within ~1e-3 world units for N=1000 thanks
-    // to the fixed-point u32 atomic deposit (order-independent) + DKD
-    // half-step symmetry. Values much larger indicate a bug:
-    //   • Deposition/interpolation sampling at pos (not posHalf)
-    //   • f32 atomics (non-associative)
-    //   • State-dependent iteration count in the multigrid
-    //
-    // Pauses the sim for the test duration and restores on exit. Shares
-    // pmDiagPending with other PM dumps — no concurrent use.
-    async reversibilityTest(nSteps: number): Promise<{ maxErr: number; meanErr: number; count: number } | null> {
-      if (pmDiagPending) return null;
-      const particleBytes = count * 48;
-      if (particleBytes > pmDensityStaging.size) return null;
-      pmDiagPending = true;
-      const wasPaused = state.paused;
-      const savedDir = timeDirection;
-      state.paused = true;
-
-      const snapshotPositions = async (): Promise<Float32Array> => {
-        const e = device.createCommandEncoder();
-        const src = pingPong === 0 ? bufferA : bufferB;
-        e.copyBufferToBuffer(src, 0, pmDensityStaging, 0, particleBytes);
-        device.queue.submit([e.finish()]);
-        await device.queue.onSubmittedWorkDone();
-        await pmDensityStaging.mapAsync(GPUMapMode.READ);
-        const out = new Float32Array(pmDensityStaging.getMappedRange(0, particleBytes).slice(0));
-        pmDensityStaging.unmap();
-        return out;
-      };
-
-      const startPos = await snapshotPositions();
-
-      // Forward N, then reverse N. One submit per step — simple and unambiguous
-      // ordering relative to each step's params writeBuffer.
-      timeDirection = 1;
-      for (let i = 0; i < nSteps; i++) {
-        const e = device.createCommandEncoder();
-        // eslint-disable-next-line @typescript-eslint/no-use-before-define
-        this.compute(e);
-        device.queue.submit([e.finish()]);
-      }
-      timeDirection = -1;
-      for (let i = 0; i < nSteps; i++) {
-        const e = device.createCommandEncoder();
-        // eslint-disable-next-line @typescript-eslint/no-use-before-define
-        this.compute(e);
-        device.queue.submit([e.finish()]);
-      }
-      timeDirection = savedDir;
-      state.paused = wasPaused;
-
-      const endPos = await snapshotPositions();
-
-      // Body layout: pos(3) mass(1) vel(3) pad(1) home(3) pad(1) = 12 floats.
-      // Compare the position triplet per body.
-      let maxErr = 0;
-      let sumErr = 0;
-      for (let i = 0; i < count; i++) {
-        const o = i * 12;
-        const dx = endPos[o]     - startPos[o];
-        const dy = endPos[o + 1] - startPos[o + 1];
-        const dz = endPos[o + 2] - startPos[o + 2];
-        const err = Math.sqrt(dx * dx + dy * dy + dz * dz);
-        if (err > maxErr) maxErr = err;
-        sumErr += err;
-      }
-      pmDiagPending = false;
-      return { maxErr, meanErr: sumErr / count, count };
-    },
+    ...physicsDiagnostics,
 
     destroy() {
       bufferA.destroy(); bufferB.destroy();
@@ -2954,6 +2672,8 @@ function createPhysicsSimulation() {
     pmForce,
     pmMeanScratch,
   };
+  computeStepForDiagnostics = simulation.compute.bind(simulation);
+  return simulation;
 }
 
 // --- 5b': N-BODY CLASSIC ---
