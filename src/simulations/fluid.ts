@@ -1,14 +1,9 @@
 import { shaderSource } from '../gpu/shaders';
 import type { DepthRef, Simulation } from '../types';
 
-import type { SharedSimulationDependencies } from './shared';
+import type { SimulationFactoryContext } from './shared';
 
-export interface FluidSimulationDependencies extends SharedSimulationDependencies {
-  fluidGridResolution: number;
-  fluidWorldSize: number;
-}
-
-export function createFluidSimulation(deps: FluidSimulationDependencies): Simulation {
+export function createFluidSimulation(deps: SimulationFactoryContext): Simulation {
   const fluidDt = 0.22;
   const res = deps.state.fluid.resolution;
   const cellCount = res * res;

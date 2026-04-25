@@ -1,9 +1,9 @@
 import { shaderSource } from '../gpu/shaders';
 import type { DepthRef, Simulation } from '../types';
 
-import type { SharedSimulationDependencies } from './shared';
+import type { SimulationFactoryContext } from './shared';
 
-export function createPhysicsClassicSimulation(deps: SharedSimulationDependencies): Simulation {
+export function createPhysicsClassicSimulation(deps: SimulationFactoryContext): Simulation {
   const count = deps.state.physics_classic.count;
   const bodyBytes = count * 32;
 

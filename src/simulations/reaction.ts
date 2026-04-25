@@ -1,7 +1,7 @@
 import { shaderSource } from '../gpu/shaders';
 import type { DepthRef, Simulation } from '../types';
 
-import type { SharedSimulationDependencies } from './shared';
+import type { SimulationFactoryContext } from './shared';
 
 function floatToHalf(value: number): number {
   const buf = new Float32Array(1);
@@ -16,7 +16,7 @@ function floatToHalf(value: number): number {
   return sign | (exp << 10) | (mantissa >> 13);
 }
 
-export function createReactionSimulation(deps: SharedSimulationDependencies): Simulation {
+export function createReactionSimulation(deps: SimulationFactoryContext): Simulation {
   const volumeResolution = deps.state.reaction.resolution;
   const worldSize = 3.0;
 

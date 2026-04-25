@@ -1,4 +1,5 @@
 import type { AppState, Attractor, DepthRef, Simulation } from '../../types';
+import type { SimulationFactoryContext } from '../shared';
 
 import { createPhysicsComputeService } from './compute';
 import { createPhysicsDiagnostics } from './diagnostics';
@@ -9,21 +10,10 @@ import { createPhysicsRenderService } from './render';
 import { createPhysicsStatsService } from './stats';
 
 type ShaderFactory = (label: string, source: string) => GPUShaderModule;
-type TimestampWrites = {
-  querySet: GPUQuerySet;
-  beginningOfPassWriteIndex?: number;
-  endOfPassWriteIndex?: number;
-};
 
-export interface PhysicsSimulationDependencies {
-  attractorMax: number;
-  baseDt: number;
-  cameraSize: number;
-  cameraStride: number;
-  clearColor: GPUColor;
+type PhysicsSimulationDependencies = SimulationFactoryContext & {
   createShaderModuleChecked: ShaderFactory;
   destroyDepthRef(depthRef: DepthRef): void;
-  device: GPUDevice;
   getAttractorStrength(attractor: Attractor, simStep: number, ceiling: number): number;
   getCameraUniformData(aspect: number): BufferSource;
   getColorAttachment(
@@ -31,21 +21,12 @@ export interface PhysicsSimulationDependencies {
     textureView: GPUTextureView,
     viewport: number[] | null,
   ): GPURenderPassColorAttachment;
-  getCurrentSceneView(): GPUTextureView;
-  getDefaultAspect(): number;
   getDepthAttachment(depthRef: DepthRef, viewport: number[] | null): GPURenderPassDepthStencilAttachment;
   getRenderViewport(viewport: number[] | null): number[] | null;
-  getXrDepthOverride(): GPUTextureView | null;
-  markersPerAttractor: number;
-  nullColorView: GPUTextureView;
-  nullDepthView: GPUTextureView;
   postFxDepthView(): GPUTextureView;
   renderGrid(pass: GPURenderPassEncoder, aspect: number, viewIndex: number): void;
-  renderSampleCount: number;
-  renderTargetFormat: GPUTextureFormat;
   state: AppState;
-  tsWrites(name: string): TimestampWrites | undefined;
-}
+};
 
 export function createPhysicsSimulation(
   deps: PhysicsSimulationDependencies,

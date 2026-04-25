@@ -1,14 +1,10 @@
 import { mat4 } from '../math/mat4';
 import { shaderSource } from '../gpu/shaders';
-import type { DepthRef, ShapeName, Simulation } from '../types';
+import type { DepthRef, Simulation } from '../types';
 
-import type { SharedSimulationDependencies } from './shared';
+import type { SimulationFactoryContext } from './shared';
 
-export interface ParametricSimulationDependencies extends SharedSimulationDependencies {
-  shapeIds: Record<ShapeName, number>;
-}
-
-export function createParametricSimulation(deps: ParametricSimulationDependencies): Simulation {
+export function createParametricSimulation(deps: SimulationFactoryContext): Simulation {
   const uResolution = 256;
   const vResolution = 256;
   const vertexBytes = uResolution * vResolution * 32;

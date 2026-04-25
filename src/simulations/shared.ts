@@ -1,4 +1,5 @@
-import type { AppState, DepthRef } from '../types';
+import type { GpuTimingBucket, TimestampWrites } from '../gpu/timestamps';
+import type { AppState, Attractor, DepthRef, ShapeName, Simulation } from '../types';
 
 export interface SharedSimulationDependencies {
   cameraSize: number;
@@ -20,3 +21,22 @@ export interface SharedSimulationDependencies {
   renderTargetFormat: GPUTextureFormat;
   state: AppState;
 }
+
+export interface SimulationFactoryContext extends SharedSimulationDependencies {
+  attractorMax: number;
+  baseDt: number;
+  clearColor: GPUColor;
+  fluidGridResolution: number;
+  fluidWorldSize: number;
+  getAttractorStrength(attractor: Attractor, simStep: number, ceiling: number): number;
+  getCurrentSceneView(): GPUTextureView;
+  getXrDepthOverride(): GPUTextureView | null;
+  markersPerAttractor: number;
+  nullColorView: GPUTextureView;
+  nullDepthView: GPUTextureView;
+  postFxDepthView(): GPUTextureView;
+  shapeIds: Record<ShapeName, number>;
+  tsWrites(bucket: GpuTimingBucket): TimestampWrites | undefined;
+}
+
+export type SimulationContextFactory = (context: SimulationFactoryContext) => Simulation;

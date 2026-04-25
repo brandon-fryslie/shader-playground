@@ -17,14 +17,10 @@ import { createThemeSystem } from '../ui/theme';
 import { createControls, type ControlsApi } from '../ui/controls';
 import { createDebugPanel, type DebugPanel } from '../ui/debug-panel';
 import { createShaderPanel, type ShaderPanel } from '../ui/shader-panel';
-import { createBoidsSimulation as createBoidsSimulationModule } from '../simulations/boids';
-import { createFluidSimulation as createFluidSimulationModule } from '../simulations/fluid';
-import { createParametricSimulation as createParametricSimulationModule } from '../simulations/parametric';
-import { createPhysicsSimulation as createPhysicsSimulationModule } from '../simulations/physics';
-import { createPhysicsClassicSimulation as createPhysicsClassicSimulationModule } from '../simulations/physics-classic';
+import { createSimulationFactories } from '../simulations/factories';
 import { isPhysicsSimulation } from '../simulations/types';
-import { createReactionSimulation as createReactionSimulationModule } from '../simulations/reaction';
 import { createSimulationRegistry, type SimulationRegistry } from '../simulations/registry';
+import type { SimulationFactoryContext } from '../simulations/shared';
 import { getShaderSources as getCatalogShaderSources, applyShaderEdit as applyCatalogShaderEdit, resetShaderEdit as resetCatalogShaderEdit } from '../gpu/shaders';
 import { createGpuTimingService, type GpuTimingBucket } from '../gpu/timestamps';
 import { installDevtools } from '../diagnostics/devtools';
@@ -399,62 +395,10 @@ function dropSimulationIfCurrent(mode: SimMode, expected: Simulation): void {
   syncSimulationCache(mode);
 }
 
-function initializeSimulationRegistry(): void {
-  simulationRegistry = createSimulationRegistry({
-    device,
-    factories: {
-      boids: createBoidsSimulation,
-      physics: createPhysicsSimulation,
-      physics_classic: createPhysicsClassicSimulation,
-      fluid: createFluidSimulation,
-      parametric: createParametricSimulation,
-      reaction: createReactionSimulation,
-    },
-    reportError: (mode, message) => {
-      showSimError(mode, message);
-      delete simulations[mode];
-    },
-  });
-}
-
-// --- 5a: BOIDS ---
-
-function createBoidsSimulation() {
-  // [LAW:locality-or-seam] Boids now owns its own pipelines and buffers in
-  // simulations/boids.ts; runtime only supplies shared rendering capabilities.
-  return createBoidsSimulationModule({
-    cameraSize: CAMERA_SIZE,
-    cameraStride: CAMERA_STRIDE,
-    createShaderModuleChecked,
-    destroyDepthRef,
-    device,
-    getCameraUniformData,
-    getColorAttachment,
-    getDefaultAspect: () => canvas.width / canvas.height,
-    getDepthAttachment,
-    getRenderViewport,
-    renderGrid,
-    renderSampleCount,
-    renderTargetFormat,
-    state,
-  });
-}
-
-// --- 5b: N-BODY PHYSICS ---
-
-// [LAW:single-enforcer] Canonical multigrid V-cycle dispatcher used by every
-// PM grid (inner, outer, future gas-coupled grid). Encapsulates the full
-// descent → coarsest → ascent shape:
-//   1. Clear coarse-level potentials (levels 1..maxLevel). Level 0 keeps
-//      previous-frame warm-start so the solver converges in 1 cycle.
-//   2. Descent (l = 0..maxLevel-1): pre-smooth, residual, restrict.
-//   3. Coarsest level (l = maxLevel): over-smooth toward exact solve.
-//   4. Ascent (l = maxLevel-1..0): prolong correction + post-smooth.
-//
-function createPhysicsSimulation() {
-  // [LAW:locality-or-seam] Physics now owns its assembly in
-  // simulations/physics/index.ts; runtime only supplies shared capabilities.
-  return createPhysicsSimulationModule({
+function createSimulationFactoryContext(): SimulationFactoryContext {
+  // [LAW:single-enforcer] Runtime-to-simulation translation happens once at
+  // this boundary, producing the one canonical capability shape every factory consumes.
+  return {
     attractorMax: ATTRACTOR_MAX,
     baseDt: PHYSICS_BASE_DT,
     cameraSize: CAMERA_SIZE,
@@ -463,6 +407,8 @@ function createPhysicsSimulation() {
     createShaderModuleChecked,
     destroyDepthRef,
     device,
+    fluidGridResolution: FLUID_GRID_RES,
+    fluidWorldSize: FLUID_WORLD_SIZE,
     getAttractorStrength: attractorStrength,
     getCameraUniformData,
     getColorAttachment,
@@ -478,99 +424,20 @@ function createPhysicsSimulation() {
     renderGrid,
     renderSampleCount,
     renderTargetFormat,
-    state,
-    tsWrites,
-  });
-}
-
-// --- 5b': N-BODY CLASSIC ---
-// Faithful recreation of the original n-body shader for A/B comparison.
-// 32-byte Body struct, 48-byte Params (no disk recovery, no reduction, no home anchors).
-// Renders into the shared HDR scene like every other sim, so bloom/tonemap still apply.
-
-function createPhysicsClassicSimulation(): Simulation {
-  return createPhysicsClassicSimulationModule({
-    cameraSize: CAMERA_SIZE,
-    cameraStride: CAMERA_STRIDE,
-    createShaderModuleChecked,
-    destroyDepthRef,
-    device,
-    getCameraUniformData,
-    getColorAttachment,
-    getDefaultAspect: () => canvas.width / canvas.height,
-    getDepthAttachment,
-    getRenderViewport,
-    renderGrid,
-    renderSampleCount,
-    renderTargetFormat,
-    state,
-  });
-}
-
-// --- 5c: FLUID DYNAMICS ---
-
-function createFluidSimulation() {
-  return createFluidSimulationModule({
-    cameraSize: CAMERA_SIZE,
-    cameraStride: CAMERA_STRIDE,
-    createShaderModuleChecked,
-    destroyDepthRef,
-    device,
-    fluidGridResolution: FLUID_GRID_RES,
-    fluidWorldSize: FLUID_WORLD_SIZE,
-    getCameraUniformData,
-    getColorAttachment,
-    getDefaultAspect: () => canvas.width / canvas.height,
-    getDepthAttachment,
-    getRenderViewport,
-    renderGrid,
-    renderSampleCount,
-    renderTargetFormat,
-    state,
-  });
-}
-
-// --- 5d: PARAMETRIC SHAPES ---
-
-function createParametricSimulation() {
-  return createParametricSimulationModule({
-    cameraSize: CAMERA_SIZE,
-    cameraStride: CAMERA_STRIDE,
-    createShaderModuleChecked,
-    destroyDepthRef,
-    device,
-    getCameraUniformData,
-    getColorAttachment,
-    getDefaultAspect: () => canvas.width / canvas.height,
-    getDepthAttachment,
-    getRenderViewport,
-    renderGrid,
-    renderSampleCount,
-    renderTargetFormat,
     shapeIds: catalogShapeIds,
     state,
-  });
+    tsWrites,
+  };
 }
 
-
-// --- 5e: REACTION-DIFFUSION (Gray-Scott, 3D) ---
-
-function createReactionSimulation() {
-  return createReactionSimulationModule({
-    cameraSize: CAMERA_SIZE,
-    cameraStride: CAMERA_STRIDE,
-    createShaderModuleChecked,
-    destroyDepthRef,
+function initializeSimulationRegistry(): void {
+  simulationRegistry = createSimulationRegistry({
     device,
-    getCameraUniformData,
-    getColorAttachment,
-    getDefaultAspect: () => canvas.width / canvas.height,
-    getDepthAttachment,
-    getRenderViewport,
-    renderGrid,
-    renderSampleCount,
-    renderTargetFormat,
-    state,
+    factories: createSimulationFactories(createSimulationFactoryContext()),
+    reportError: (mode, message) => {
+      showSimError(mode, message);
+      delete simulations[mode];
+    },
   });
 }
 

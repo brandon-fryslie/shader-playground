@@ -1,9 +1,9 @@
 import { shaderSource } from '../gpu/shaders';
 import type { DepthRef, Simulation } from '../types';
 
-import type { SharedSimulationDependencies } from './shared';
+import type { SimulationFactoryContext } from './shared';
 
-export function createBoidsSimulation(deps: SharedSimulationDependencies): Simulation {
+export function createBoidsSimulation(deps: SimulationFactoryContext): Simulation {
   const count = deps.state.boids.count;
   const particleBytes = count * 32;
 
