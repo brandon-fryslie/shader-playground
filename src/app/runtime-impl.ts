@@ -20,6 +20,7 @@ import { createControls, type ControlsApi } from '../ui/controls';
 import { createBoidsSimulation as createBoidsSimulationModule } from '../simulations/boids';
 import { createFluidSimulation as createFluidSimulationModule } from '../simulations/fluid';
 import { createParametricSimulation as createParametricSimulationModule } from '../simulations/parametric';
+import { createPhysicsComputeService } from '../simulations/physics/compute';
 import { createPhysicsDiagnostics } from '../simulations/physics/diagnostics';
 import { createPhysicsInitialConditions } from '../simulations/physics/initial-conditions';
 import { createPhysicsParticleMesh } from '../simulations/physics/particle-mesh';
@@ -28,10 +29,9 @@ import { createPhysicsRenderService } from '../simulations/physics/render';
 import { createPhysicsStatsService } from '../simulations/physics/stats';
 import { createPhysicsClassicSimulation as createPhysicsClassicSimulationModule } from '../simulations/physics-classic';
 import { isPhysicsSimulation, type PhysicsSimulation } from '../simulations/types';
-import { runPmVCycle } from '../simulations/physics-vcycle';
 import { createReactionSimulation as createReactionSimulationModule } from '../simulations/reaction';
 import { createSimulationRegistry, type SimulationRegistry } from '../simulations/registry';
-import { shaderSource, getShaderSources as getCatalogShaderSources, applyShaderEdit as applyCatalogShaderEdit, resetShaderEdit as resetCatalogShaderEdit } from '../gpu/shaders';
+import { getShaderSources as getCatalogShaderSources, applyShaderEdit as applyCatalogShaderEdit, resetShaderEdit as resetCatalogShaderEdit } from '../gpu/shaders';
 import { installDevtools } from '../diagnostics/devtools';
 import { createDiagnosticsLogger } from '../diagnostics/logging';
 
@@ -1452,9 +1452,6 @@ function createPhysicsSimulation() {
     totalStarMass,
   });
   const {
-    boundarySampleBG: pmBoundarySampleBG,
-    boundarySamplePipeline: pmBoundarySamplePipeline,
-    boundarySampleWg: pmBoundarySampleWg,
     gas,
     inner: {
       densityF32: pmDensityF32,
@@ -1462,75 +1459,40 @@ function createPhysicsSimulation() {
       densityU32: pmDensityU32,
       getDiagPending: getPmDiagPending,
       level0Cells: pmLevel0Cells,
-      levels: pmLevels,
       meanScratch: pmMeanScratch,
       potential: pmPotential,
-      prolongBG: pmProlongBG,
       residual: pmResidual,
-      residualBG: pmResidualBG,
-      restrictBG: pmRestrictBG,
       setDiagPending: setPmDiagPending,
-      smoothBG: pmSmoothBG,
-      wgCount: pmWgCount,
     },
     outer: {
       densityF32: pmOuterDensityF32,
       densityStaging: pmOuterDensityStaging,
       getDiagPending: getPmOuterDiagPending,
       level0Cells: pmOuterLevel0Cells,
-      levels: pmOuterLevels,
       potential: pmOuterPotential,
-      prolongBG: pmOuterProlongBG,
       residual: pmOuterResidual,
-      residualBG: pmOuterResidualBG,
-      restrictBG: pmOuterRestrictBG,
       setDiagPending: setPmOuterDiagPending,
-      smoothBG: pmOuterSmoothBG,
-      wgCount: pmOuterWgCount,
     },
-    prolongPipeline: pmProlongPipeline,
-    residualPipeline: pmResidualPipeline,
-    restrictPipeline: pmRestrictPipeline,
-    smoothPipeline: pmSmoothPipeline,
   } = particleMesh;
   const pmForce = particleMesh.inner.force!;
-
-  const computeModule = createShaderModuleChecked('nbody.compute', shaderSource('nbody.compute'));
-
-  const computeBGL = device.createBindGroupLayout({
-    entries: [
-      { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
-      { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
-      { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
-      { binding: 3, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } }, // pmForce
-    ]
-  });
-
-  const computePipeline = device.createComputePipeline({
-    layout: device.createPipelineLayout({ bindGroupLayouts: [computeBGL] }),
-    compute: { module: computeModule, entryPoint: 'main' }
-  });
 
   const physicsStats = createPhysicsStatsService({
     buffers: [bufferA, bufferB],
     createShaderModuleChecked,
     device,
   });
-
-  const computeBG = [
-    device.createBindGroup({ layout: computeBGL, entries: [
-      { binding: 0, resource: { buffer: bufferA } },
-      { binding: 1, resource: { buffer: bufferB } },
-      { binding: 2, resource: { buffer: paramsBuffer } },
-      { binding: 3, resource: { buffer: pmForce } },
-    ]}),
-    device.createBindGroup({ layout: computeBGL, entries: [
-      { binding: 0, resource: { buffer: bufferB } },
-      { binding: 1, resource: { buffer: bufferA } },
-      { binding: 2, resource: { buffer: paramsBuffer } },
-      { binding: 3, resource: { buffer: pmForce } },
-    ]}),
-  ];
+  const physicsCompute = createPhysicsComputeService({
+    bodyBuffers: [bufferA, bufferB],
+    count,
+    createShaderModuleChecked,
+    device,
+    paramsBuffer,
+    particleMesh,
+    physicsStats,
+    softeningDefault: 0.15,
+    stepController: physicsStep,
+    tsWrites,
+  });
   const physicsRender = createPhysicsRenderService({
     attractorMax: ATTRACTOR_MAX,
     bodyBuffers: [bufferA, bufferB],
@@ -1567,7 +1529,6 @@ function createPhysicsSimulation() {
   const diagSampleBytes = Math.min(count, DIAG_SAMPLE) * 48;
   const diagStaging = device.createBuffer({ size: diagSampleBytes, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
 
-  let pingPong = 0;
   const depthRef: DepthRef = {};
 
   let computeStepForDiagnostics: ((encoder: GPUCommandEncoder) => void) | null = null;
@@ -1584,7 +1545,7 @@ function createPhysicsSimulation() {
     diskNormal,
     gas,
     getLastStats: () => physicsStats.getLastStats(),
-    getPingPong: () => pingPong,
+    getPingPong: () => physicsCompute.getPingPong(),
     getPmDiagPending,
     getPmOuterDiagPending,
     getTimeDirection: () => physicsStep.getTimeDirection(),
@@ -1616,134 +1577,11 @@ function createPhysicsSimulation() {
     getJournalHighWater() { return physicsStep.getJournalHighWater(); },
 
     compute(encoder: GPUCommandEncoder) {
-      const preparedStep = physicsStep.prepareComputeStep();
-      if (!preparedStep) return;
-      const { dt, physics: p } = preparedStep;
-
-      // ── PM density field (CIC deposition → mean reduction → subtract/convert) ──
-      // Produces pmDensityF32 (mean-zero density) for the Poisson solver in .4.
-      // No force yet — this shader's output is not read by any other stage in
-      // this ticket. Once .5 lands, PM force adds alongside tile-pair gravity.
-      // [LAW:dataflow-not-control-flow] Runs every frame; same code path whether
-      // or not the density is consumed downstream.
-      particleMesh.prepareFrame(dt, p.gasSoundSpeed ?? 2.0);
-      particleMesh.depositAndConvert(encoder, pingPong, tsWrites('pmDepositConvert'));
-
-      // ── Multigrid V-cycle Poisson solver (full cycle per frame) ──────────
-      // Input:  pmRho[0] = pmDensityF32 (mean-zero RHS at level 0)
-      // Output: pmPotential[0] (φ satisfying ∇²φ = 4πGρ)
-      //
-      // [LAW:single-enforcer] runPmVCycle is the sole dispatcher of the
-      // multigrid V-cycle; both grids use it. It owns the descent → coarsest
-      // → ascent sequence and the level-0 warm-start convention.
-      //
-      // [LAW:one-source-of-truth] Each V-cycle completes within ONE frame.
-      // pmPotential[0] is always a fully-solved state when the interpolate
-      // reads it — no mid-solve snapshots bleed to consumers.
-      //
-      // Ordering matters: the outer grid solves first (periodic BC on the
-      // full ±64 box), then pm.boundary_sample writes outer φ values into
-      // the inner grid's level-0 face cells, then the inner V-cycle runs
-      // with Dirichlet BC (smoother / residual / prolong freeze face cells).
-      // This is the nested-PM scheme: inner resolution is driven by outer
-      // long-range φ at its boundary, not by periodic wrap of ±16.
-      //
-      // Levels 1..maxLevel are cleared at the start of each cycle because
-      // they accumulate corrections; level 0 keeps the previous frame's
-      // solution as warm-start (density evolves slowly frame-to-frame,
-      // so the prior phi is a near-converged initial guess).
-      const PM_COARSEST_SWEEPS = 16;
-
-      // Outer first — its fully-solved φ becomes the inner grid's Dirichlet BC.
-      runPmVCycle(encoder, {
-        levels: pmOuterLevels,
-        pipelines: {
-          prolong: pmProlongPipeline,
-          residual: pmResidualPipeline,
-          restrict: pmRestrictPipeline,
-          smooth: pmSmoothPipeline,
-        },
-        wgCount: pmOuterWgCount,
-        potential: pmOuterPotential,
-        smoothBG: pmOuterSmoothBG,
-        residualBG: pmOuterResidualBG,
-        restrictBG: pmOuterRestrictBG,
-        prolongBG: pmOuterProlongBG,
-        preSmooth: PM_SMOOTH_PRE,
-        postSmooth: PM_SMOOTH_POST,
-        coarsestSweeps: PM_COARSEST_SWEEPS,
-        timestampWrites: tsWrites('outerVCycle'),
-      });
-
-      // Boundary-sample: write outer φ into inner φ's level-0 face cells.
-      // Separate pass so WebGPU's implicit pass-boundary barriers serialize
-      // the outer-write vs. outer-read dependency without any explicit sync.
-      {
-        const bsTsw = tsWrites('boundarySample');
-        const bsPass = encoder.beginComputePass(bsTsw ? { timestampWrites: bsTsw } : undefined);
-        bsPass.setPipeline(pmBoundarySamplePipeline);
-        bsPass.setBindGroup(0, pmBoundarySampleBG);
-        bsPass.dispatchWorkgroups(pmBoundarySampleWg, pmBoundarySampleWg, pmBoundarySampleWg);
-        bsPass.end();
-      }
-
-      // Inner V-cycle — reads face cells as Dirichlet BC (flag = 1 in uniforms).
-      runPmVCycle(encoder, {
-        levels: pmLevels,
-        pipelines: {
-          prolong: pmProlongPipeline,
-          residual: pmResidualPipeline,
-          restrict: pmRestrictPipeline,
-          smooth: pmSmoothPipeline,
-        },
-        wgCount: pmWgCount,
-        potential: pmPotential,
-        smoothBG: pmSmoothBG,
-        residualBG: pmResidualBG,
-        restrictBG: pmRestrictBG,
-        prolongBG: pmProlongBG,
-        preSmooth: PM_SMOOTH_PRE,
-        postSmooth: PM_SMOOTH_POST,
-        coarsestSweeps: PM_COARSEST_SWEEPS,
-        timestampWrites: tsWrites('innerVCycle'),
-      });
-
-      // ── PM force interpolation ─────────────────────────────────────────
-      // Sample the freshly-solved pmPotential[0] at each particle via the CIC
-      // transpose kernel; write vec4 force to pmForce. Dispatched AFTER the
-      // V-cycle (reads phi) and BEFORE the main n-body compute (reads pmForce).
-      particleMesh.interpolateForces(
-        encoder,
-        count,
-        pingPong,
-        tsWrites('starInterpolate'),
-        tsWrites('gasInterpolatePressure'),
-      );
-
-      const cTsw = tsWrites('starGasIntegrate');
-      const pass = encoder.beginComputePass(cTsw ? { timestampWrites: cTsw } : undefined);
-      // [LAW:dataflow-not-control-flow] Gas and stars integrate every frame in
-      // a fixed order; gasMassFraction=0 makes gas forces zero by value.
-      gas.integrate(pass, pingPong);
-      pass.setPipeline(computePipeline);
-      pass.setBindGroup(0, computeBG[pingPong]);
-      pass.dispatchWorkgroups(Math.ceil(count / 256));
-      pass.end();
-
-      physicsStats.schedule(
-        encoder,
-        count,
-        (p.G ?? 0.3) * 0.001,
-        performance.now(),
-        pingPong,
-        p.softening ?? 0.15,
-      );
-
-      pingPong = 1 - pingPong;
+      physicsCompute.compute(encoder);
     },
 
     render(encoder: GPUCommandEncoder, textureView: GPUTextureView, viewport: number[] | null, viewIndex = 0) {
-      physicsRender.render(encoder, textureView, viewport, viewIndex, pingPong, depthRef, {
+      physicsRender.render(encoder, textureView, viewport, viewIndex, physicsCompute.getPingPong(), depthRef, {
         gasRender: tsWrites('gasRender'),
         starsRender: tsWrites('starsRender'),
       });
