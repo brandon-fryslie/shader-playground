@@ -22,9 +22,9 @@ import { createFluidSimulation as createFluidSimulationModule } from '../simulat
 import { createParametricSimulation as createParametricSimulationModule } from '../simulations/parametric';
 import { createPhysicsDiagnostics } from '../simulations/physics/diagnostics';
 import { createPhysicsInitialConditions } from '../simulations/physics/initial-conditions';
-import { createPhysicsRenderOverlays } from '../simulations/physics/markers';
 import { createPhysicsParticleMesh } from '../simulations/physics/particle-mesh';
 import { createPhysicsStepController } from '../simulations/physics/params';
+import { createPhysicsRenderService } from '../simulations/physics/render';
 import { createPhysicsStatsService } from '../simulations/physics/stats';
 import { createPhysicsClassicSimulation as createPhysicsClassicSimulationModule } from '../simulations/physics-classic';
 import { isPhysicsSimulation, type PhysicsSimulation } from '../simulations/types';
@@ -1496,7 +1496,6 @@ function createPhysicsSimulation() {
   const pmForce = particleMesh.inner.force!;
 
   const computeModule = createShaderModuleChecked('nbody.compute', shaderSource('nbody.compute'));
-  const renderModule = createShaderModuleChecked('nbody.render', shaderSource('nbody.render'));
 
   const computeBGL = device.createBindGroupLayout({
     entries: [
@@ -1518,35 +1517,6 @@ function createPhysicsSimulation() {
     device,
   });
 
-  const renderBGL = device.createBindGroupLayout({
-    entries: [
-      { binding: 0, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: 'read-only-storage' } },
-      { binding: 1, visibility: GPUShaderStage.VERTEX, buffer: { type: 'uniform' } },
-      { binding: 2, visibility: GPUShaderStage.VERTEX, buffer: { type: 'uniform' } },
-      { binding: 3, visibility: GPUShaderStage.VERTEX, buffer: { type: 'uniform' } },
-    ]
-  });
-
-  const renderPipeline = device.createRenderPipeline({
-    layout: device.createPipelineLayout({ bindGroupLayouts: [renderBGL] }),
-    vertex: { module: renderModule, entryPoint: 'vs_main' },
-    fragment: {
-      module: renderModule, entryPoint: 'fs_main',
-      targets: [{
-        format: renderTargetFormat,
-        blend: {
-          color: { srcFactor: 'src-alpha', dstFactor: 'one', operation: 'add' },
-          alpha: { srcFactor: 'one', dstFactor: 'one', operation: 'add' },
-        }
-      }]
-    },
-    primitive: { topology: 'triangle-list' },
-    // Additive-blended particles don't write depth but must declare the format
-    // to match the render pass's depth attachment.
-    depthStencil: { format: 'depth24plus', depthWriteEnabled: false, depthCompare: 'always' },
-    multisample: { count: renderSampleCount },
-  });
-
   const computeBG = [
     device.createBindGroup({ layout: computeBGL, entries: [
       { binding: 0, resource: { buffer: bufferA } },
@@ -1561,31 +1531,36 @@ function createPhysicsSimulation() {
       { binding: 3, resource: { buffer: pmForce } },
     ]}),
   ];
-
-  const physicsRenderOverlays = createPhysicsRenderOverlays({
+  const physicsRender = createPhysicsRenderService({
     attractorMax: ATTRACTOR_MAX,
+    bodyBuffers: [bufferA, bufferB],
     cameraBuffer,
     cameraSize: CAMERA_SIZE,
     cameraStride: CAMERA_STRIDE,
+    clearColor: catalogDefaultClearColor,
+    count,
     createShaderModuleChecked,
     device,
+    gas,
     getAttractorStrength: attractorStrength,
+    getCameraUniformData,
+    getColorAttachment,
+    getCurrentSceneView,
+    getDefaultAspect: () => canvas.width / canvas.height,
+    getDepthAttachment,
+    getRenderViewport,
     getSimStep: () => physicsStep.getSimStep(),
+    getXrDepthOverride: () => xrDepthOverride,
     markersPerAttractor: MARKERS_PER_ATTRACTOR,
+    nullColorView: postFx.nullColorView!,
+    nullDepthView: postFx.nullDepthView!,
+    postFxDepthView: () => postFx.depth!.createView(),
+    renderGrid,
     renderSampleCount,
     renderTargetFormat,
     state,
+    trailBlurBuffer: blurBuffer,
   });
-
-  // renderBGs[viewIndex][pingPong]
-  const renderBGs: GPUBindGroup[][] = [0, 1].map(vi =>
-    [bufferA, bufferB].map(buf => device.createBindGroup({ layout: renderBGL, entries: [
-      { binding: 0, resource: { buffer: buf } },
-      { binding: 1, resource: { buffer: cameraBuffer, offset: vi * CAMERA_STRIDE, size: CAMERA_SIZE } },
-      { binding: 2, resource: { buffer: blurBuffer } },
-      { binding: 3, resource: { buffer: physicsRenderOverlays.attractorFieldBuffer } },
-    ]}))
-  );
 
   // Diagnostic readback: sample particles from the GPU for analysis.
   const DIAG_SAMPLE = 2048;
@@ -1768,57 +1743,10 @@ function createPhysicsSimulation() {
     },
 
     render(encoder: GPUCommandEncoder, textureView: GPUTextureView, viewport: number[] | null, viewIndex = 0) {
-      const aspect = viewport ? (viewport[2] / viewport[3]) : (canvas.width / canvas.height);
-      device.queue.writeBuffer(cameraBuffer, viewIndex * CAMERA_STRIDE, getCameraUniformData(aspect));
-
-      physicsRenderOverlays.syncAttractorField();
-
-      const rTsw = tsWrites('starsRender');
-      const pass = encoder.beginRenderPass({
-        colorAttachments: [getColorAttachment(depthRef, textureView, viewport)],
-        depthStencilAttachment: getDepthAttachment(depthRef, viewport),
-        ...(rTsw ? { timestampWrites: rTsw } : {}),
+      physicsRender.render(encoder, textureView, viewport, viewIndex, pingPong, depthRef, {
+        gasRender: tsWrites('gasRender'),
+        starsRender: tsWrites('starsRender'),
       });
-
-      const renderViewport = getRenderViewport(viewport);
-      if (renderViewport) {
-        pass.setViewport(renderViewport[0], renderViewport[1], renderViewport[2], renderViewport[3], 0, 1);
-      }
-
-      renderGrid(pass, aspect, viewIndex);
-
-      pass.setPipeline(renderPipeline);
-      pass.setBindGroup(0, renderBGs[viewIndex][pingPong]);
-      pass.draw(6, count);
-
-      physicsRenderOverlays.renderMarkers(pass, viewIndex);
-      pass.end();
-
-      const gasVisible = state.physics.gasVisible;
-      const gasColorView = gasVisible ? getCurrentSceneView() : postFx.nullColorView!;
-      const gasDepthView = gasVisible ? (xrDepthOverride ?? postFx.depth!.createView()) : postFx.nullDepthView!;
-      const gasViewport = gasVisible ? renderViewport : null;
-      const gTsw = tsWrites('gasRender');
-      const gasPass = encoder.beginRenderPass({
-        colorAttachments: [{
-          view: gasColorView,
-          clearValue: catalogDefaultClearColor,
-          loadOp: 'load',
-          storeOp: 'store',
-        }],
-        depthStencilAttachment: {
-          view: gasDepthView,
-          depthClearValue: 1.0,
-          depthLoadOp: 'load',
-          depthStoreOp: 'store',
-        },
-        ...(gTsw ? { timestampWrites: gTsw } : {}),
-      });
-      if (gasViewport) {
-        gasPass.setViewport(gasViewport[0], gasViewport[1], gasViewport[2], gasViewport[3], 0, 1);
-      }
-      gas.render(gasPass, viewIndex, gasVisible);
-      gasPass.end();
     },
 
     getCount() { return count; },
@@ -1828,7 +1756,7 @@ function createPhysicsSimulation() {
     destroy() {
       bufferA.destroy(); bufferB.destroy();
       physicsStep.destroy(); cameraBuffer.destroy();
-      physicsRenderOverlays.destroy();
+      physicsRender.destroy();
       physicsStats.destroy();
       diagStaging.destroy();
       particleMesh.destroy();
