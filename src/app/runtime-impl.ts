@@ -26,7 +26,7 @@ import { isPhysicsSimulation } from '../simulations/types';
 import { createReactionSimulation as createReactionSimulationModule } from '../simulations/reaction';
 import { createSimulationRegistry, type SimulationRegistry } from '../simulations/registry';
 import { getShaderSources as getCatalogShaderSources, applyShaderEdit as applyCatalogShaderEdit, resetShaderEdit as resetCatalogShaderEdit } from '../gpu/shaders';
-import { createGpuTimingService, type GpuTimingBucket, type TimestampWrites } from '../gpu/timestamps';
+import { createGpuTimingService, type GpuTimingBucket } from '../gpu/timestamps';
 import { installDevtools } from '../diagnostics/devtools';
 import { createDiagnosticsLogger } from '../diagnostics/logging';
 import { cross3, dot3, normalize3, sub3 } from '../math/vec3';
@@ -34,7 +34,7 @@ import { createAttractorSystem, type AttractorSystem, ATTRACTOR_MAX, MARKERS_PER
 import { createPointerSystem, type PointerSystem } from '../input/pointer';
 import { createMobileInput, type MobileInput } from '../input/mobile';
 import { createCameraSystem, type CameraSystem } from '../render/camera';
-import { createFrameStatsService } from '../render/frame-stats';
+import { createRenderFrameRuntime, type RenderFrameRuntime } from '../render/frame';
 import { createGridRenderer, type GridRenderer } from '../render/grid';
 import { createPostFxService, type PostFxService } from '../render/post-fx';
 import { createXrRuntime, type XrRuntime } from '../xr/runtime';
@@ -147,6 +147,7 @@ const CAMERA_STRIDE = 256; // >= CAMERA_SIZE, multiple of minUniformBufferOffset
 let cameraSystem!: CameraSystem;
 let postFx!: PostFxService;
 let xrRuntime: XrRuntime | null = null;
+let renderFrameRuntime!: RenderFrameRuntime;
 
 function initPostFx(): void {
   postFx = createPostFxService({
@@ -240,7 +241,7 @@ async function initWebGPU(): Promise<boolean> {
   device.lost.then((info) => {
     logError('webgpu:device-lost', new Error(info.message), `reason=${info.reason}`);
     if (info.reason !== 'destroyed') {
-      initWebGPU().then(ok => { if (ok) { initGrid(); ensureSimulation(); requestAnimationFrame(frame); } });
+      initWebGPU().then(ok => { if (ok) { initGrid(); ensureSimulation(); renderFrameRuntime.requestFrame(); } });
     }
   });
 
@@ -310,6 +311,29 @@ async function initWebGPU(): Promise<boolean> {
     state,
   });
   initPostFx();
+  renderFrameRuntime = createRenderFrameRuntime({
+    currentSimStep,
+    currentTimeDirection,
+    getCanvas: () => canvas,
+    getCanvasContainer: () => document.getElementById('canvas-container')!,
+    getCanvasFormat: () => canvasFormat,
+    getContext: () => context,
+    getCurrentSimulation: () => simulations[state.mode],
+    getDefaultClearColor: () => catalogDefaultClearColor,
+    getDevice: () => device,
+    getPostFx: () => postFx,
+    getThemeColors,
+    gpuTiming,
+    pruneAttractors,
+    refreshThemeColors,
+    runDebugCompute,
+    showSimError,
+    state,
+    tickMarkers,
+    updateAdaptiveChunk,
+    updateDebugPanel,
+    dropSimulationIfCurrent,
+  });
 
   return true;
 }
@@ -1891,26 +1915,8 @@ async function toggleXR() {
 // SECTION 9: RENDER LOOP & ENTRY POINT
 // ═══════════════════════════════════════════════════════════════════════════════
 
-const frameStats = createFrameStatsService();
-
-function tsWrites(bucket: GpuTimingBucket): TimestampWrites | undefined {
-  return gpuTiming.tsWrites(bucket);
-}
-
-function tsBegin(bucket: GpuTimingBucket): TimestampWrites | undefined {
-  return gpuTiming.tsBegin(bucket);
-}
-
-function tsEnd(bucket: GpuTimingBucket): TimestampWrites | undefined {
-  return gpuTiming.tsEnd(bucket);
-}
-
-function resolveTimestamps(encoder: GPUCommandEncoder, now: number) {
-  gpuTiming.endFrame(encoder, now);
-}
-
-function measureGpuFrame(now: number) {
-  gpuTiming.measure(now);
+function tsWrites(bucket: GpuTimingBucket) {
+  return renderFrameRuntime.tsWrites(bucket);
 }
 
 function ensureSimulation() {
@@ -1928,41 +1934,15 @@ function resetCurrentSim() {
 }
 
 function updateStats() {
-  const { gpuFrameMs, gpuTimingDetail } = gpuTiming.getStats();
-  const sim = simulations[state.mode];
-  frameStats.updateHud({
-    count: sim ? sim.getCount() : '--',
-    currentFps: frameStats.getCurrentFps(),
-    gpuFrameMs,
-    gpuTimingDetail,
-    isGridMode: state.mode === 'fluid' || state.mode === 'reaction',
-    physicsDirection: state.mode === 'physics' && isPhysicsSimulation(sim) ? sim.getTimeDirection() : undefined,
-    physicsStep: state.mode === 'physics' && isPhysicsSimulation(sim) ? sim.getSimStep() : undefined,
-  });
+  renderFrameRuntime.updateStats();
 }
 
 function resizeCanvas() {
-  const container = document.getElementById('canvas-container')!;
-  const dpr = window.devicePixelRatio || 1;
-  const w = Math.floor(container.clientWidth * dpr);
-  const h = Math.floor(container.clientHeight * dpr);
-  if (canvas.width !== w || canvas.height !== h) {
-    canvas.width = w;
-    canvas.height = h;
-  }
-  ensureHdrTargets(canvas.width, canvas.height);
-}
-
-// [LAW:dataflow-not-control-flow] Post-process always runs the same passes; uniform values dictate strength.
-// Before: caller has rendered the sim into the current HDR scene texture (postFx.scene[postFx.sceneIdx]).
-// After: composite is written into `finalView` (canvas swapchain or XR compositor texture).
-// `prevSceneIdx` (passed in) is the texture the fade pass should READ FROM (the previous frame's scene).
-function runFadePass(encoder: GPUCommandEncoder, prevSceneIdx: number, currSceneIdx: number) {
-  postFx.runFadePass(encoder, prevSceneIdx, currSceneIdx, state.fx.trailPersistence, catalogDefaultClearColor);
+  renderFrameRuntime.resize();
 }
 
 function runBloomChain(encoder: GPUCommandEncoder, timingBucket?: GpuTimingBucket) {
-  postFx.runBloomChain(encoder, state.fx, timingBucket ? tsBegin(timingBucket) : undefined);
+  renderFrameRuntime.runBloomChain(encoder, timingBucket);
 }
 
 function runComposite(
@@ -1972,84 +1952,7 @@ function runComposite(
   viewport: number[] | null = null,
   timingBucket?: GpuTimingBucket
 ) {
-  postFx.runComposite(
-    encoder,
-    finalView,
-    finalFormat,
-    viewport,
-    state.fx,
-    getThemeColors(),
-    timingBucket ? tsEnd(timingBucket) : undefined,
-  );
-}
-
-function frame(now: DOMHighResTimeStamp) {
-  if (state.xrEnabled) return; // XR has its own loop
-
-  requestAnimationFrame(frame);
-
-  // Adaptive-chunk feedback: use the gap since the previous rAF as a proxy for "is the GPU keeping up?"
-  // When a heavy frame pushes delta over ~20ms, the adaptive chunk shrinks next frame; when we have
-  // headroom (delta < 14ms), it grows. This is the only place we measure frame pacing, so the feedback
-  // decision stays in one place (single-enforcer).
-  const { frameDeltaMs, fpsUpdated, hadPreviousTimestamp } = frameStats.tick(now);
-  if (hadPreviousTimestamp) {
-    updateAdaptiveChunk(frameDeltaMs);
-  }
-
-  refreshThemeColors(now);
-  resizeCanvas();
-  // [LAW:single-enforcer] Attractor lifecycle is updated here, before any sim/compute/composite runs,
-  // so mode switches can't leak dead attractors into the array or render loop.
-  pruneAttractors(currentSimStep());
-
-  // [LAW:single-enforcer] Markers tick once per visual frame, with dt bounded to kill lag-spike
-  // teleports. timeScale + timeDirection make the swarm track the simulation's sense of time.
-  tickMarkers(Math.min(0.05, frameDeltaMs * 0.001) * state.fx.timeScale * currentTimeDirection());
-
-  if (fpsUpdated) updateStats();
-
-  const sim = simulations[state.mode];
-  if (!sim) return;
-
-  // [LAW:single-enforcer] GPU validation errors are caught by device.onuncapturederror
-  // (set up in initWebGPU) which surfaces them in the error overlay without per-frame
-  // scope overhead. Targeted scopes in ensureSimulation() handle creation-time errors.
-  const mode = state.mode;
-
-  try {
-    gpuTiming.beginFrame();
-    const encoder = device.createCommandEncoder();
-
-    // Debug stepping/skipping and normal play both funnel through runDebugCompute so the
-    // "when do we dispatch compute" decision is owned in one place.
-    runDebugCompute(sim, encoder);
-    updateDebugPanel();
-
-    const prevIdx = postFx.getSceneIndex();
-    const currIdx = 1 - prevIdx;
-    postFx.setSceneIndex(currIdx);
-
-    runFadePass(encoder, prevIdx, currIdx);
-
-    sim.render(encoder, postFx.getSceneView(currIdx), null);
-
-    runBloomChain(encoder, 'bloomComposite');
-    const swapchainView = context.getCurrentTexture().createView();
-    runComposite(encoder, swapchainView, canvasFormat, null, 'bloomComposite');
-
-    resolveTimestamps(encoder, now);
-    device.queue.submit([encoder.finish()]);
-    measureGpuFrame(now);
-
-  } catch (e) {
-    showSimError(mode, `frame threw: ${(e as Error).message}`);
-    // Only drop the sim instance we were just rendering — not whatever lives
-    // in the registry now, which could be a fresh one the user already reset.
-    if (simulations[mode] === sim) {
-      dropSimulationIfCurrent(mode, sim);
-    }
-  }
+  renderFrameRuntime.runComposite(encoder, finalView, finalFormat, viewport, timingBucket);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -2128,14 +2031,14 @@ export async function startAppRuntimeImpl() {
     pruneAttractors,
     queuePendingSource: (source) => { xrPendingSources.push(source); },
     refreshThemeColors,
-    requestDesktopFrame: () => requestAnimationFrame(frame),
+    requestDesktopFrame: () => renderFrameRuntime.requestFrame(),
     resetInputState: xrResetInputState,
     clearReferenceSpace: clearXrReferenceSpace,
     setCurrentPhase: (phase) => { currentGpuPhase = phase; },
     setHandTrackingAvailable: () => {},
     state,
     syncRenderConfig,
-    tickFrameStats: (time) => frameStats.tick(time),
+    tickFrameStats: (time) => renderFrameRuntime.tickFrameStats(time),
     tickMarkers,
     uiRegistry: xrUiRegistry,
     updateStats,
@@ -2179,18 +2082,11 @@ export async function startAppRuntimeImpl() {
   resizeCanvas();
   ensureSimulation();
   updateAll();
-
-  const resizeObserver = new ResizeObserver(() => resizeCanvas());
-  resizeObserver.observe(document.getElementById('canvas-container')!);
-
-  requestAnimationFrame(frame);
+  renderFrameRuntime.start();
   installDevtools({
     state,
     getCurrentSimulation: () => simulations[state.mode],
-    getGpuStats: () => ({
-      currentFps: frameStats.getCurrentFps(),
-      ...gpuTiming.getStats(),
-    }),
+    getGpuStats: () => renderFrameRuntime.getGpuStats(),
     bindings: bindingRegistry,
     anchors: { evaluateAnchor, handFrames: xrHandFrames },
     xrUi: {
