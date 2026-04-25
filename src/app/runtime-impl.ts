@@ -9,7 +9,7 @@ import {
 } from '../xr-ui/step';
 import { createXrWidgetRenderer, type XrWidgetRenderer } from '../xr-ui/renderer';
 import { HIG_DEFAULTS } from '../xr-ui/widgets';
-import { createGasReservoir, GAS_SHADER_SOURCES } from '../gasReservoir';
+import { GAS_SHADER_SOURCES } from '../gasReservoir';
 import { DEFAULTS as catalogDefaults, PRESETS as catalogPresets, PARAM_DEFS as catalogParamDefs, COLOR_THEMES as catalogColorThemes, DEFAULT_THEME as catalogDefaultTheme, THEME_FADE_MS as catalogThemeFadeMs, DEFAULT_CLEAR_COLOR as catalogDefaultClearColor, SHAPE_IDS as catalogShapeIds, SHAPE_PARAMS as catalogShapeParams, FX_PARAM_DEFS as catalogFxParamDefs, MODE_TAB_LABELS as catalogModeTabLabels } from './catalog';
 import { createInitialState } from './state';
 import { registerAppBindings } from './bindings';
@@ -23,6 +23,7 @@ import { createParametricSimulation as createParametricSimulationModule } from '
 import { createPhysicsDiagnostics } from '../simulations/physics/diagnostics';
 import { createPhysicsInitialConditions } from '../simulations/physics/initial-conditions';
 import { createPhysicsRenderOverlays } from '../simulations/physics/markers';
+import { createPhysicsParticleMesh } from '../simulations/physics/particle-mesh';
 import { createPhysicsClassicSimulation as createPhysicsClassicSimulationModule } from '../simulations/physics-classic';
 import { isPhysicsSimulation, type PhysicsSimulation } from '../simulations/types';
 import { runPmVCycle } from '../simulations/physics-vcycle';
@@ -39,15 +40,6 @@ import SHADER_NBODY_COMPUTE from '../shaders/nbody.compute.wgsl?raw';
 import SHADER_NBODY_STATS from '../shaders/nbody.stats.wgsl?raw';
 import SHADER_NBODY_RENDER from '../shaders/nbody.render.wgsl?raw';
 import SHADER_NBODY_CLASSIC_COMPUTE from '../shaders/nbody.classic.compute.wgsl?raw';
-import SHADER_PM_DEPOSIT from '../shaders/pm.deposit.wgsl?raw';
-import SHADER_PM_DENSITY_CONVERT from '../shaders/pm.density_convert.wgsl?raw';
-import SHADER_PM_SMOOTH from '../shaders/pm.smooth.wgsl?raw';
-import SHADER_PM_RESIDUAL from '../shaders/pm.residual.wgsl?raw';
-import SHADER_PM_RESTRICT from '../shaders/pm.restrict.wgsl?raw';
-import SHADER_PM_PROLONG from '../shaders/pm.prolong.wgsl?raw';
-import SHADER_PM_INTERPOLATE from '../shaders/pm.interpolate.wgsl?raw';
-import SHADER_PM_INTERPOLATE_NESTED from '../shaders/pm.interpolate_nested.wgsl?raw';
-import SHADER_PM_BOUNDARY_SAMPLE from '../shaders/pm.boundary_sample.wgsl?raw';
 import SHADER_NBODY_CLASSIC_RENDER from '../shaders/nbody.classic.render.wgsl?raw';
 import SHADER_FLUID_FORCES_ADVECT from '../shaders/fluid.forces.wgsl?raw';
 import SHADER_FLUID_DIFFUSE from '../shaders/fluid.diffuse.wgsl?raw';
@@ -1433,566 +1425,71 @@ function createPhysicsSimulation() {
   const blurScratch = new Float32Array(4);
   device.queue.writeBuffer(blurBuffer, 0, blurScratch); // init to 0 so the first pre-skip frames render circles
 
-  // PM grid buffers. All live at multigrid-level granularity — level 0 is the
-  // full 128³; each successive level halves the resolution. Total ~36 MB for
-  // the whole pyramid (density + potential + residual + per-particle force +
-  // mean scratch). [LAW:single-enforcer] All PM allocations go here; destroy()
-  // below is the sole cleanup site.
-  const PM_BUF_USAGE = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST;
-  const pmLevel0Cells = PM_GRID_RES * PM_GRID_RES * PM_GRID_RES;
-  const pmDensityU32 = device.createBuffer({ size: pmLevel0Cells * 4, usage: PM_BUF_USAGE });
-  const pmDensityF32 = device.createBuffer({ size: pmLevel0Cells * 4, usage: PM_BUF_USAGE });
-  const pmPotential: GPUBuffer[] = [];
-  const pmResidual: GPUBuffer[] = [];
-  for (let l = 0; l < PM_MULTIGRID_LEVELS; l++) {
-    const sizeL = PM_GRID_RES >> l;
-    const bytesL = sizeL * sizeL * sizeL * 4;
-    pmPotential.push(device.createBuffer({ size: bytesL, usage: PM_BUF_USAGE }));
-    pmResidual.push(device.createBuffer({ size: bytesL, usage: PM_BUF_USAGE }));
-  }
-  // Per-particle force buffer: vec4<f32> per particle (16-byte alignment; xyz used, w pad).
-  const pmForce = device.createBuffer({ size: count * 16, usage: PM_BUF_USAGE });
-  // Mean density scratch (single f32 + padding to 16 bytes).
-  const pmMeanScratch = device.createBuffer({ size: 16, usage: PM_BUF_USAGE });
-
-  // Coarse-level RHS buffers for the V-cycle (restricted residuals).
-  // [LAW:one-source-of-truth] pmRho[l] is the sole RHS buffer at level l.
-  // Level 0 aliases pmDensityF32 (never overwritten); levels 1..5 are fresh
-  // allocations written by restrict and read by smoother/residual.
-  const pmRho: GPUBuffer[] = [pmDensityF32];
-  for (let l = 1; l < PM_MULTIGRID_LEVELS; l++) {
-    const sizeL = PM_GRID_RES >> l;
-    pmRho.push(device.createBuffer({ size: sizeL * sizeL * sizeL * 4, usage: PM_BUF_USAGE }));
-  }
-
-  // PM uniform params — 32 bytes, shared by deposit + reduce + convert pipelines.
-  // [LAW:one-source-of-truth] Single host-side uniform; both shader structs
-  // (pm.deposit.wgsl and pm.density_convert.wgsl) declare the identical layout.
-  const pmParamsBuffer = device.createBuffer({ size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-  const pmParamsData = new ArrayBuffer(32);
-  const pmParamsF32 = new Float32Array(pmParamsData);
-  const pmParamsU32 = new Uint32Array(pmParamsData);
-  // Pack fields that don't change frame-to-frame once; dt is rewritten each frame.
-  pmParamsU32[1] = count;                  // particle count
-  pmParamsU32[2] = PM_GRID_RES;            // gridRes
-  pmParamsF32[3] = PM_DOMAIN_HALF;         // domainHalf
-  pmParamsF32[4] = PM_CELL_SIZE;           // cellSize
-  pmParamsF32[5] = PM_FIXED_POINT_SCALE;   // fixedPointScale
-  pmParamsU32[6] = pmLevel0Cells;          // cellCount = gridRes³
-  pmParamsU32[7] = 1;                       // filterOutOfDomain = 1 (inner is a ±16 subdomain)
-
-  // PM deposit pipeline: 1 read-only particle buffer + 1 atomic-u32 density + params.
-  const pmDepositModule = createShaderModuleChecked('pm.deposit', SHADER_PM_DEPOSIT);
-  const pmDepositBGL = device.createBindGroupLayout({
-    entries: [
-      { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
-      { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
-      { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
-    ]
-  });
-  const pmDepositPipeline = device.createComputePipeline({
-    layout: device.createPipelineLayout({ bindGroupLayouts: [pmDepositBGL] }),
-    compute: { module: pmDepositModule, entryPoint: 'main' }
-  });
-
-  // PM density convert pipelines (share one BGL + module; two entry points).
-  const pmConvertModule = createShaderModuleChecked('pm.density_convert', SHADER_PM_DENSITY_CONVERT);
-  const pmConvertBGL = device.createBindGroupLayout({
-    entries: [
-      { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
-      { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
-      { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
-      { binding: 3, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
-    ]
-  });
-  const pmConvertLayout = device.createPipelineLayout({ bindGroupLayouts: [pmConvertBGL] });
-  const pmReducePipeline = device.createComputePipeline({
-    layout: pmConvertLayout,
-    compute: { module: pmConvertModule, entryPoint: 'reduce' }
-  });
-  const pmConvertPipeline = device.createComputePipeline({
-    layout: pmConvertLayout,
-    compute: { module: pmConvertModule, entryPoint: 'convert' }
-  });
-  const pmConvertBG = device.createBindGroup({
-    layout: pmConvertBGL, entries: [
-      { binding: 0, resource: { buffer: pmDensityU32 } },
-      { binding: 1, resource: { buffer: pmDensityF32 } },
-      { binding: 2, resource: { buffer: pmMeanScratch } },
-      { binding: 3, resource: { buffer: pmParamsBuffer } },
-    ]
-  });
-
-  // Per-ping-pong deposit bind group: reads whichever body buffer is the
-  // current frame's input. Index matches the main compute's pingPong value —
-  // pmDepositBG[0] reads bufferA (pingPong=0 input), pmDepositBG[1] reads bufferB.
-  const pmDepositBG = [
-    device.createBindGroup({ layout: pmDepositBGL, entries: [
-      { binding: 0, resource: { buffer: bufferA } },
-      { binding: 1, resource: { buffer: pmDensityU32 } },
-      { binding: 2, resource: { buffer: pmParamsBuffer } },
-    ]}),
-    device.createBindGroup({ layout: pmDepositBGL, entries: [
-      { binding: 0, resource: { buffer: bufferB } },
-      { binding: 1, resource: { buffer: pmDensityU32 } },
-      { binding: 2, resource: { buffer: pmParamsBuffer } },
-    ]}),
-  ];
-
-  // Dev-only staging for window.__pmDumpDensity / __pmDumpPotential. 128³ × 4
-  // = 8 MB. Persistent allocation mirrors the existing diagStaging pattern.
-  const pmDensityStaging = device.createBuffer({
-    size: pmLevel0Cells * 4,
-    usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
-  });
-  let pmDiagPending = false;
-
-  // ── Multigrid V-cycle pipelines (smooth / residual / restrict / prolong) ──
-  // [LAW:single-enforcer] All Poisson-solver pipelines declared here; the
-  // V-cycle driver in compute() is the sole dispatcher.
-  const pmSmoothModule   = createShaderModuleChecked('pm.smooth',   SHADER_PM_SMOOTH);
-  const pmResidualModule = createShaderModuleChecked('pm.residual', SHADER_PM_RESIDUAL);
-  const pmRestrictModule = createShaderModuleChecked('pm.restrict', SHADER_PM_RESTRICT);
-  const pmProlongModule  = createShaderModuleChecked('pm.prolong',  SHADER_PM_PROLONG);
-
-  const pmSmoothBGL = device.createBindGroupLayout({
-    entries: [
-      { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },          // phi (rw)
-      { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },// rho
-      { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
-    ]
-  });
-  const pmResidualBGL = device.createBindGroupLayout({
-    entries: [
-      { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },// phi
-      { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },// rho
-      { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },          // residual (rw)
-      { binding: 3, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
-    ]
-  });
-  const pmRestrictBGL = device.createBindGroupLayout({
-    entries: [
-      { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },// fine
-      { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },          // coarse (rw)
-      { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
-    ]
-  });
-  const pmProlongBGL = device.createBindGroupLayout({
-    entries: [
-      { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },// coarse
-      { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },          // fine (rw, accumulates)
-      { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
-    ]
-  });
-
-  const pmSmoothPipeline = device.createComputePipeline({ layout: device.createPipelineLayout({ bindGroupLayouts: [pmSmoothBGL] }), compute: { module: pmSmoothModule, entryPoint: 'main' } });
-  const pmResidualPipeline = device.createComputePipeline({ layout: device.createPipelineLayout({ bindGroupLayouts: [pmResidualBGL] }), compute: { module: pmResidualModule, entryPoint: 'main' } });
-  const pmRestrictPipeline = device.createComputePipeline({ layout: device.createPipelineLayout({ bindGroupLayouts: [pmRestrictBGL] }), compute: { module: pmRestrictModule, entryPoint: 'main' } });
-  const pmProlongPipeline = device.createComputePipeline({ layout: device.createPipelineLayout({ bindGroupLayouts: [pmProlongBGL] }), compute: { module: pmProlongModule, entryPoint: 'main' } });
-
-  // PM nested force interpolation — reads BOTH grids' level-0 potential,
-  // samples each at the particle position, and blends via smoothstep across
-  // the transition shell. This is the sole force source for nbody.compute.
-  // [LAW:one-source-of-truth] Single shader owns the inner/outer selection;
-  // no fan-in at the integrator level.
-  void SHADER_PM_INTERPOLATE;  // legacy import preserved (non-nested shader unused while nested is live)
-  const pmInterpolateModule = createShaderModuleChecked('pm.interpolate_nested', SHADER_PM_INTERPOLATE_NESTED);
-  const pmInterpolateBGL = device.createBindGroupLayout({
-    entries: [
-      { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } }, // bodies
-      { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } }, // innerPhi
-      { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } }, // outerPhi
-      { binding: 3, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },           // forceOut
-      { binding: 4, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },           // innerParams
-      { binding: 5, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },           // outerParams
-      { binding: 6, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },           // blend shell
-    ]
-  });
-  const pmInterpolatePipeline = device.createComputePipeline({
-    layout: device.createPipelineLayout({ bindGroupLayouts: [pmInterpolateBGL] }),
-    compute: { module: pmInterpolateModule, entryPoint: 'main' }
-  });
-
-  // Blend shell uniform: transitions pure-inner → pure-outer over [start, end].
-  // start = PM_DOMAIN_HALF - 2, end = PM_DOMAIN_HALF so the full blend happens
-  // in the last 2-unit-thick shell of the inner grid — the region where
-  // periodic-wrap artifacts live until A5's Dirichlet BC lands.
-  const pmBlendBuffer = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-  {
-    const ab = new ArrayBuffer(16);
-    new Float32Array(ab, 0, 2).set([PM_DOMAIN_HALF - 2.0, PM_DOMAIN_HALF]);
-    device.queue.writeBuffer(pmBlendBuffer, 0, ab);
-  }
-
-  // Per-ping-pong interpolate bind groups are created AFTER the outer-grid
-  // allocation below (pmOuterPotential / pmOuterParamsBuffer not yet in scope).
-
-
-  // Per-level uniform buffers, pre-populated at factory init. Each holds a
-  // tiny struct (16 bytes) specific to its shader:
-  //   smoothUniform[l][parity]  → { gridRes, parity, hSquared, fourPiG }
-  //   residualUniform[l]        → { gridRes, _pad, hSquared, fourPiG }
-  //   restrictUniform[l]        → { coarseGridRes, _pad×3 }   (for transition l → l+1)
-  //   prolongUniform[l]         → { fineGridRes, dirichletBoundary, _pad×2 }  (for l+1 → l)
-  //
-  // [LAW:one-source-of-truth] The inner grid runs Dirichlet BC (flag = 1) at
-  // every level — BC values at level 0 come from pm.boundary_sample; coarser
-  // levels hold zero on faces because they store corrections (cleared at
-  // V-cycle start). The outer grid keeps periodic (flag = 0), unchanged.
-  const PM_INNER_DIRICHLET = 1;
-  const PM_FOUR_PI_G = 4 * Math.PI * (state.physics.G ?? 0.3) * 0.001;
-  const pmSmoothUniform: GPUBuffer[][] = [];
-  const pmResidualUniform: GPUBuffer[] = [];
-  const pmRestrictUniform: GPUBuffer[] = [];   // index l → transition l → l+1
-  const pmProlongUniform: GPUBuffer[] = [];    // index l → transition l+1 → l
-  for (let l = 0; l < PM_MULTIGRID_LEVELS; l++) {
-    const sizeL = PM_GRID_RES >> l;
-    const hL = PM_DOMAIN_SIZE / sizeL;
-    const hSqL = hL * hL;
-    pmSmoothUniform.push([0, 1].map(parity => {
-      const buf = device.createBuffer({ size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-      const ab = new ArrayBuffer(32);
-      new Uint32Array(ab, 0, 2).set([sizeL, parity]);
-      new Float32Array(ab, 8, 2).set([hSqL, PM_FOUR_PI_G]);
-      new Uint32Array(ab, 16, 1).set([PM_INNER_DIRICHLET]);
-      device.queue.writeBuffer(buf, 0, ab);
-      return buf;
-    }));
-    {
-      const buf = device.createBuffer({ size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-      const ab = new ArrayBuffer(32);
-      new Uint32Array(ab, 0, 2).set([sizeL, 0]);
-      new Float32Array(ab, 8, 2).set([hSqL, PM_FOUR_PI_G]);
-      new Uint32Array(ab, 16, 1).set([PM_INNER_DIRICHLET]);
-      device.queue.writeBuffer(buf, 0, ab);
-      pmResidualUniform.push(buf);
-    }
-    if (l + 1 < PM_MULTIGRID_LEVELS) {
-      const coarseSize = PM_GRID_RES >> (l + 1);
-      {
-        const buf = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-        const ab = new ArrayBuffer(16);
-        new Uint32Array(ab, 0, 1).set([coarseSize]);
-        device.queue.writeBuffer(buf, 0, ab);
-        pmRestrictUniform.push(buf);
-      }
-      {
-        const buf = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-        const ab = new ArrayBuffer(16);
-        new Uint32Array(ab, 0, 2).set([sizeL, PM_INNER_DIRICHLET]);  // fineGridRes, dirichletBoundary
-        device.queue.writeBuffer(buf, 0, ab);
-        pmProlongUniform.push(buf);
-      }
-    }
-  }
-
-  // Per-level bind groups.
-  const pmSmoothBG: GPUBindGroup[][] = [];
-  const pmResidualBG: GPUBindGroup[] = [];
-  const pmRestrictBG: GPUBindGroup[] = [];   // transition l → l+1
-  const pmProlongBG: GPUBindGroup[] = [];    // transition l+1 → l
-  for (let l = 0; l < PM_MULTIGRID_LEVELS; l++) {
-    pmSmoothBG.push([0, 1].map(parity => device.createBindGroup({
-      layout: pmSmoothBGL, entries: [
-        { binding: 0, resource: { buffer: pmPotential[l] } },
-        { binding: 1, resource: { buffer: pmRho[l] } },
-        { binding: 2, resource: { buffer: pmSmoothUniform[l][parity] } },
-      ]
-    })));
-    pmResidualBG.push(device.createBindGroup({
-      layout: pmResidualBGL, entries: [
-        { binding: 0, resource: { buffer: pmPotential[l] } },
-        { binding: 1, resource: { buffer: pmRho[l] } },
-        { binding: 2, resource: { buffer: pmResidual[l] } },
-        { binding: 3, resource: { buffer: pmResidualUniform[l] } },
-      ]
-    }));
-    if (l + 1 < PM_MULTIGRID_LEVELS) {
-      pmRestrictBG.push(device.createBindGroup({
-        layout: pmRestrictBGL, entries: [
-          { binding: 0, resource: { buffer: pmResidual[l] } },
-          { binding: 1, resource: { buffer: pmRho[l + 1] } },
-          { binding: 2, resource: { buffer: pmRestrictUniform[l] } },
-        ]
-      }));
-      pmProlongBG.push(device.createBindGroup({
-        layout: pmProlongBGL, entries: [
-          { binding: 0, resource: { buffer: pmPotential[l + 1] } },
-          { binding: 1, resource: { buffer: pmPotential[l] } },
-          { binding: 2, resource: { buffer: pmProlongUniform[l] } },
-        ]
-      }));
-    }
-  }
-
-  // Workgroup counts per level (each shader uses @workgroup_size(4,4,4)).
-  const pmWgCount: number[] = [];
-  for (let l = 0; l < PM_MULTIGRID_LEVELS; l++) {
-    pmWgCount.push(Math.max(1, (PM_GRID_RES >> l) / 4));
-  }
-
-  // ── OUTER PM GRID (nested zoom-in scheme — fully live) ───────────────────
-  // Second grid at 1/2 linear resolution covering the full periodic domain.
-  // Together with the inner grid (above), delivers sharp central gravity +
-  // cheap long-range coupling. Pipelines are reused from the inner grid —
-  // only buffers, uniforms, and bind groups are outer-specific.
-  //
-  // Live per-frame role:
-  //   1. Receives CIC deposit from every particle in the scene (filterOutOfDomain=0).
-  //   2. Runs its own full V-cycle → fully-solved pmOuterPotential[0].
-  //   3. pm.boundary_sample reads outerPhi and writes values into the inner
-  //      grid's level-0 face cells (the inner grid's Dirichlet BC).
-  //   4. pm.interpolate_nested reads outerPhi and smoothstep-blends it into
-  //      the per-particle PM force outside the inner ±14 shell.
-  // See CLAUDE.md "PM Solver (nested grids, full V-cycle per frame)" for
-  // the top-level architecture summary.
-  const PM_OUTER_GRID_RES = 64;
-  const PM_OUTER_DOMAIN_HALF = 64.0;
-  const PM_OUTER_DOMAIN_SIZE = PM_OUTER_DOMAIN_HALF * 2;  // 128
-  const PM_OUTER_CELL_SIZE = PM_OUTER_DOMAIN_SIZE / PM_OUTER_GRID_RES;  // 2.0
-  const PM_OUTER_LEVELS = 5;  // 64³, 32³, 16³, 8³, 4³
-
-  const pmOuterLevel0Cells = PM_OUTER_GRID_RES * PM_OUTER_GRID_RES * PM_OUTER_GRID_RES;
-  const pmOuterDensityU32 = device.createBuffer({ size: pmOuterLevel0Cells * 4, usage: PM_BUF_USAGE });
-  const pmOuterDensityF32 = device.createBuffer({ size: pmOuterLevel0Cells * 4, usage: PM_BUF_USAGE });
-  const pmOuterPotential: GPUBuffer[] = [];
-  const pmOuterResidual: GPUBuffer[] = [];
-  for (let l = 0; l < PM_OUTER_LEVELS; l++) {
-    const sizeL = PM_OUTER_GRID_RES >> l;
-    const bytesL = sizeL * sizeL * sizeL * 4;
-    pmOuterPotential.push(device.createBuffer({ size: bytesL, usage: PM_BUF_USAGE }));
-    pmOuterResidual.push(device.createBuffer({ size: bytesL, usage: PM_BUF_USAGE }));
-  }
-  const pmOuterRho: GPUBuffer[] = [pmOuterDensityF32];
-  for (let l = 1; l < PM_OUTER_LEVELS; l++) {
-    const sizeL = PM_OUTER_GRID_RES >> l;
-    pmOuterRho.push(device.createBuffer({ size: sizeL * sizeL * sizeL * 4, usage: PM_BUF_USAGE }));
-  }
-  const pmOuterMeanScratch = device.createBuffer({ size: 16, usage: PM_BUF_USAGE });
-
-  // Outer deposit/convert/interpolate params (same 32-byte struct as inner).
-  const pmOuterParamsBuffer = device.createBuffer({ size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-  const pmOuterParamsData = new ArrayBuffer(32);
-  const pmOuterParamsF32 = new Float32Array(pmOuterParamsData);
-  const pmOuterParamsU32 = new Uint32Array(pmOuterParamsData);
-  pmOuterParamsU32[1] = count;
-  pmOuterParamsU32[2] = PM_OUTER_GRID_RES;
-  pmOuterParamsF32[3] = PM_OUTER_DOMAIN_HALF;
-  pmOuterParamsF32[4] = PM_OUTER_CELL_SIZE;
-  pmOuterParamsF32[5] = PM_FIXED_POINT_SCALE;
-  pmOuterParamsU32[6] = pmOuterLevel0Cells;
-  pmOuterParamsU32[7] = 0;  // filterOutOfDomain = 0 (outer is the full 3-torus; wrapIdx handles near-boundary posHalf)
-
-
-  // Per-level uniform buffers for the outer multigrid (matches inner pattern).
-  const pmOuterSmoothUniform: GPUBuffer[][] = [];
-  const pmOuterResidualUniform: GPUBuffer[] = [];
-  const pmOuterRestrictUniform: GPUBuffer[] = [];
-  const pmOuterProlongUniform: GPUBuffer[] = [];
-  // Outer grid keeps periodic BC (flag = 0). Shares shader modules/pipelines
-  // with the inner grid, but its uniforms pin dirichletBoundary to 0 so the
-  // smoother/residual/prolong behave exactly as before this BC wiring landed.
-  const PM_OUTER_DIRICHLET = 0;
-  for (let l = 0; l < PM_OUTER_LEVELS; l++) {
-    const sizeL = PM_OUTER_GRID_RES >> l;
-    const hL = PM_OUTER_DOMAIN_SIZE / sizeL;
-    const hSqL = hL * hL;
-    pmOuterSmoothUniform.push([0, 1].map(parity => {
-      const buf = device.createBuffer({ size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-      const ab = new ArrayBuffer(32);
-      new Uint32Array(ab, 0, 2).set([sizeL, parity]);
-      new Float32Array(ab, 8, 2).set([hSqL, PM_FOUR_PI_G]);
-      new Uint32Array(ab, 16, 1).set([PM_OUTER_DIRICHLET]);
-      device.queue.writeBuffer(buf, 0, ab);
-      return buf;
-    }));
-    {
-      const buf = device.createBuffer({ size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-      const ab = new ArrayBuffer(32);
-      new Uint32Array(ab, 0, 2).set([sizeL, 0]);
-      new Float32Array(ab, 8, 2).set([hSqL, PM_FOUR_PI_G]);
-      new Uint32Array(ab, 16, 1).set([PM_OUTER_DIRICHLET]);
-      device.queue.writeBuffer(buf, 0, ab);
-      pmOuterResidualUniform.push(buf);
-    }
-    if (l + 1 < PM_OUTER_LEVELS) {
-      const coarseSize = PM_OUTER_GRID_RES >> (l + 1);
-      {
-        const buf = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-        const ab = new ArrayBuffer(16);
-        new Uint32Array(ab, 0, 1).set([coarseSize]);
-        device.queue.writeBuffer(buf, 0, ab);
-        pmOuterRestrictUniform.push(buf);
-      }
-      {
-        const buf = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-        const ab = new ArrayBuffer(16);
-        new Uint32Array(ab, 0, 2).set([sizeL, PM_OUTER_DIRICHLET]);
-        device.queue.writeBuffer(buf, 0, ab);
-        pmOuterProlongUniform.push(buf);
-      }
-    }
-  }
-
-  // Outer-grid bind groups (reuse existing BGLs from the inner pipelines).
-  const pmOuterDepositBG = [bufferA, bufferB].map(buf => device.createBindGroup({
-    layout: pmDepositBGL, entries: [
-      { binding: 0, resource: { buffer: buf } },
-      { binding: 1, resource: { buffer: pmOuterDensityU32 } },
-      { binding: 2, resource: { buffer: pmOuterParamsBuffer } },
-    ]
-  }));
-  const pmOuterConvertBG = device.createBindGroup({
-    layout: pmConvertBGL, entries: [
-      { binding: 0, resource: { buffer: pmOuterDensityU32 } },
-      { binding: 1, resource: { buffer: pmOuterDensityF32 } },
-      { binding: 2, resource: { buffer: pmOuterMeanScratch } },
-      { binding: 3, resource: { buffer: pmOuterParamsBuffer } },
-    ]
-  });
-  const pmOuterSmoothBG: GPUBindGroup[][] = [];
-  const pmOuterResidualBG: GPUBindGroup[] = [];
-  const pmOuterRestrictBG: GPUBindGroup[] = [];
-  const pmOuterProlongBG: GPUBindGroup[] = [];
-  for (let l = 0; l < PM_OUTER_LEVELS; l++) {
-    pmOuterSmoothBG.push([0, 1].map(parity => device.createBindGroup({
-      layout: pmSmoothBGL, entries: [
-        { binding: 0, resource: { buffer: pmOuterPotential[l] } },
-        { binding: 1, resource: { buffer: pmOuterRho[l] } },
-        { binding: 2, resource: { buffer: pmOuterSmoothUniform[l][parity] } },
-      ]
-    })));
-    pmOuterResidualBG.push(device.createBindGroup({
-      layout: pmResidualBGL, entries: [
-        { binding: 0, resource: { buffer: pmOuterPotential[l] } },
-        { binding: 1, resource: { buffer: pmOuterRho[l] } },
-        { binding: 2, resource: { buffer: pmOuterResidual[l] } },
-        { binding: 3, resource: { buffer: pmOuterResidualUniform[l] } },
-      ]
-    }));
-    if (l + 1 < PM_OUTER_LEVELS) {
-      pmOuterRestrictBG.push(device.createBindGroup({
-        layout: pmRestrictBGL, entries: [
-          { binding: 0, resource: { buffer: pmOuterResidual[l] } },
-          { binding: 1, resource: { buffer: pmOuterRho[l + 1] } },
-          { binding: 2, resource: { buffer: pmOuterRestrictUniform[l] } },
-        ]
-      }));
-      pmOuterProlongBG.push(device.createBindGroup({
-        layout: pmProlongBGL, entries: [
-          { binding: 0, resource: { buffer: pmOuterPotential[l + 1] } },
-          { binding: 1, resource: { buffer: pmOuterPotential[l] } },
-          { binding: 2, resource: { buffer: pmOuterProlongUniform[l] } },
-        ]
-      }));
-    }
-  }
-
-  const pmOuterWgCount: number[] = [];
-  for (let l = 0; l < PM_OUTER_LEVELS; l++) {
-    pmOuterWgCount.push(Math.max(1, (PM_OUTER_GRID_RES >> l) / 4));
-  }
-
-  // Dev-only staging for __pmDumpOuter diagnostics (matches inner pattern).
-  const pmOuterDensityStaging = device.createBuffer({
-    size: pmOuterLevel0Cells * 4,
-    usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
-  });
-  let pmOuterDiagPending = false;
-
-  // ── Boundary-sample pass: outer φ → inner φ face cells ────────────────────
-  // [LAW:single-enforcer] Sole bridge between the two grids during the inner
-  // solve. Runs AFTER the outer V-cycle (so outerPhi[0] is fully solved) and
-  // BEFORE the inner V-cycle (so the smoother sees valid BC on face cells).
-  // [LAW:one-source-of-truth] The uniform is written once at init — inner
-  // and outer grid geometry are immutable after createPhysicsSimulation ends.
-  const pmBoundarySampleModule = createShaderModuleChecked('pm.boundary_sample', SHADER_PM_BOUNDARY_SAMPLE);
-  const pmBoundarySampleBGL = device.createBindGroupLayout({
-    entries: [
-      { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } }, // outerPhi
-      { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },           // innerPhi (rw)
-      { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
-    ]
-  });
-  const pmBoundarySamplePipeline = device.createComputePipeline({
-    layout: device.createPipelineLayout({ bindGroupLayouts: [pmBoundarySampleBGL] }),
-    compute: { module: pmBoundarySampleModule, entryPoint: 'main' }
-  });
-  const pmBoundarySampleParams = device.createBuffer({ size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-  {
-    const ab = new ArrayBuffer(32);
-    const bsU32 = new Uint32Array(ab);
-    const bsF32 = new Float32Array(ab);
-    bsU32[0] = PM_GRID_RES;
-    bsF32[2] = PM_DOMAIN_HALF;
-    bsF32[3] = PM_CELL_SIZE;
-    bsU32[4] = PM_OUTER_GRID_RES;
-    bsF32[6] = PM_OUTER_DOMAIN_HALF;
-    bsF32[7] = PM_OUTER_CELL_SIZE;
-    device.queue.writeBuffer(pmBoundarySampleParams, 0, ab);
-  }
-  const pmBoundarySampleBG = device.createBindGroup({
-    layout: pmBoundarySampleBGL,
-    entries: [
-      { binding: 0, resource: { buffer: pmOuterPotential[0] } },
-      { binding: 1, resource: { buffer: pmPotential[0] } },
-      { binding: 2, resource: { buffer: pmBoundarySampleParams } },
-    ]
-  });
-  const pmBoundarySampleWg = pmWgCount[0];  // same as finest inner level
-
-  // Deferred interpolate bind groups — all dependencies now in scope.
-  // Per-ping-pong: binds whichever body buffer is the current frame's input,
-  // both grids' level-0 potentials, both param buffers, and the blend shell.
-  const pmInterpolateBG = [
-    device.createBindGroup({ layout: pmInterpolateBGL, entries: [
-      { binding: 0, resource: { buffer: bufferA } },
-      { binding: 1, resource: { buffer: pmPotential[0] } },
-      { binding: 2, resource: { buffer: pmOuterPotential[0] } },
-      { binding: 3, resource: { buffer: pmForce } },
-      { binding: 4, resource: { buffer: pmParamsBuffer } },
-      { binding: 5, resource: { buffer: pmOuterParamsBuffer } },
-      { binding: 6, resource: { buffer: pmBlendBuffer } },
-    ]}),
-    device.createBindGroup({ layout: pmInterpolateBGL, entries: [
-      { binding: 0, resource: { buffer: bufferB } },
-      { binding: 1, resource: { buffer: pmPotential[0] } },
-      { binding: 2, resource: { buffer: pmOuterPotential[0] } },
-      { binding: 3, resource: { buffer: pmForce } },
-      { binding: 4, resource: { buffer: pmParamsBuffer } },
-      { binding: 5, resource: { buffer: pmOuterParamsBuffer } },
-      { binding: 6, resource: { buffer: pmBlendBuffer } },
-    ]}),
-  ];
-
-  // [LAW:locality-or-seam] Gas reservoir owns its buffers/shaders in
-  // gasReservoir.ts; main.ts only dispatches it at the existing PM seams.
-  const gas = createGasReservoir({
-    device,
-    createShaderModuleChecked,
-    renderTargetFormat,
-    renderSampleCount,
+  const particleMesh = createPhysicsParticleMesh({
+    bodyBuffers: [bufferA, bufferB],
     cameraBuffer,
-    cameraStride: CAMERA_STRIDE,
     cameraSize: CAMERA_SIZE,
-    starCount: count,
-    starBuffers: [bufferA, bufferB],
-    totalStarMass,
+    cameraStride: CAMERA_STRIDE,
+    count,
+    createShaderModuleChecked,
+    device,
     gasMassFraction,
-    pmBufUsage: PM_BUF_USAGE,
-    fixedPointScale: PM_FIXED_POINT_SCALE,
-    pmDepositBGL,
-    pmDepositPipeline,
-    pmInterpolateBGL,
-    pmInterpolatePipeline,
-    innerDensityU32: pmDensityU32,
-    innerPotential: pmPotential[0],
-    innerParams: { gridRes: PM_GRID_RES, domainHalf: PM_DOMAIN_HALF, cellSize: PM_CELL_SIZE, cellCount: pmLevel0Cells, filterOutOfDomain: 1 },
-    outerDensityU32: pmOuterDensityU32,
-    outerPotential: pmOuterPotential[0],
-    outerParams: { gridRes: PM_OUTER_GRID_RES, domainHalf: PM_OUTER_DOMAIN_HALF, cellSize: PM_OUTER_CELL_SIZE, cellCount: pmOuterLevel0Cells, filterOutOfDomain: 0 },
-    pmBlendBuffer,
+    gravityScale: (state.physics.G ?? 0.3) * 0.001,
+    innerGrid: {
+      cellSize: PM_CELL_SIZE,
+      domainHalf: PM_DOMAIN_HALF,
+      filterOutOfDomain: 1,
+      fixedPointScale: PM_FIXED_POINT_SCALE,
+      gridRes: PM_GRID_RES,
+      levels: PM_MULTIGRID_LEVELS,
+    },
+    renderSampleCount,
+    renderTargetFormat,
+    totalStarMass,
   });
+  const {
+    boundarySampleBG: pmBoundarySampleBG,
+    boundarySamplePipeline: pmBoundarySamplePipeline,
+    boundarySampleWg: pmBoundarySampleWg,
+    gas,
+    inner: {
+      densityF32: pmDensityF32,
+      densityStaging: pmDensityStaging,
+      densityU32: pmDensityU32,
+      getDiagPending: getPmDiagPending,
+      level0Cells: pmLevel0Cells,
+      levels: pmLevels,
+      meanScratch: pmMeanScratch,
+      potential: pmPotential,
+      prolongBG: pmProlongBG,
+      residual: pmResidual,
+      residualBG: pmResidualBG,
+      restrictBG: pmRestrictBG,
+      setDiagPending: setPmDiagPending,
+      smoothBG: pmSmoothBG,
+      wgCount: pmWgCount,
+    },
+    outer: {
+      densityF32: pmOuterDensityF32,
+      densityStaging: pmOuterDensityStaging,
+      getDiagPending: getPmOuterDiagPending,
+      level0Cells: pmOuterLevel0Cells,
+      levels: pmOuterLevels,
+      potential: pmOuterPotential,
+      prolongBG: pmOuterProlongBG,
+      residual: pmOuterResidual,
+      residualBG: pmOuterResidualBG,
+      restrictBG: pmOuterRestrictBG,
+      setDiagPending: setPmOuterDiagPending,
+      smoothBG: pmOuterSmoothBG,
+      wgCount: pmOuterWgCount,
+    },
+    prolongPipeline: pmProlongPipeline,
+    residualPipeline: pmResidualPipeline,
+    restrictPipeline: pmRestrictPipeline,
+    smoothPipeline: pmSmoothPipeline,
+  } = particleMesh;
+  const pmForce = particleMesh.inner.force!;
 
   const computeModule = createShaderModuleChecked('nbody.compute', shaderSource('nbody.compute'));
   const renderModule = createShaderModuleChecked('nbody.render', shaderSource('nbody.render'));
@@ -2166,8 +1663,8 @@ function createPhysicsSimulation() {
     gas,
     getLastStats: () => lastStats,
     getPingPong: () => pingPong,
-    getPmDiagPending: () => pmDiagPending,
-    getPmOuterDiagPending: () => pmOuterDiagPending,
+    getPmDiagPending,
+    getPmOuterDiagPending,
     getTimeDirection: () => timeDirection,
     orbitalBitangent,
     orbitalTangent,
@@ -2181,8 +1678,8 @@ function createPhysicsSimulation() {
     pmOuterResidual: pmOuterResidual[0],
     pmPotential: pmPotential[0],
     pmResidual: pmResidual[0],
-    setPmDiagPending: (value) => { pmDiagPending = value; },
-    setPmOuterDiagPending: (value) => { pmOuterDiagPending = value; },
+    setPmDiagPending,
+    setPmOuterDiagPending,
     setPaused: (value) => { state.paused = value; },
     setTimeDirection: (dir) => { timeDirection = dir; },
     state,
@@ -2285,48 +1782,8 @@ function createPhysicsSimulation() {
       // this ticket. Once .5 lands, PM force adds alongside tile-pair gravity.
       // [LAW:dataflow-not-control-flow] Runs every frame; same code path whether
       // or not the density is consumed downstream.
-      pmParamsF32[0] = dt;  // only field that varies per-frame
-      device.queue.writeBuffer(pmParamsBuffer, 0, pmParamsData);
-      pmOuterParamsF32[0] = dt;
-      device.queue.writeBuffer(pmOuterParamsBuffer, 0, pmOuterParamsData);
-      gas.prepareFrame(dt, p.gasSoundSpeed ?? 2.0);
-
-      encoder.clearBuffer(pmDensityU32);
-      encoder.clearBuffer(pmMeanScratch);
-      encoder.clearBuffer(pmOuterDensityU32);
-      encoder.clearBuffer(pmOuterMeanScratch);
-      gas.clear(encoder);
-      const pmTsw = tsWrites('pmDepositConvert');
-      const pmPass = encoder.beginComputePass(pmTsw ? { timestampWrites: pmTsw } : undefined);
-      // Inner grid: CIC deposit → mean reduce → mean-subtract convert.
-      pmPass.setPipeline(pmDepositPipeline);
-      pmPass.setBindGroup(0, pmDepositBG[pingPong]);
-      pmPass.dispatchWorkgroups(Math.ceil(count / 256));
-      gas.depositInnerPm(pmPass, pingPong);
-      pmPass.setPipeline(pmReducePipeline);
-      pmPass.setBindGroup(0, pmConvertBG);
-      pmPass.dispatchWorkgroups(Math.ceil(pmLevel0Cells / 256));
-      pmPass.setPipeline(pmConvertPipeline);
-      pmPass.dispatchWorkgroups(Math.ceil(pmLevel0Cells / 256));
-      // Outer grid: same pipeline instances, separate bind groups + params.
-      // [LAW:one-source-of-truth] Every particle contributes mass to both grids
-      // IF it is inside the grid's domain. Deposit's domain filter (in
-      // pm.deposit.wgsl) makes the inner grid see only particles within ±16;
-      // the outer grid (domainHalf = periodic-wrap radius) sees all of them.
-      // The nested interpolate shader reads the same particles back against
-      // whichever grid's force contribution its blend weight selects — so
-      // mass-source and force-target are consistent per grid.
-      pmPass.setPipeline(pmDepositPipeline);
-      pmPass.setBindGroup(0, pmOuterDepositBG[pingPong]);
-      pmPass.dispatchWorkgroups(Math.ceil(count / 256));
-      gas.depositOuterPm(pmPass, pingPong);
-      pmPass.setPipeline(pmReducePipeline);
-      pmPass.setBindGroup(0, pmOuterConvertBG);
-      pmPass.dispatchWorkgroups(Math.ceil(pmOuterLevel0Cells / 256));
-      pmPass.setPipeline(pmConvertPipeline);
-      pmPass.dispatchWorkgroups(Math.ceil(pmOuterLevel0Cells / 256));
-      gas.depositGasAndBuildPressure(pmPass, pingPong);
-      pmPass.end();
+      particleMesh.prepareFrame(dt, p.gasSoundSpeed ?? 2.0);
+      particleMesh.depositAndConvert(encoder, pingPong, tsWrites('pmDepositConvert'));
 
       // ── Multigrid V-cycle Poisson solver (full cycle per frame) ──────────
       // Input:  pmRho[0] = pmDensityF32 (mean-zero RHS at level 0)
@@ -2355,7 +1812,7 @@ function createPhysicsSimulation() {
 
       // Outer first — its fully-solved φ becomes the inner grid's Dirichlet BC.
       runPmVCycle(encoder, {
-        levels: PM_OUTER_LEVELS,
+        levels: pmOuterLevels,
         pipelines: {
           prolong: pmProlongPipeline,
           residual: pmResidualPipeline,
@@ -2388,7 +1845,7 @@ function createPhysicsSimulation() {
 
       // Inner V-cycle — reads face cells as Dirichlet BC (flag = 1 in uniforms).
       runPmVCycle(encoder, {
-        levels: PM_MULTIGRID_LEVELS,
+        levels: pmLevels,
         pipelines: {
           prolong: pmProlongPipeline,
           residual: pmResidualPipeline,
@@ -2411,17 +1868,13 @@ function createPhysicsSimulation() {
       // Sample the freshly-solved pmPotential[0] at each particle via the CIC
       // transpose kernel; write vec4 force to pmForce. Dispatched AFTER the
       // V-cycle (reads phi) and BEFORE the main n-body compute (reads pmForce).
-      const iTsw = tsWrites('starInterpolate');
-      const iPass = encoder.beginComputePass(iTsw ? { timestampWrites: iTsw } : undefined);
-      iPass.setPipeline(pmInterpolatePipeline);
-      iPass.setBindGroup(0, pmInterpolateBG[pingPong]);
-      iPass.dispatchWorkgroups(Math.ceil(count / 256));
-      iPass.end();
-
-      const gTsw = tsWrites('gasInterpolatePressure');
-      const gPass = encoder.beginComputePass(gTsw ? { timestampWrites: gTsw } : undefined);
-      gas.interpolateForces(gPass, pingPong);
-      gPass.end();
+      particleMesh.interpolateForces(
+        encoder,
+        count,
+        pingPong,
+        tsWrites('starInterpolate'),
+        tsWrites('gasInterpolatePressure'),
+      );
 
       const cTsw = tsWrites('starGasIntegrate');
       const pass = encoder.beginComputePass(cTsw ? { timestampWrites: cTsw } : undefined);
@@ -2536,38 +1989,11 @@ function createPhysicsSimulation() {
 
     destroy() {
       bufferA.destroy(); bufferB.destroy();
-      gas.destroy();
       paramsBuffer.destroy(); cameraBuffer.destroy(); blurBuffer.destroy();
       physicsRenderOverlays.destroy();
       statsOutBuffer.destroy(); statsStaging.destroy(); statsParamsBuffer.destroy();
       diagStaging.destroy();
-      // PM scaffolding cleanup. Every buffer allocated in the PM block above
-      // is released here. [LAW:single-enforcer] No other destroy site exists.
-      pmDensityU32.destroy(); pmDensityF32.destroy();
-      for (const b of pmPotential) b.destroy();
-      for (const b of pmResidual) b.destroy();
-      pmForce.destroy();
-      pmMeanScratch.destroy();
-      pmParamsBuffer.destroy(); pmDensityStaging.destroy();
-      // V-cycle: coarse-level RHS buffers (pmRho[0] aliases pmDensityF32, skip).
-      for (let l = 1; l < pmRho.length; l++) pmRho[l].destroy();
-      // V-cycle: per-level uniforms.
-      for (const pair of pmSmoothUniform) for (const b of pair) b.destroy();
-      for (const b of pmResidualUniform) b.destroy();
-      for (const b of pmRestrictUniform) b.destroy();
-      for (const b of pmProlongUniform) b.destroy();
-      // Outer grid (same resource bundle — mirrors the inner cleanup above).
-      pmOuterDensityU32.destroy(); pmOuterDensityF32.destroy();
-      for (const b of pmOuterPotential) b.destroy();
-      for (const b of pmOuterResidual) b.destroy();
-      pmOuterMeanScratch.destroy();
-      pmOuterParamsBuffer.destroy(); pmOuterDensityStaging.destroy();
-      for (let l = 1; l < pmOuterRho.length; l++) pmOuterRho[l].destroy();
-      for (const pair of pmOuterSmoothUniform) for (const b of pair) b.destroy();
-      for (const b of pmOuterResidualUniform) b.destroy();
-      for (const b of pmOuterRestrictUniform) b.destroy();
-      for (const b of pmOuterProlongUniform) b.destroy();
-      pmBlendBuffer.destroy();
+      particleMesh.destroy();
       destroyDepthRef(depthRef);
     },
     // PM internal state — not read by external callers today. Future tickets
