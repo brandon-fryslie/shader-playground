@@ -26,11 +26,12 @@ import { isPhysicsSimulation, type PhysicsSimulation } from '../simulations/type
 import { createReactionSimulation as createReactionSimulationModule } from '../simulations/reaction';
 import { createSimulationRegistry, type SimulationRegistry } from '../simulations/registry';
 import { getShaderSources as getCatalogShaderSources, applyShaderEdit as applyCatalogShaderEdit, resetShaderEdit as resetCatalogShaderEdit } from '../gpu/shaders';
-import { createGpuTimingService, GPU_TIMING_BUCKETS, type GpuTimingBucket, type TimestampWrites } from '../gpu/timestamps';
+import { createGpuTimingService, type GpuTimingBucket, type TimestampWrites } from '../gpu/timestamps';
 import { installDevtools } from '../diagnostics/devtools';
 import { createDiagnosticsLogger } from '../diagnostics/logging';
 import { cross3, dot3, normalize3, sub3 } from '../math/vec3';
 import { createCameraSystem, type CameraSystem } from '../render/camera';
+import { createFrameStatsService } from '../render/frame-stats';
 import { createGridRenderer, type GridRenderer } from '../render/grid';
 import { createPostFxService, type PostFxService } from '../render/post-fx';
 
@@ -3719,17 +3720,9 @@ function xrFrame(time: DOMHighResTimeStamp, xrFrameData: XRFrame) {
   if (isEarlyFrame) logInfo('xr:frame', `xrFrame #${xrFrameCount} entered`, { mode: state.mode });
   // [LAW:single-enforcer] Same prune + marker tick as the desktop loop — XR must see the same visual state.
   pruneAttractors(currentSimStep());
-  const xrFrameDeltaMs = lastFrameTimestamp >= 0 ? time - lastFrameTimestamp : 16.7;
-  lastFrameTimestamp = time;
+  const { frameDeltaMs: xrFrameDeltaMs, fpsUpdated: xrFpsUpdated } = frameStats.tick(time);
   tickMarkers(Math.min(0.05, xrFrameDeltaMs * 0.001) * state.fx.timeScale * currentTimeDirection());
-
-  // FPS counter for XR — same logic as desktop frame loop
-  frameCount++;
-  if (time - fpsTime >= 1000) {
-    currentFps = frameCount;
-    frameCount = 0;
-    fpsTime = time;
-  }
+  if (xrFpsUpdated) updateStats();
 
   // Scope GPU validation errors to this frame so we can attribute them to the
   // XR render path specifically (otherwise uncapturederror reports them without
@@ -3883,12 +3876,7 @@ function xrFrame(time: DOMHighResTimeStamp, xrFrameData: XRFrame) {
 // SECTION 9: RENDER LOOP & ENTRY POINT
 // ═══════════════════════════════════════════════════════════════════════════════
 
-let frameCount = 0;
-let fpsTime = 0;
-let currentFps = 0;
-// Last rAF timestamp — drives the adaptive-chunk feedback in debug skip. Seeded to -1 so the first
-// frame's delta isn't a garbage huge number that would shrink the chunk unnecessarily.
-let lastFrameTimestamp = -1;
+const frameStats = createFrameStatsService();
 
 function tsWrites(bucket: GpuTimingBucket): TimestampWrites | undefined {
   return gpuTiming.tsWrites(bucket);
@@ -3925,31 +3913,17 @@ function resetCurrentSim() {
 }
 
 function updateStats() {
-  const msPerFrame = currentFps > 0 ? (1000 / currentFps).toFixed(1) : '--';
   const { gpuFrameMs, gpuTimingDetail } = gpuTiming.getStats();
-  const d = gpuTimingDetail;
-  const hasDetailedTiming = GPU_TIMING_BUCKETS.some(bucket => d[bucket] > 0);
-  const gpuDetail = hasDetailedTiming
-    ? ` (PM:${d.pmDepositConvert.toFixed(1)} V:${(d.outerVCycle + d.innerVCycle).toFixed(1)} R:${(d.starsRender + d.gasRender).toFixed(1)} P:${d.bloomComposite.toFixed(1)})`
-    : gpuFrameMs > 0 ? ` gpu:${gpuFrameMs.toFixed(1)}ms` : '';
-  document.getElementById('stat-fps')!.textContent = `${currentFps} fps ${msPerFrame}ms${gpuDetail}`;
   const sim = simulations[state.mode];
-  const count = sim ? sim.getCount() : '--';
-  document.getElementById('stat-count')!.textContent =
-    (state.mode === 'fluid' || state.mode === 'reaction') ? `Grid: ${count}` : `Particles: ${count}`;
-
-  // Step counter: visible only in physics mode. Shows direction arrow.
-  const stepEl = document.getElementById('stat-step');
-  if (stepEl) {
-    if (state.mode === 'physics' && isPhysicsSimulation(sim)) {
-      const step = sim.getSimStep();
-      const dir = sim.getTimeDirection();
-      stepEl.style.display = '';
-      stepEl.textContent = `Step: ${step} ${dir < 0 ? '\u25C0' : '\u25B6'}`;
-    } else {
-      stepEl.style.display = 'none';
-    }
-  }
+  frameStats.updateHud({
+    count: sim ? sim.getCount() : '--',
+    currentFps: frameStats.getCurrentFps(),
+    gpuFrameMs,
+    gpuTimingDetail,
+    isGridMode: state.mode === 'fluid' || state.mode === 'reaction',
+    physicsDirection: state.mode === 'physics' && isPhysicsSimulation(sim) ? sim.getTimeDirection() : undefined,
+    physicsStep: state.mode === 'physics' && isPhysicsSimulation(sim) ? sim.getSimStep() : undefined,
+  });
 }
 
 function resizeCanvas() {
@@ -4003,11 +3977,10 @@ function frame(now: DOMHighResTimeStamp) {
   // When a heavy frame pushes delta over ~20ms, the adaptive chunk shrinks next frame; when we have
   // headroom (delta < 14ms), it grows. This is the only place we measure frame pacing, so the feedback
   // decision stays in one place (single-enforcer).
-  const frameDeltaMs = lastFrameTimestamp >= 0 ? now - lastFrameTimestamp : 16.7;
-  if (lastFrameTimestamp >= 0) {
+  const { frameDeltaMs, fpsUpdated, hadPreviousTimestamp } = frameStats.tick(now);
+  if (hadPreviousTimestamp) {
     updateAdaptiveChunk(frameDeltaMs);
   }
-  lastFrameTimestamp = now;
 
   refreshThemeColors(now);
   resizeCanvas();
@@ -4019,14 +3992,7 @@ function frame(now: DOMHighResTimeStamp) {
   // teleports. timeScale + timeDirection make the swarm track the simulation's sense of time.
   tickMarkers(Math.min(0.05, frameDeltaMs * 0.001) * state.fx.timeScale * currentTimeDirection());
 
-  // FPS calculation
-  frameCount++;
-  if (now - fpsTime >= 1000) {
-    currentFps = frameCount;
-    frameCount = 0;
-    fpsTime = now;
-    updateStats();
-  }
+  if (fpsUpdated) updateStats();
 
   const sim = simulations[state.mode];
   if (!sim) return;
@@ -4219,7 +4185,7 @@ export async function startAppRuntimeImpl() {
     state,
     getCurrentSimulation: () => simulations[state.mode],
     getGpuStats: () => ({
-      currentFps,
+      currentFps: frameStats.getCurrentFps(),
       ...gpuTiming.getStats(),
     }),
     bindings: bindingRegistry,
