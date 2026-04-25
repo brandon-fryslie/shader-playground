@@ -28,6 +28,7 @@ import { createSimulationRegistry, type SimulationRegistry } from '../simulation
 import { getShaderSources as getCatalogShaderSources, applyShaderEdit as applyCatalogShaderEdit, resetShaderEdit as resetCatalogShaderEdit } from '../gpu/shaders';
 import { installDevtools } from '../diagnostics/devtools';
 import { createDiagnosticsLogger } from '../diagnostics/logging';
+import { createGridRenderer, type GridRenderer } from '../render/grid';
 
 // WGSL shader imports — Vite loads these as raw strings
 import SHADER_BOIDS_COMPUTE from '../shaders/boids.compute.wgsl?raw';
@@ -46,7 +47,6 @@ import SHADER_PARAMETRIC_COMPUTE from '../shaders/parametric.compute.wgsl?raw';
 import SHADER_PARAMETRIC_RENDER from '../shaders/parametric.render.wgsl?raw';
 import SHADER_REACTION_COMPUTE from '../shaders/reaction.compute.wgsl?raw';
 import SHADER_REACTION_RENDER from '../shaders/reaction.render.wgsl?raw';
-import SHADER_GRID from '../shaders/grid.wgsl?raw';
 import SHADER_POST_FADE from '../shaders/post.fade.wgsl?raw';
 import SHADER_POST_DOWNSAMPLE from '../shaders/post.downsample.wgsl?raw';
 import SHADER_POST_UPSAMPLE from '../shaders/post.upsample.wgsl?raw';
@@ -1189,57 +1189,23 @@ function syncRenderConfig(_nextFormat: GPUTextureFormat, _nextSampleCount: numbe
 // ═══════════════════════════════════════════════════════════════════════════════
 // ═══ SHARED GRID RENDERER ═══
 
-let gridPipeline!: GPURenderPipeline;
-let gridBGs!: GPUBindGroup[];
-let gridCameraBuffer!: GPUBuffer;
-let gridTimeBuffer!: GPUBuffer;
-let gridTime = 0;
+let gridRenderer: GridRenderer | null = null;
 
 function initGrid() {
-  gridCameraBuffer?.destroy();
-  gridTimeBuffer?.destroy();
-  gridCameraBuffer = device.createBuffer({ size: CAMERA_STRIDE * 2, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-  gridTimeBuffer = device.createBuffer({ size: 4, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-  const gridModule = createShaderModuleChecked('grid', SHADER_GRID);
-
-  const gridBGL = device.createBindGroupLayout({
-    entries: [
-      { binding: 0, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
-      { binding: 1, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
-    ]
+  gridRenderer?.destroy();
+  gridRenderer = createGridRenderer({
+    cameraSize: CAMERA_SIZE,
+    cameraStride: CAMERA_STRIDE,
+    createShaderModuleChecked,
+    device,
+    getCameraUniformData,
+    renderSampleCount,
+    renderTargetFormat,
   });
-
-  gridPipeline = device.createRenderPipeline({
-    layout: device.createPipelineLayout({ bindGroupLayouts: [gridBGL] }),
-    vertex: { module: gridModule, entryPoint: 'vs_main' },
-    fragment: {
-      module: gridModule, entryPoint: 'fs_main',
-      targets: [{
-        format: renderTargetFormat,
-        blend: {
-          color: { srcFactor: 'src-alpha', dstFactor: 'one-minus-src-alpha', operation: 'add' },
-          alpha: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha', operation: 'add' },
-        }
-      }]
-    },
-    primitive: { topology: 'triangle-list' },
-    depthStencil: { format: 'depth24plus', depthWriteEnabled: true, depthCompare: 'less' },
-    multisample: { count: renderSampleCount },
-  });
-
-  gridBGs = [0, 1].map(vi => device.createBindGroup({ layout: gridBGL, entries: [
-    { binding: 0, resource: { buffer: gridCameraBuffer, offset: vi * CAMERA_STRIDE, size: CAMERA_SIZE } },
-    { binding: 1, resource: { buffer: gridTimeBuffer } },
-  ]}));
 }
 
 function renderGrid(pass: GPURenderPassEncoder, aspect: number, viewIndex = 0): void {
-  gridTime += 0.016;
-  device.queue.writeBuffer(gridCameraBuffer, viewIndex * CAMERA_STRIDE, getCameraUniformData(aspect));
-  device.queue.writeBuffer(gridTimeBuffer, 0, new Float32Array([gridTime]));
-  pass.setPipeline(gridPipeline);
-  pass.setBindGroup(0, gridBGs[viewIndex]);
-  pass.draw(30);
+  gridRenderer?.render(pass, aspect, viewIndex);
 }
 
 
