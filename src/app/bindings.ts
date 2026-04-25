@@ -1,18 +1,16 @@
 import type { AppState, ParamSection, SimMode, ThemeColors } from '../types';
 import type { BindingRegistry } from '../xr-ui/bindings';
+import type { AppActions } from './actions';
 
 type ModeParamsAccess = (mode: SimMode) => Record<string, number | string | boolean>;
 
 export interface AppBindingsDependencies {
-  applyPreset(mode: SimMode, presetName: string): void;
+  actions: AppActions;
   modeParams: ModeParamsAccess;
   modeTabLabels: Record<SimMode, string>;
   paramDefs: Record<SimMode, ParamSection[]>;
   presets: Record<SimMode, Record<string, Record<string, number | string | boolean>>>;
   registry: BindingRegistry;
-  selectMode(mode: SimMode): void;
-  selectTheme(themeName: string): void;
-  setPaused(paused: boolean): void;
   state: AppState;
   themes: Record<string, ThemeColors>;
 }
@@ -72,7 +70,7 @@ export function registerAppBindings(deps: AppBindingsDependencies): void {
         id: `preset.${mode}.${presetName}`,
         label: presetName,
         group: 'presets',
-        invoke: () => deps.applyPreset(mode, presetName),
+        invoke: () => deps.actions.applyPreset(mode, presetName),
       });
     }
   }
@@ -83,7 +81,7 @@ export function registerAppBindings(deps: AppBindingsDependencies): void {
     label: 'Mode',
     group: 'app',
     get: () => deps.state.mode,
-    set: (v) => deps.selectMode(v as SimMode),
+    set: (v) => deps.actions.selectMode(v as SimMode),
     options: (Object.keys(deps.modeTabLabels) as SimMode[])
       .map((m) => ({ value: m, label: deps.modeTabLabels[m] })),
   });
@@ -94,7 +92,7 @@ export function registerAppBindings(deps: AppBindingsDependencies): void {
     label: 'Theme',
     group: 'app',
     get: () => deps.state.colorTheme,
-    set: (v) => deps.selectTheme(v),
+    set: (v) => deps.actions.setTheme(v),
     options: Object.keys(deps.themes).map((name) => ({ value: name, label: name })),
   });
 
@@ -104,6 +102,6 @@ export function registerAppBindings(deps: AppBindingsDependencies): void {
     label: 'Pause',
     group: 'app',
     get: () => deps.state.paused,
-    set: (v) => deps.setPaused(v),
+    set: (v) => deps.actions.setPaused(v),
   });
 }

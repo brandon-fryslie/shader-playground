@@ -8,6 +8,7 @@ import {
 } from '../xr-ui/step';
 import { GAS_SHADER_SOURCES } from '../gasReservoir';
 import { DEFAULTS as catalogDefaults, PRESETS as catalogPresets, PARAM_DEFS as catalogParamDefs, COLOR_THEMES as catalogColorThemes, DEFAULT_THEME as catalogDefaultTheme, THEME_FADE_MS as catalogThemeFadeMs, DEFAULT_CLEAR_COLOR as catalogDefaultClearColor, SHAPE_IDS as catalogShapeIds, SHAPE_PARAMS as catalogShapeParams, FX_PARAM_DEFS as catalogFxParamDefs, MODE_TAB_LABELS as catalogModeTabLabels } from './catalog';
+import { createAppActions, type AppActions } from './actions';
 import { createInitialState } from './state';
 import { registerAppBindings } from './bindings';
 import { saveState as persistState, loadState as hydrateState, STORAGE_KEY as storageKey } from '../persistence/local-storage';
@@ -50,13 +51,15 @@ const { createShaderModuleChecked, logError, logInfo, showSimError } = diagnosti
 // [LAW:one-source-of-truth] AppState creation is centralized in app/state.ts so
 // boot and tests share one canonical initialization shape.
 const state: AppState = createInitialState(catalogDefaults);
+let controlsApi: ControlsApi | null = null;
+let appActions!: AppActions;
 
 const themeSystem = createThemeSystem({
   // [LAW:one-source-of-truth] Theme metadata and transition ownership live in
   // app/catalog.ts and ui/theme.ts; the runtime consumes that service.
   defaultTheme: catalogDefaultTheme,
   fadeMs: catalogThemeFadeMs,
-  onThemeSelected: () => updateAll(),
+  onThemeSelected: () => appActions.updateAll(),
   state,
   themes: catalogColorThemes,
 });
@@ -282,17 +285,14 @@ async function initWebGPU(): Promise<boolean> {
     state,
   });
   mobileInput = createMobileInput({
+    actions: appActions,
     applySimulationInteraction: (pointerId, mx, my, isMove) => pointerSystem.applySimulationInteraction(pointerId, mx, my, isMove),
-    cancelDebugMovement,
     getCanvas: () => canvas,
     modeTabLabels: catalogModeTabLabels,
     releasePointerInteraction: (pointerId) => pointerSystem.releasePointerInteraction(pointerId),
-    resetCurrentSimulation: resetCurrentSim,
-    selectMode,
     setSimulationInteractionInactive,
     state,
     storageKey,
-    syncPauseButtons,
   });
   debugPanel = createDebugPanel({
     canvas,
@@ -583,14 +583,6 @@ function buildControls() {
   getControlsApi().buildControls();
 }
 
-function applyPreset(mode: SimMode, presetName: string) {
-  getControlsApi().applyPreset(mode, presetName);
-}
-
-function selectMode(mode: SimMode): void {
-  getControlsApi().selectMode(mode);
-}
-
 function setupTabs() {
   getControlsApi().setupTabs();
 }
@@ -795,19 +787,10 @@ function updatePrompt() {
 
 let shaderPanel!: ShaderPanel;
 
-function updateAll() {
-  updatePrompt();
-  updateStats();
-  updateShaderPanel();
-  saveState();
-}
-
-let controlsApi: ControlsApi | null = null;
-
 function getControlsApi(): ControlsApi {
   if (!controlsApi) {
     controlsApi = createControls({
-      cancelDebugMovement,
+      actions: appActions,
       config: {
         fxParamDefs: catalogFxParamDefs,
         modeTabLabels: catalogModeTabLabels,
@@ -815,17 +798,13 @@ function getControlsApi(): ControlsApi {
         presets: catalogPresets,
         shapeParams: catalogShapeParams,
       },
-      ensureSimulation,
       modeParams,
-      resetCurrentSimulation: resetCurrentSim,
-      saveState,
       setXrDebugLogging,
       setupRecordButton,
       setupXRButton,
       state,
       storageKey,
       syncThemeButtons,
-      updateAll,
     });
   }
   return controlsApi;
@@ -1080,6 +1059,24 @@ function syncUIFromState() {
   getControlsApi().syncUiFromState();
 }
 
+appActions = createAppActions({
+  cancelDebugMovement,
+  ensureSimulation,
+  modeParams,
+  presets: catalogPresets,
+  reflectPaused: syncPauseButtons,
+  resetCurrentSimulationInternal: resetCurrentSim,
+  saveStateInternal: saveState,
+  // [LAW:single-enforcer] Theme selection enters the runtime through one
+  // action path so persistence, prompt updates, and theme transitions stay coupled.
+  selectTheme: (themeName) => themeSystem.selectTheme(themeName),
+  state,
+  syncUi: syncUIFromState,
+  updatePrompt,
+  updateShaderPanel,
+  updateStats,
+});
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // BINDING REGISTRATION (parallel data source for the new XR widget system)
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -1091,19 +1088,12 @@ function syncUIFromState() {
 // using closures that capture state and mode-helper functions.
 function initBindings(): void {
   registerAppBindings({
-    applyPreset,
+    actions: appActions,
     modeParams,
     modeTabLabels: catalogModeTabLabels,
     paramDefs: catalogParamDefs,
     presets: catalogPresets,
     registry: bindingRegistry,
-    selectMode,
-    selectTheme: (themeName) => themeSystem.selectTheme(themeName),
-    setPaused: (paused) => {
-      state.paused = paused;
-      if (paused) cancelDebugMovement();
-      syncPauseButtons();
-    },
     state,
     themes: catalogColorThemes,
   });
@@ -1190,7 +1180,7 @@ export async function startAppRuntimeImpl() {
   syncUIFromState();
   resizeCanvas();
   ensureSimulation();
-  updateAll();
+  appActions.updateAll();
   renderFrameRuntime.start();
   installDevtools({
     state,

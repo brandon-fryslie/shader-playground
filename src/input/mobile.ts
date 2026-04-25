@@ -7,18 +7,21 @@ export interface MobileInput {
   setupTouchControls(): void;
 }
 
+interface MobileActions {
+  resetCurrentSimulation(): void;
+  selectMode(mode: SimMode): void;
+  setPaused(paused: boolean): void;
+}
+
 interface MobileInputDeps {
+  actions: MobileActions;
   applySimulationInteraction(pointerId: number, mx: number, my: number, isMove: boolean): void;
-  cancelDebugMovement(): void;
   getCanvas(): HTMLCanvasElement;
   modeTabLabels: Record<SimMode, string>;
   releasePointerInteraction(pointerId: number): void;
-  resetCurrentSimulation(): void;
-  selectMode(mode: SimMode): void;
   setSimulationInteractionInactive(): void;
   state: AppState;
   storageKey: string;
-  syncPauseButtons(): void;
 }
 
 const MODE_ORDER: SimMode[] = ['physics', 'boids', 'physics_classic', 'fluid', 'parametric', 'reaction'];
@@ -123,19 +126,17 @@ export function createMobileInput(deps: MobileInputDeps): MobileInput {
     },
     setupFab() {
       document.getElementById('fab-pause')!.addEventListener('click', () => {
-        deps.state.paused = !deps.state.paused;
-        if (deps.state.paused) deps.cancelDebugMovement();
-        deps.syncPauseButtons();
+        deps.actions.setPaused(!deps.state.paused);
       });
 
       document.getElementById('fab-reset')!.addEventListener('click', () => {
-        deps.resetCurrentSimulation();
+        deps.actions.resetCurrentSimulation();
       });
 
       const stepMode = (delta: number) => {
         const idx = MODE_ORDER.indexOf(deps.state.mode);
         const next = MODE_ORDER[(idx + delta + MODE_ORDER.length) % MODE_ORDER.length];
-        deps.selectMode(next);
+        deps.actions.selectMode(next);
       };
       document.getElementById('mode-prev')!.addEventListener('click', () => stepMode(-1));
       document.getElementById('mode-next')!.addEventListener('click', () => stepMode(1));

@@ -2,6 +2,15 @@ import type { AppState, ParamDef, ParamSection, ShapeName, ShapeParamDef, SimMod
 
 type ModeParamsAccess = (mode: SimMode) => Record<string, number | string | boolean>;
 
+interface ControlsActions {
+  applyPreset(mode: SimMode, presetName: string): void;
+  resetCurrentSimulation(): void;
+  saveState(): void;
+  selectMode(mode: SimMode): void;
+  setPaused(paused: boolean): void;
+  updateAll(): void;
+}
+
 export interface FxParamDef {
   key: keyof AppState['fx'];
   label: string;
@@ -19,25 +28,19 @@ export interface ControlsConfig {
 }
 
 export interface ControlsDependencies {
-  cancelDebugMovement(): void;
+  actions: ControlsActions;
   config: ControlsConfig;
-  ensureSimulation(): void;
   modeParams: ModeParamsAccess;
-  resetCurrentSimulation(): void;
-  saveState(): void;
   setXrDebugLogging(enabled: boolean): void;
   setupRecordButton(): void;
   setupXRButton(): void;
   state: AppState;
   storageKey: string;
   syncThemeButtons(themeName: string): void;
-  updateAll(): void;
 }
 
 export interface ControlsApi {
-  applyPreset(mode: SimMode, presetName: string): void;
   buildControls(): void;
-  selectMode(mode: SimMode): void;
   setupGlobalControls(): void;
   setupTabs(): void;
   syncPauseButtons(): void;
@@ -123,7 +126,7 @@ export function createControls(deps: ControlsDependencies): ControlsApi {
         const val = Number(input.value);
         state.fx[def.key] = val;
         valueSpan.textContent = formatValue(val, def.step);
-        deps.saveState();
+        deps.actions.saveState();
       });
       row.appendChild(input);
       row.appendChild(valueSpan);
@@ -155,12 +158,12 @@ export function createControls(deps: ControlsDependencies): ControlsApi {
       select.addEventListener('change', () => {
         const val = Number.isNaN(Number(select.value)) ? select.value : Number(select.value);
         deps.modeParams(mode)[param.key] = val;
-        if (param.requiresReset) deps.resetCurrentSimulation();
+        if (param.requiresReset) deps.actions.resetCurrentSimulation();
         if (param.key === 'shape') {
           applyShapeDefaults(String(val));
           rebuildShapeParams();
         }
-        deps.updateAll();
+        deps.actions.updateAll();
       });
       row.appendChild(select);
     } else if (param.type === 'toggle') {
@@ -171,8 +174,8 @@ export function createControls(deps: ControlsDependencies): ControlsApi {
       input.dataset.key = param.key;
       input.addEventListener('change', () => {
         deps.modeParams(mode)[param.key] = input.checked;
-        if (param.requiresReset) deps.resetCurrentSimulation();
-        deps.updateAll();
+        if (param.requiresReset) deps.actions.resetCurrentSimulation();
+        deps.actions.updateAll();
       });
       row.appendChild(input);
     } else {
@@ -206,12 +209,12 @@ export function createControls(deps: ControlsDependencies): ControlsApi {
         if (param.requiresReset) {
           input.dataset.needsReset = '1';
         }
-        deps.updateAll();
+        deps.actions.updateAll();
       });
       input.addEventListener('change', () => {
         if (input.dataset.needsReset === '1') {
           input.dataset.needsReset = '0';
-          deps.resetCurrentSimulation();
+          deps.actions.resetCurrentSimulation();
         }
       });
 
@@ -267,14 +270,29 @@ export function createControls(deps: ControlsDependencies): ControlsApi {
   }
 
   function setPaused(paused: boolean) {
-    state.paused = paused;
-    if (paused) deps.cancelDebugMovement();
-    syncPauseButtons();
+    deps.actions.setPaused(paused);
+  }
+
+  function matchesPreset(mode: SimMode, presetName: string): boolean {
+    const params = deps.modeParams(mode);
+    const preset = config.presets[mode][presetName];
+    return Object.entries(preset).every(([key, value]) => params[key] === value);
+  }
+
+  // [LAW:one-source-of-truth] Active preset styling is derived from canonical
+  // mode params so bindings, mobile actions, and direct DOM clicks all converge.
+  function syncPresetButtons(mode: SimMode): void {
+    const container = document.getElementById(`params-${mode}`);
+    if (!container) return;
+    container.querySelectorAll<HTMLButtonElement>('.preset-btn').forEach((btn) => {
+      const presetName = btn.dataset.preset;
+      btn.classList.toggle('active', !!presetName && matchesPreset(mode, presetName));
+    });
   }
 
   function applyPreset(mode: SimMode, presetName: string) {
     const preset = config.presets[mode][presetName];
-    Object.assign(deps.modeParams(mode), preset);
+    deps.actions.applyPreset(mode, presetName);
 
     const container = document.getElementById(`params-${mode}`)!;
     container.querySelectorAll<HTMLInputElement>('input[type="range"]').forEach((input) => {
@@ -294,16 +312,11 @@ export function createControls(deps: ControlsDependencies): ControlsApi {
       if (key in preset) sel.value = String(preset[key]);
     });
 
-    container.querySelectorAll<HTMLButtonElement>('.preset-btn').forEach((btn) => {
-      btn.classList.toggle('active', btn.dataset.preset === presetName);
-    });
+    syncPresetButtons(mode);
 
     if (mode === 'parametric') {
       rebuildShapeParams();
     }
-
-    deps.resetCurrentSimulation();
-    deps.updateAll();
   }
 
   function buildControls() {
@@ -352,10 +365,8 @@ export function createControls(deps: ControlsDependencies): ControlsApi {
   // [LAW:one-source-of-truth] Mode changes flow through one helper so DOM state,
   // simulation lifecycle, and persisted app state cannot drift.
   function selectMode(mode: SimMode): void {
-    state.mode = mode;
+    deps.actions.selectMode(mode);
     syncActiveModeUi(mode);
-    deps.ensureSimulation();
-    deps.updateAll();
   }
 
   function setupTabs() {
@@ -373,7 +384,7 @@ export function createControls(deps: ControlsDependencies): ControlsApi {
     });
 
     document.getElementById('btn-reset')!.addEventListener('click', () => {
-      deps.resetCurrentSimulation();
+      deps.actions.resetCurrentSimulation();
     });
 
     document.getElementById('copy-btn')!.addEventListener('click', () => {
@@ -396,7 +407,7 @@ export function createControls(deps: ControlsDependencies): ControlsApi {
     xrLogToggle.addEventListener('change', () => {
       state.debug.xrLog = xrLogToggle.checked;
       deps.setXrDebugLogging(state.debug.xrLog);
-      deps.saveState();
+      deps.actions.saveState();
     });
 
     deps.setupXRButton();
@@ -429,6 +440,7 @@ export function createControls(deps: ControlsDependencies): ControlsApi {
         const key = input.dataset.key!;
         if (key && key in params) input.checked = Boolean(params[key]);
       });
+      syncPresetButtons(mode);
     }
 
     deps.syncThemeButtons(state.colorTheme);
@@ -442,9 +454,7 @@ export function createControls(deps: ControlsDependencies): ControlsApi {
   }
 
   return {
-    applyPreset,
     buildControls,
-    selectMode,
     setupGlobalControls,
     setupTabs,
     syncPauseButtons,
