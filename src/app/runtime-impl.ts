@@ -1,5 +1,5 @@
 import '../../styles/main.css';
-import type { SimMode, Simulation, AppState, Attractor, Marker, ThemeColors, RGBThemeColors, ParamDef, ParamSection, ShapeParamDef, XRCameraOverride, DepthRef, ModeParamsMap, ShapeName } from '../types';
+import type { SimMode, Simulation, AppState, Attractor, Marker, ThemeColors, RGBThemeColors, ParamDef, ParamSection, ShapeParamDef, DepthRef, ModeParamsMap, ShapeName } from '../types';
 import { bindingRegistry } from '../xr-ui/bindings';
 import { evaluateAnchor, type Anchor } from '../xr-ui/anchors';
 import { layout as xrUiLayout, hitTestWidgets } from '../xr-ui/layout';
@@ -29,6 +29,8 @@ import { getShaderSources as getCatalogShaderSources, applyShaderEdit as applyCa
 import { createGpuTimingService, GPU_TIMING_BUCKETS, type GpuTimingBucket, type TimestampWrites } from '../gpu/timestamps';
 import { installDevtools } from '../diagnostics/devtools';
 import { createDiagnosticsLogger } from '../diagnostics/logging';
+import { cross3, dot3, normalize3, sub3 } from '../math/vec3';
+import { createCameraSystem, type CameraSystem } from '../render/camera';
 import { createGridRenderer, type GridRenderer } from '../render/grid';
 import { createPostFxService, type PostFxService } from '../render/post-fx';
 
@@ -606,8 +608,6 @@ const FLUID_WORLD_SIZE = 4; // full width/depth of the fluid volume in world uni
 const CAMERA_SIZE = 208;   // sizeof(Camera) in WGSL — includes interaction state
 const CAMERA_STRIDE = 256; // >= CAMERA_SIZE, multiple of minUniformBufferOffsetAlignment
 // [LAW:one-source-of-truth] Desktop projection range is owned here so every pass sees the same far-plane budget.
-const DESKTOP_CAMERA_FAR = 500.0;
-
 
 // All shape equations baked into one shader — shapeId uniform selects which runs.
 // p1–p4 are per-shape parameters passed as uniforms (no recompilation on change).
@@ -628,108 +628,7 @@ const SHAPE_PARAMS: Partial<Record<ShapeName, Record<string, ShapeParamDef>>> = 
              p2: { label: 'Knot Scale',  animMin: 0.25, animMax: 0.5,  animRate: 0.35, min: 0.1,  max: 1.0, step: 0.05 } },
 };
 
-
-
-// ═══════════════════════════════════════════════════════════════════════════════
-
-
-// SECTION 3: MATH UTILITIES
-// ═══════════════════════════════════════════════════════════════════════════════
-
-const mat4 = {
-  identity() {
-    return new Float32Array([1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1]);
-  },
-
-  perspective(fovY: number, aspect: number, near: number, far: number) {
-    const f = 1.0 / Math.tan(fovY * 0.5);
-    const rangeInv = 1.0 / (near - far);
-    const out = new Float32Array(16);
-    out[0] = f / aspect;
-    out[5] = f;
-    out[10] = far * rangeInv;
-    out[11] = -1;
-    out[14] = near * far * rangeInv;
-    return out;
-  },
-
-  lookAt(eye: number[], target: number[], up: number[]) {
-    const zAxis = normalize3(sub3(eye, target));
-    const xAxis = normalize3(cross3(up, zAxis));
-    const yAxis = cross3(zAxis, xAxis);
-    return new Float32Array([
-      xAxis[0], yAxis[0], zAxis[0], 0,
-      xAxis[1], yAxis[1], zAxis[1], 0,
-      xAxis[2], yAxis[2], zAxis[2], 0,
-      -dot3(xAxis, eye), -dot3(yAxis, eye), -dot3(zAxis, eye), 1
-    ]);
-  },
-
-  multiply(a: ArrayLike<number>, b: ArrayLike<number>) {
-    const out = new Float32Array(16);
-    for (let i = 0; i < 4; i++) {
-      for (let j = 0; j < 4; j++) {
-        out[j * 4 + i] = a[i] * b[j * 4] + a[4 + i] * b[j * 4 + 1] +
-                          a[8 + i] * b[j * 4 + 2] + a[12 + i] * b[j * 4 + 3];
-      }
-    }
-    return out;
-  },
-
-  rotateX(m: ArrayLike<number>, angle: number) {
-    const c = Math.cos(angle), s = Math.sin(angle);
-    const r = mat4.identity();
-    r[5] = c; r[6] = s; r[9] = -s; r[10] = c;
-    return mat4.multiply(m, r);
-  },
-
-  rotateY(m: Float32Array, angle: number): Float32Array {
-    const c = Math.cos(angle), s = Math.sin(angle);
-    const r = mat4.identity();
-    r[0] = c; r[2] = -s; r[8] = s; r[10] = c;
-    return mat4.multiply(m, r);
-  },
-
-  rotateZ(m: ArrayLike<number>, angle: number) {
-    const c = Math.cos(angle), s = Math.sin(angle);
-    const r = mat4.identity();
-    r[0] = c; r[1] = s; r[4] = -s; r[5] = c;
-    return mat4.multiply(m, r);
-  },
-
-  translate(m: ArrayLike<number>, x: number, y: number, z: number) {
-    const t = mat4.identity();
-    t[12] = x; t[13] = y; t[14] = z;
-    return mat4.multiply(m, t);
-  },
-};
-
-function normalize3(v: number[]): number[] {
-  const len = Math.sqrt(v[0]*v[0] + v[1]*v[1] + v[2]*v[2]);
-  return len > 0 ? [v[0]/len, v[1]/len, v[2]/len] : [0, 0, 0];
-}
-function cross3(a: number[], b: number[]): number[] {
-  return [a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1]*b[0]];
-}
-function sub3(a: number[], b: number[]): number[] { return [a[0]-b[0], a[1]-b[1], a[2]-b[2]]; }
-function dot3(a: number[], b: number[]): number { return a[0]*b[0] + a[1]*b[1] + a[2]*b[2]; }
-
-function getOrbitCamera() {
-  const cam = state.camera;
-  const eye = [
-    cam.distance * Math.cos(cam.rotX) * Math.sin(cam.rotY),
-    cam.distance * Math.sin(cam.rotX),
-    cam.distance * Math.cos(cam.rotX) * Math.cos(cam.rotY)
-  ];
-  return {
-    eye,
-    view: mat4.lookAt(eye, [cam.panX, cam.panY, 0], [0, 1, 0]),
-    proj: null // set per frame based on canvas aspect
-  };
-}
-
-// When set by XR frame loop, overrides orbit camera for all rendering
-let xrCameraOverride: XRCameraOverride | null = null;
+let cameraSystem!: CameraSystem;
 
 // [LAW:one-source-of-truth] When set, getDepthAttachment uses this XR-compositor-owned
 // depth view instead of postFx.depth. Submitting per-pixel depth to the compositor lets
@@ -777,36 +676,7 @@ function destroyDepthRef(_depthRef: DepthRef) {
 }
 
 function getCameraUniformData(aspect: number) {
-  const tc = getThemeColors();
-  const data = new Float32Array(52);
-
-  if (xrCameraOverride) {
-    // Use XR-provided matrices (correct FOV, stereo offset, world-locked)
-    data.set(xrCameraOverride.viewMatrix, 0);
-    data.set(xrCameraOverride.projMatrix, 16);
-    data.set(xrCameraOverride.eye, 32);
-  } else {
-    // Desktop: use orbit camera
-    const cam = getOrbitCamera();
-    const fovRad = state.camera.fov * Math.PI / 180;
-    const proj = mat4.perspective(fovRad, aspect, 0.01, DESKTOP_CAMERA_FAR);
-    data.set(cam.view, 0);
-    data.set(proj, 16);
-    data.set(cam.eye, 32);
-  }
-
-  // Theme colors (always appended)
-  data.set(tc.primary, 36);
-  data.set(tc.secondary, 40);
-  data.set(tc.accent, 44);
-
-  // Interaction state — packed into camera buffer padding so render shaders can visualize it.
-  const m = state.mouse;
-  data[48] = m.worldX;
-  data[49] = m.worldY;
-  data[50] = m.worldZ;
-  data[51] = m.down ? 1.0 : 0.0;
-  return data;
+  return cameraSystem.getUniformData(aspect, getThemeColors(), state.mouse);
 }
 
 
@@ -879,6 +749,7 @@ async function initWebGPU(): Promise<boolean> {
   renderTargetFormat = 'rgba16float';
   renderSampleCount = 1; // MSAA dropped — bloom + HDR replace it.
   context.configure({ device, format: canvasFormat, alphaMode: 'opaque' });
+  cameraSystem = createCameraSystem(state.camera);
   initPostFx();
 
   return true;
@@ -3945,11 +3816,11 @@ function xrFrame(time: DOMHighResTimeStamp, xrFrameData: XRFrame) {
 
       // Set the per-eye camera override so getCameraUniformData() uses XR matrices.
       const pos = view.transform.position;
-      xrCameraOverride = {
+      cameraSystem.setXrOverride({
         viewMatrix: new Float32Array(view.transform.inverse.matrix),
         projMatrix: new Float32Array(view.projectionMatrix),
         eye: [pos.x, pos.y, pos.z],
-      };
+      });
 
       const { x, y, width, height } = subImage.viewport;
 
@@ -3996,10 +3867,9 @@ function xrFrame(time: DOMHighResTimeStamp, xrFrameData: XRFrame) {
   } finally {
     // Clear overrides unconditionally: if anything threw inside the try, a non-null
     // xrDepthOverride would retain a compositor-owned GPUTextureView past the frame
-    // boundary (unsafe — compositor reclaims these between frames). xrCameraOverride
-    // leaking is less dangerous but would make the desktop frame loop use stale XR
-    // matrices if the user exits VR right after an error.
-    xrCameraOverride = null;
+    // boundary (unsafe — compositor reclaims these between frames). A stale XR
+    // camera override would also poison the desktop frame loop. // [LAW:single-enforcer]
+    cameraSystem.clearXrOverride();
     xrDepthOverride = null;
     device.popErrorScope().then(err => {
       if (err) logError('xr:frame:validation', err, `frame #${xrFrameCount}`);
