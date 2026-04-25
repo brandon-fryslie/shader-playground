@@ -5,7 +5,6 @@ import { evaluateAnchor } from '../xr-ui/anchors';
 import { layout as xrUiLayout, hitTestWidgets } from '../xr-ui/layout';
 import {
   xrUiStep, applySideEffects as xrUiApplyEffects, makeIdlePrev as xrUiMakeIdlePrev,
-  uiHandClaimed, type XrUiPrev, type XrUiRegistry, type RenderCommand as XrRenderCommand,
 } from '../xr-ui/step';
 import { GAS_SHADER_SOURCES } from '../gasReservoir';
 import { DEFAULTS as catalogDefaults, PRESETS as catalogPresets, PARAM_DEFS as catalogParamDefs, COLOR_THEMES as catalogColorThemes, DEFAULT_THEME as catalogDefaultTheme, THEME_FADE_MS as catalogThemeFadeMs, DEFAULT_CLEAR_COLOR as catalogDefaultClearColor, SHAPE_IDS as catalogShapeIds, SHAPE_PARAMS as catalogShapeParams, FX_PARAM_DEFS as catalogFxParamDefs, MODE_TAB_LABELS as catalogModeTabLabels } from './catalog';
@@ -29,7 +28,6 @@ import { getShaderSources as getCatalogShaderSources, applyShaderEdit as applyCa
 import { createGpuTimingService, type GpuTimingBucket } from '../gpu/timestamps';
 import { installDevtools } from '../diagnostics/devtools';
 import { createDiagnosticsLogger } from '../diagnostics/logging';
-import { cross3, dot3, normalize3, sub3 } from '../math/vec3';
 import { createAttractorSystem, type AttractorSystem, ATTRACTOR_MAX, MARKERS_PER_ATTRACTOR, PHYSICS_BASE_DT } from '../input/attractors';
 import { createPointerSystem, type PointerSystem } from '../input/pointer';
 import { createMobileInput, type MobileInput } from '../input/mobile';
@@ -37,6 +35,7 @@ import { createCameraSystem, type CameraSystem } from '../render/camera';
 import { createRenderFrameRuntime, type RenderFrameRuntime } from '../render/frame';
 import { createGridRenderer, type GridRenderer } from '../render/grid';
 import { createPostFxService, type PostFxService } from '../render/post-fx';
+import { createXrInputSystem, type XrGestureEvent, type XrInputSystem, type XrStateEvent } from '../xr/input';
 import { createXrRuntime, type XrRuntime } from '../xr/runtime';
 
 let currentGpuPhase = 'boot';
@@ -147,6 +146,7 @@ const CAMERA_STRIDE = 256; // >= CAMERA_SIZE, multiple of minUniformBufferOffset
 let cameraSystem!: CameraSystem;
 let postFx!: PostFxService;
 let xrRuntime: XrRuntime | null = null;
+let xrInputSystem!: XrInputSystem;
 let renderFrameRuntime!: RenderFrameRuntime;
 
 function initPostFx(): void {
@@ -309,6 +309,18 @@ async function initWebGPU(): Promise<boolean> {
     getShaderSources,
     resetShaderEdit: resetCatalogShaderEdit,
     state,
+  });
+  xrInputSystem = createXrInputSystem({
+    bindings: bindingRegistry,
+    closestPointOnRayToOrigin,
+    createAttractor,
+    intersectRayWithPlane,
+    metrics,
+    moveAttractor,
+    releaseAttractor,
+    setSimulationInteractionInactive,
+    state,
+    worldToFluidUV,
   });
   initPostFx();
   renderFrameRuntime = createRenderFrameRuntime({
@@ -982,912 +994,9 @@ const metrics = {
 // SECTION 8: WEBXR INPUT PIPELINE
 // ═══════════════════════════════════════════════════════════════════════════════
 
-let xrRefSpace: XRReferenceSpace | null = null;
-let xrBaseRefSpace: XRReferenceSpace | null = null; // pre-gesture reference space
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// XR INPUT PIPELINE
-// ═══════════════════════════════════════════════════════════════════════════════
-// Architecture from design-docs/XR-UX-PROPOSALS.md:
-//   raw XR inputs → HandFrame[] → Gesture[] → InteractionState transitions → side effects
-//
-// [LAW:one-source-of-truth] All XR input flows through this pipeline.
-// selectstart/selectend produce raw pinch events.
-// Each frame: update HandFrames → detect Gestures → transition InteractionStates → apply effects.
-
-// ─── TYPES ───────────────────────────────────────────────────────────────────
-
-type XrHand = 'left' | 'right';
-interface XrRay { origin: number[]; dir: number[] }
-
-// Per-hand, per-frame snapshot. Core of the input pipeline.
-// Joints/palmNormal/grip are stubs — populated when hand-tracking feature lands.
-interface XrHandFrame {
-  hand: XrHand;
-  tracked: boolean;
-  source: XRInputSource | null;  // the XR input source for this hand (null when idle)
-  pinch: {
-    active: boolean;
-    startTime: number;          // performance.now() at pinch-start
-    origin: number[];           // hand position at pinch-start
-    current: number[];          // current hand position
-  };
-  // Gaze-seeded ray: frozen at pinch-start, authoritative for SELECTION.
-  gazeRay: XrRay | null;
-  // Hand-steered ray: updated each frame during pinch. Drives drag/scrub.
-  currentRay: XrRay | null;
-  // Advisory hover laser ray. Synthesized from joints every frame when
-  // tracked. NEVER used for selection — that is gazeRay at pinch-start.
-  ray: XrRay | null;
-  // Hand-tracking data: populated each frame when the XR runtime grants
-  // hand-tracking and this handedness has an input source with `.hand`.
-  // joints is null ONLY when no hand data is available at all; when non-null
-  // it has all 25 keys but individual entries may be null (joint occluded,
-  // off-sensor, not yet converged). palmNormal and grip are derived from
-  // joints and synchronized atomically by xrUpdateHandFrames.
-  palmNormal: number[] | null;
-  joints: XrJoints | null;
-  grip: XrGripState | null;
-}
-
-// 25 hand joints per WebXR spec. Ordered canonically for readability.
-const XR_JOINT_NAMES = [
-  'wrist',
-  'thumb-metacarpal', 'thumb-phalanx-proximal', 'thumb-phalanx-distal', 'thumb-tip',
-  'index-finger-metacarpal', 'index-finger-phalanx-proximal', 'index-finger-phalanx-intermediate', 'index-finger-phalanx-distal', 'index-finger-tip',
-  'middle-finger-metacarpal', 'middle-finger-phalanx-proximal', 'middle-finger-phalanx-intermediate', 'middle-finger-phalanx-distal', 'middle-finger-tip',
-  'ring-finger-metacarpal', 'ring-finger-phalanx-proximal', 'ring-finger-phalanx-intermediate', 'ring-finger-phalanx-distal', 'ring-finger-tip',
-  'pinky-finger-metacarpal', 'pinky-finger-phalanx-proximal', 'pinky-finger-phalanx-intermediate', 'pinky-finger-phalanx-distal', 'pinky-finger-tip',
-] as const satisfies readonly XRHandJoint[];
-type XrJointName = typeof XR_JOINT_NAMES[number];
-
-interface XrJointPose {
-  position: number[];      // 3 floats, in xrRefSpace
-  orientation: number[];   // 4 floats (xyzw quaternion)
-  radius: number;          // meters
-}
-
-// [LAW:dataflow-not-control-flow] When non-null, the record always has all 25
-// keys; individual entries are null when a joint is momentarily un-tracked.
-// Consumers branch on null per-joint via data, not by skipping updates.
-type XrJoints = Record<XrJointName, XrJointPose | null>;
-
-// Thumb-tip-to-fingertip geometric contact flags. NOT authoritative for
-// selection — pinch.active (from XR selectstart/selectend) is the authoritative
-// pinch signal. grip.* exists to represent compound / geometric gestures that
-// can't be expressed by the system-recognized pinch alone. Per-flag nullability
-// so a single occluded finger-tip doesn't null unrelated flags.
-interface XrGripState {
-  thumbIndex:  boolean | null;
-  thumbMiddle: boolean | null;
-  thumbRing:   boolean | null;
-  thumbPinky:  boolean | null;
-}
-
-function makeIdleHandFrame(hand: XrHand): XrHandFrame {
-  return {
-    hand, tracked: false, source: null,
-    pinch: { active: false, startTime: 0, origin: [0, 0, 0], current: [0, 0, 0] },
-    gazeRay: null, currentRay: null, ray: null,
-    palmNormal: null, joints: null, grip: null,
-  };
-}
-
-// Gesture events — pure data produced by the detector, consumed by the state machine.
-type XrGesture =
-  | { kind: 'pinch-start'; hand: XrHand; gazeRay: XrRay }
-  | { kind: 'pinch-hold';  hand: XrHand; dur: number }
-  | { kind: 'pinch-end';   hand: XrHand; dur: number }
-  // Cooperative gestures (involve both hands):
-  | { kind: 'two-hand-pinch-start' }
-  | { kind: 'two-hand-pinch-end' }
-  // Stubs — detected when hand-tracking joints are available:
-  | { kind: 'fine-modifier-on';  hand: XrHand }
-  | { kind: 'fine-modifier-off'; hand: XrHand }
-  | { kind: 'palm-up';   hand: XrHand }
-  | { kind: 'palm-down'; hand: XrHand }
-  | { kind: 'wrist-flick'; hand: XrHand; axis: 'roll' | 'pitch' | 'yaw'; sign: 1 | -1 };
-
-// Per-hand interaction state machine.
-// [LAW:one-source-of-truth] At most one interaction per hand.
-// [LAW:one-type-per-behavior] Single-hand dragging always means sim interaction.
-// Widget/UI interactions will add their own variants when the new panel lands.
-type XrInteraction =
-  | { kind: 'idle' }
-  // Pinch-start arrived but we haven't committed yet. If the other hand
-  // pinch-starts before deadline, both convert to two-hand-scale (simultaneous
-  // = zoom). If deadline passes alone, commit to single-hand dragging (sequential
-  // = independent attractor). [LAW:dataflow-not-control-flow] The variant encodes
-  // the "waiting to decide" state explicitly instead of branching on timestamps.
-  | { kind: 'pending'; deadline: number }
-  | { kind: 'dragging';
-      handOrigin: number[];      // hand position at drag start
-      hasSample: boolean;
-    }
-  | { kind: 'two-hand-scale' };
-
-// ─── STATE ───────────────────────────────────────────────────────────────────
-
-// Hand frames — updated every XR frame.
-const xrHandFrames: Record<XrHand, XrHandFrame> = {
-  left: makeIdleHandFrame('left'),
-  right: makeIdleHandFrame('right'),
-};
-
-// Per-hand interaction state.
-const xrInteractions: Record<XrHand, XrInteraction> = {
-  left: { kind: 'idle' },
-  right: { kind: 'idle' },
-};
-
-// Pending pinch-starts: sources added at selectstart, resolved to a hand
-// on the first frame with a pose available.
-const xrPendingSources: XRInputSource[] = [];
-
-// Gesture tuning — global modifier state.
-const xrTuning = {
-  gainMultiplier: 1.0,  // 0.1 when fine-modifier active (future)
-};
-
-// XR-UI module state. Single source of truth for the new widget pipeline:
-// - xrUiRegistry holds bindings + named layouts. Empty layouts map until ticket .13
-//   registers the first panel. xrUiStep returns idle/empty in that state.
-// - xrUiPrev is threaded into xrUiStep each frame and rebuilt from its result.
-// - xrUiClaimed mirrors uiHandClaimed(prev.states[hand]) so xrTransitionInteractions
-//   can short-circuit the pending→dragging sim promotion when UI owns the pinch.
-//   [LAW:single-enforcer] xrUiStep is the only writer of this flag.
-const xrUiRegistry: XrUiRegistry = {
-  bindings: bindingRegistry,
-  layouts: new Map(),
-  activeLayoutId: null,
-};
-let xrUiPrev: XrUiPrev = xrUiMakeIdlePrev();
-let xrUiRenderList: XrRenderCommand[] = [];
-const xrUiClaimed: Record<XrHand, boolean> = { left: false, right: false };
-
-// View offset (modified by two-hand scale).
-// [LAW:one-source-of-truth] xrViewOffset is the single source for the user's
-// virtual viewpoint position relative to the simulation.
-const xrViewOffset = { x: 0, y: 0, z: -5 };
-let xrViewOffsetY = 0;
-
-// Two-hand scale shared state.
-const twoHandState = {
-  startDistance: 0,
-  startOffset: { x: 0, y: 0, z: 0 },
-};
-
-// Previous frame's pinch state for edge detection (gesture events).
-const xrPrevPinch: Record<XrHand, boolean> = { left: false, right: false };
-
-// Previous-frame snapshot for joint-derived gesture detection. Parallel to
-// xrPrevPinch. [LAW:one-source-of-truth] Sole previous-state store for the
-// fine-modifier / palm-up / wrist-flick detectors.
-interface XrGestureSnapshot {
-  fineModifier: boolean;        // thumb-ring contact state last frame
-  palmUp: boolean;              // palm-up state last frame (post-hysteresis)
-  wristOrient: number[] | null; // wrist quaternion last frame (null when untracked)
-  wristTime: number;            // performance.now() when wristOrient was captured
-  flickArmed: boolean;          // last frame's angular speed above threshold
-  lastFlickAt: number;          // performance.now() of last emitted flick (refractory)
-}
-function makeGestureSnapshot(): XrGestureSnapshot {
-  return { fineModifier: false, palmUp: false, wristOrient: null, wristTime: 0, flickArmed: false, lastFlickAt: 0 };
-}
-const xrPrevGestureSnap: Record<XrHand, XrGestureSnapshot> = {
-  left: makeGestureSnapshot(),
-  right: makeGestureSnapshot(),
-};
-
-// Palm-up hysteresis on palmNormal·worldUp. Enter >0.7 (~45° of vertical),
-// exit <0.4 (~65°). The dead zone absorbs frame-to-frame noise when the palm
-// is held vertical.
-const XR_PALM_UP_ENTER = 0.7;
-const XR_PALM_UP_EXIT = 0.4;
-
-// Wrist-flick thresholds. 4 rad/s ≈ 230°/s — a deliberate snap, not casual
-// motion. 2-frame consensus (flickArmed) plus 300ms refractory suppresses
-// ringing and oscillation on the flick peak.
-const XR_FLICK_SPEED_RAD_S = 4.0;
-const XR_FLICK_REFRACTORY_MS = 300;
-
-// ── METRIC CHANNELS ────────────────────────────────────────────────────────────
-// Declared once; producers below guard emit with `chan.subscribers.size > 0`.
-// Payload shapes are typed here and flow through subscribers unchanged.
-interface XrGestureEvent { hand: XrHand | null; gesture: XrGesture }
-interface XrStateEvent { hand: XrHand; from: XrInteraction['kind']; to: XrInteraction['kind'] }
-interface XrSnapEvent {
-  hand: XrHand;
-  handTracked: boolean;      // hand-tracking is producing joints this frame
-  pinching: boolean;         // a pinch source is currently active (system gesture)
-  palmDot: number | null;    // palmNormal · worldUp
-  palmUp: boolean;
-  fineModifier: boolean;
-  flickSpeed: number;        // rad/s, 0 when no prior orientation
-  grip: XrGripState | null;
-}
-const chanXrGesture = metrics.channel<XrGestureEvent>('xr.gesture');
-const chanXrState   = metrics.channel<XrStateEvent>('xr.state');
-const chanXrSnap    = metrics.channel<XrSnapEvent>('xr.snap');
-
-// Live console logger — a consumer of the three XR channels. Toggled on/off
-// from the UI + persisted via state.debug.xrLog. [LAW:single-enforcer] This is
-// the sole wiring for console output; the XR recording feature (one-shot dump at
-// session end) keeps its own independent subscription lifecycle. Snap events
-// are rate-limited here so the 180 Hz raw stream doesn't flood the console —
-// the producer still emits every frame, each consumer samples at its cadence.
-const xrLogState = {
-  unsubs: [] as Array<() => void>,
-  lastSnapMs: { left: 0, right: 0 } as Record<XrHand, number>,
-};
-const XR_LOG_SNAP_INTERVAL_MS = 200;  // 5 Hz console cadence for snap stream
-
 function setXrDebugLogging(on: boolean): void {
-  for (const u of xrLogState.unsubs) u();
-  xrLogState.unsubs.length = 0;
-  xrLogState.lastSnapMs.left = 0;
-  xrLogState.lastSnapMs.right = 0;
-  if (!on) return;
-  xrLogState.unsubs.push(metrics.subscribe(chanXrGesture, (p) => {
-    if (p.gesture.kind === 'pinch-hold') return;  // per-frame noise
-    const h = p.hand ? `(${p.hand})` : '';
-    // eslint-disable-next-line no-console
-    console.log(`[xr] gesture:${p.gesture.kind}${h}`, p.gesture);
-  }));
-  xrLogState.unsubs.push(metrics.subscribe(chanXrState, (p) => {
-    // eslint-disable-next-line no-console
-    console.log(`[xr] state:${p.hand} ${p.from}→${p.to}`);
-  }));
-  xrLogState.unsubs.push(metrics.subscribe(chanXrSnap, (p) => {
-    const now = performance.now();
-    if (now - xrLogState.lastSnapMs[p.hand] < XR_LOG_SNAP_INTERVAL_MS) return;
-    xrLogState.lastSnapMs[p.hand] = now;
-    const palm = p.palmDot !== null ? p.palmDot.toFixed(2) : '—';
-    // eslint-disable-next-line no-console
-    console.log(`[xr] snap:${p.hand} tracked=${p.handTracked} pinch=${p.pinching} palm=${palm} palmUp=${p.palmUp} fine=${p.fineModifier} flick=${p.flickSpeed.toFixed(2)}`);
-  }));
+  xrInputSystem.setDebugLogging(on);
 }
-
-// State-transition helper: routes every xrInteractions[hand] assignment so the
-// change emits on xr.state exactly once per kind-change. Kind-identical writes
-// (e.g. re-entering pending with a fresh deadline) do not emit.
-function xrSetInteraction(hand: XrHand, next: XrInteraction): void {
-  const prev = xrInteractions[hand];
-  xrInteractions[hand] = next;
-  if (chanXrState.subscribers.size > 0 && prev.kind !== next.kind) {
-    metrics.emit(chanXrState, { hand, from: prev.kind, to: next.kind });
-  }
-}
-
-// Synthetic pointer ids for XR attractors — one per hand so left and right
-// create independent concurrent attractors. [LAW:one-source-of-truth] Each hand
-// owns exactly one slot in the attractor system's pointer-id map.
-const XR_ATTRACTOR_POINTER_ID: Record<XrHand, number> = { left: -1, right: -2 };
-
-// Pinch-start simultaneity window. Two pinch-starts within this window are
-// treated as "both at once" → two-hand zoom. Outside the window, sequential
-// pinches each commit to their own attractor. First attractor carries this
-// latency — the tradeoff for disambiguating zoom from sequential-attractor.
-const XR_SIMUL_WINDOW_MS = 150;
-
-// ─── LOW-LEVEL HELPERS ───────────────────────────────────────────────────────
-
-function getXRTargetRayDirection(transform: XRRigidTransform) {
-  const m = transform.matrix;
-  return normalize3([-m[8], -m[9], -m[10]]);
-}
-
-function getXrInputRay(frame: XRFrame, source: XRInputSource): XrRay | null {
-  if (!xrRefSpace) return null;
-  const pose = frame.getPose(source.targetRaySpace, xrRefSpace);
-  if (!pose) return null;
-  const p = pose.transform.position;
-  return { origin: [p.x, p.y, p.z], dir: getXRTargetRayDirection(pose.transform) };
-}
-
-function getXrHandPosition(frame: XRFrame, source: XRInputSource): number[] | null {
-  if (!xrRefSpace) return null;
-  const pose = frame.getPose(source.gripSpace || source.targetRaySpace, xrRefSpace);
-  if (!pose) return null;
-  const p = pose.transform.position;
-  return [p.x, p.y, p.z];
-}
-
-// [LAW:one-source-of-truth] Source→hand assignment is decided once at resolution
-// time (assignHandToSource) and then queried by identity (findHandForSource).
-// Deriving it from handedness on every call collapses multiple `'none'` sources
-// onto the same channel and can misroute selectend to the wrong hand.
-function assignHandToSource(source: XRInputSource): XrHand | null {
-  const leftFree = !xrHandFrames.left.source;
-  const rightFree = !xrHandFrames.right.source;
-  if (source.handedness === 'left' && leftFree) return 'left';
-  if (source.handedness === 'right' && rightFree) return 'right';
-  if (leftFree) return 'left';
-  if (rightFree) return 'right';
-  return null;
-}
-
-function findHandForSource(source: XRInputSource): XrHand | null {
-  if (xrHandFrames.left.source === source) return 'left';
-  if (xrHandFrames.right.source === source) return 'right';
-  return null;
-}
-
-// ── HAND-TRACKING HELPERS ──────────────────────────────────────────────────────
-// Thumb-tip-to-fingertip squared-distance threshold for grip.* flags. 3cm is
-// the common visionOS pinch-contact heuristic; squared so we skip the sqrt.
-const XR_GRIP_THRESHOLD_M = 0.03;
-const XR_GRIP_THRESHOLD_SQ = XR_GRIP_THRESHOLD_M * XR_GRIP_THRESHOLD_M;
-
-// Quaternion helpers (xyzw convention, matching XRJointPose.orientation).
-function quatConj(q: number[]): number[] { return [-q[0], -q[1], -q[2], q[3]]; }
-function quatMul(a: number[], b: number[]): number[] {
-  return [
-    a[3]*b[0] + a[0]*b[3] + a[1]*b[2] - a[2]*b[1],
-    a[3]*b[1] - a[0]*b[2] + a[1]*b[3] + a[2]*b[0],
-    a[3]*b[2] + a[0]*b[1] - a[1]*b[0] + a[2]*b[3],
-    a[3]*b[3] - a[0]*b[0] - a[1]*b[1] - a[2]*b[2],
-  ];
-}
-
-// Always returns a fully-populated record (all 25 keys). Entries are null when
-// `XRHand.get(name)` is missing or `frame.getJointPose` returns null for that
-// joint. [LAW:no-defensive-null-guards] The nulls here represent data state
-// ("joint not tracked right now"), not defensive guards around bugs.
-function queryHandJoints(frame: XRFrame, xrHand: XRHand, refSpace: XRReferenceSpace): XrJoints {
-  const joints = {} as XrJoints;
-  for (const name of XR_JOINT_NAMES) {
-    const space = xrHand.get(name);
-    const pose = space ? frame.getJointPose(space, refSpace) : null;
-    if (!pose) { joints[name] = null; continue; }
-    const p = pose.transform.position;
-    const o = pose.transform.orientation;
-    joints[name] = {
-      position: [p.x, p.y, p.z],
-      orientation: [o.x, o.y, o.z, o.w],
-      radius: pose.radius,
-    };
-  }
-  return joints;
-}
-
-// Palm normal points OUT of the palm (away from the back of the hand).
-// Derived from wrist, index-finger-metacarpal, pinky-finger-metacarpal.
-// Sign convention differs by handedness: the same cross-product ordering
-// gives opposite normals for left vs right because the hands are mirrored.
-// Null ⟺ any of the three source joints is currently untracked OR the
-// metacarpals are collinear with the wrist (degenerate cross product).
-function computePalmNormal(joints: XrJoints, hand: XrHand): number[] | null {
-  const wrist = joints['wrist'];
-  const indexMeta = joints['index-finger-metacarpal'];
-  const pinkyMeta = joints['pinky-finger-metacarpal'];
-  if (!wrist || !indexMeta || !pinkyMeta) return null;
-  const toIndex = sub3(indexMeta.position, wrist.position);
-  const toPinky = sub3(pinkyMeta.position, wrist.position);
-  // Right hand: cross(toPinky, toIndex) points out of palm.
-  // Left  hand: cross(toIndex, toPinky) points out of palm (mirror).
-  const raw = hand === 'right' ? cross3(toPinky, toIndex) : cross3(toIndex, toPinky);
-  // Reject near-collinear metacarpals: a healthy cross product has |raw|² on
-  // the order of (5cm × 5cm)² ≈ 6e-6 m⁴; floor at 1e-12 catches both exact
-  // zeros and the noisy unit vectors normalize3 would produce from tiny inputs.
-  const lenSq = raw[0]*raw[0] + raw[1]*raw[1] + raw[2]*raw[2];
-  if (lenSq < 1e-12) return null;
-  return normalize3(raw);
-}
-
-// Thumb-tip-to-fingertip geometric grip flags. Outer null ⟺ thumb-tip is
-// untracked (no anchor for any distance). Per-flag null ⟺ that specific
-// finger-tip is untracked. A tracked finger-tip → boolean contact flag.
-function computeGripState(joints: XrJoints): XrGripState | null {
-  const thumb = joints['thumb-tip'];
-  if (!thumb) return null;
-  const flag = (tip: XrJointPose | null): boolean | null => {
-    if (!tip) return null;
-    const d = sub3(thumb.position, tip.position);
-    return dot3(d, d) < XR_GRIP_THRESHOLD_SQ;
-  };
-  return {
-    thumbIndex:  flag(joints['index-finger-tip']),
-    thumbMiddle: flag(joints['middle-finger-tip']),
-    thumbRing:   flag(joints['ring-finger-tip']),
-    thumbPinky:  flag(joints['pinky-finger-tip']),
-  };
-}
-
-// ── REFERENCE SPACE MANAGEMENT ─────────────────────────────────────────────────
-function applyXrViewOffset(): void {
-  if (!xrBaseRefSpace) return;
-  type XRRigidTransformCtor = new (position: DOMPointInit, orientation?: DOMPointInit) => XRRigidTransform;
-  const RigidTransform = (globalThis as unknown as { XRRigidTransform: XRRigidTransformCtor }).XRRigidTransform;
-  xrRefSpace = xrBaseRefSpace.getOffsetReferenceSpace(
-    new RigidTransform({ x: xrViewOffset.x, y: xrViewOffset.y + xrViewOffsetY, z: xrViewOffset.z })
-  );
-}
-
-function initializeXrReferenceSpace(refSpace: XRReferenceSpace, gotFloor: boolean): void {
-  // [LAW:one-source-of-truth] xrRefSpace/xrBaseRefSpace/xrViewOffset stay owned by
-  // the input pipeline so gesture updates and XR session startup mutate one shared state.
-  xrRefSpace = refSpace;
-  xrBaseRefSpace = refSpace;
-  xrViewOffsetY = gotFloor ? 1.6 : 0;
-  xrViewOffset.x = 0;
-  xrViewOffset.y = 0;
-  xrViewOffset.z = -5;
-  applyXrViewOffset();
-}
-
-function clearXrReferenceSpace(): void {
-  xrRefSpace = null;
-  xrBaseRefSpace = null;
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// PIPELINE STAGE 1: UPDATE HAND FRAMES
-// ═══════════════════════════════════════════════════════════════════════════════
-// Resolve pending sources, update rays and positions for active pinches.
-
-function xrUpdateHandFrames(frame: XRFrame): void {
-  // Resolve pending sources: get their first ray and assign to a hand.
-  for (let i = xrPendingSources.length - 1; i >= 0; i--) {
-    const source = xrPendingSources[i];
-    const ray = getXrInputRay(frame, source);
-    if (!ray) continue; // no pose yet — keep pending
-    xrPendingSources.splice(i, 1);
-
-    // [LAW:one-source-of-truth] Identity-based channel assignment. Drops source
-    // if both channels occupied — WebXR spec permits more than two input sources
-    // but we only track left/right.
-    const hand = assignHandToSource(source);
-    if (!hand) continue;
-    const pos = getXrHandPosition(frame, source) ?? ray.origin;
-    const hf = xrHandFrames[hand];
-    hf.tracked = true;
-    hf.source = source;
-    hf.pinch.active = true;
-    hf.pinch.startTime = performance.now();
-    hf.pinch.origin = pos;
-    hf.pinch.current = pos;
-    // [LAW:one-source-of-truth] gazeRay frozen at pinch-start — authoritative for selection.
-    hf.gazeRay = { origin: [...ray.origin], dir: [...ray.dir] };
-    hf.currentRay = ray;
-  }
-
-  // Update current ray and position for all active hands.
-  for (const hand of ['left', 'right'] as XrHand[]) {
-    const hf = xrHandFrames[hand];
-    if (!hf.pinch.active || !hf.source) continue;
-    const ray = getXrInputRay(frame, hf.source);
-    if (ray) hf.currentRay = ray;
-    const pos = getXrHandPosition(frame, hf.source);
-    if (pos) hf.pinch.current = pos;
-  }
-
-  // Hand-tracking update. Independent of pinch state — a visible, non-pinching
-  // hand still produces joint poses. Clear-then-populate: the clear guarantees
-  // that when a hand disappears from inputSources, its joint fields become null
-  // on the next frame, so stale data can't linger. [LAW:one-source-of-truth]
-  // xrHandFrames[hand].joints is the sole store of per-frame joint data;
-  // palmNormal and grip are derived here and written atomically with joints.
-  for (const hand of ['left', 'right'] as XrHand[]) {
-    const hf = xrHandFrames[hand];
-    hf.joints = null;
-    hf.palmNormal = null;
-    hf.grip = null;
-    hf.ray = null;
-  }
-  if (xrRefSpace) {
-    for (const source of frame.session.inputSources) {
-      // 'none' handedness (e.g. transient gaze input) has no left/right slot.
-      // !source.hand means the runtime didn't expose hand tracking for this
-      // source — the per-source data itself tells us to skip, no need to
-      // consult the session-level xrHandTrackingAvailable flag.
-      if (source.handedness === 'none' || !source.hand) continue;
-      const hand: XrHand = source.handedness;
-      const hf = xrHandFrames[hand];
-      const joints = queryHandJoints(frame, source.hand, xrRefSpace);
-      hf.joints = joints;
-      hf.palmNormal = computePalmNormal(joints, hand);
-      hf.grip = computeGripState(joints);
-      // [LAW:one-source-of-truth] Advisory hover ray — synthesized always when
-      // the two source joints are present. NEVER drives selection (that's
-      // gazeRay) and NEVER drives drag (that's currentRay).
-      hf.ray = computeAdvisoryRay(joints);
-    }
-  }
-}
-
-// Advisory hand ray from joints. Origin at the index knuckle (feels natural
-// in VR — ray emanates from the pointing hand, not the wrist). Direction
-// along knuckle−wrist, so the ray points forward past the knuckle and
-// rotates with the hand independently of index-finger curl.
-function computeAdvisoryRay(joints: XrJoints): XrRay | null {
-  const wrist = joints['wrist'];
-  const knuckle = joints['index-finger-metacarpal'];
-  if (!wrist || !knuckle) return null;
-  const dir = normalize3(sub3(knuckle.position, wrist.position));
-  if (dir[0] === 0 && dir[1] === 0 && dir[2] === 0) return null;
-  return { origin: [...knuckle.position], dir };
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// PIPELINE STAGE 2: DETECT GESTURES
-// ═══════════════════════════════════════════════════════════════════════════════
-// [LAW:dataflow-not-control-flow] Pure function of current + previous hand state.
-// Produces gesture events; no side effects.
-
-function xrDetectGestures(): XrGesture[] {
-  const gestures: XrGesture[] = [];
-  const leftActive = xrHandFrames.left.pinch.active;
-  const rightActive = xrHandFrames.right.pinch.active;
-  const bothActive = leftActive && rightActive;
-  const prevBoth = xrPrevPinch.left && xrPrevPinch.right;
-
-  const now = performance.now();
-  for (const hand of ['left', 'right'] as XrHand[]) {
-    const hf = xrHandFrames[hand];
-    const wasActive = xrPrevPinch[hand];
-    const isActive = hf.pinch.active;
-
-    if (isActive && !wasActive && hf.gazeRay) {
-      gestures.push({ kind: 'pinch-start', hand, gazeRay: hf.gazeRay });
-    } else if (isActive && wasActive) {
-      gestures.push({ kind: 'pinch-hold', hand, dur: now - hf.pinch.startTime });
-    } else if (!isActive && wasActive) {
-      gestures.push({ kind: 'pinch-end', hand, dur: now - hf.pinch.startTime });
-    }
-
-    const prev = xrPrevGestureSnap[hand];
-
-    // Fine-modifier: thumb-to-ring-finger contact edge. grip is null when the
-    // thumb-tip or all finger-tips are untracked — skip detection but keep prev
-    // so we don't spuriously re-fire 'off' when tracking returns.
-    if (hf.grip) {
-      const active = hf.grip.thumbRing === true;
-      if (active && !prev.fineModifier) gestures.push({ kind: 'fine-modifier-on', hand });
-      else if (!active && prev.fineModifier) gestures.push({ kind: 'fine-modifier-off', hand });
-      prev.fineModifier = active;
-    }
-
-    // Palm orientation: palmNormal · worldUp. Hysteresis band ENTER>0.7, EXIT<0.4
-    // prevents flicker when the palm is held near vertical.
-    if (hf.palmNormal) {
-      const upDot = hf.palmNormal[1];
-      const isUp = prev.palmUp ? (upDot > XR_PALM_UP_EXIT) : (upDot > XR_PALM_UP_ENTER);
-      if (isUp && !prev.palmUp) gestures.push({ kind: 'palm-up', hand });
-      else if (!isUp && prev.palmUp) gestures.push({ kind: 'palm-down', hand });
-      prev.palmUp = isUp;
-    }
-
-    // Wrist-flick: angular speed of wrist-quaternion delta. Dominant world axis
-    // → roll/pitch/yaw bucket (approximation; refine to forearm basis if needed).
-    // 2-frame consensus (flickArmed) + 300ms refractory suppresses ringing at
-    // the flick peak and prevents a single quick motion firing twice.
-    // Gated on !pinch.active — during a drag, rotational motion is a side
-    // effect of positioning the attractor, not an intentional flick gesture.
-    const wristQuat = hf.joints?.['wrist']?.orientation ?? null;
-    let flickSpeed = 0;
-    if (wristQuat && prev.wristOrient && !hf.pinch.active) {
-      const dtSec = Math.max(0.001, (now - prev.wristTime) / 1000);
-      const delta = quatMul(wristQuat, quatConj(prev.wristOrient));
-      const w = Math.min(1, Math.abs(delta[3]));
-      const angle = 2 * Math.acos(w);
-      const sinHalf = Math.sqrt(Math.max(0, 1 - w * w));
-      const s = delta[3] < 0 ? -1 : 1;
-      const ax = sinHalf > 1e-6 ? (delta[0] * s) / sinHalf : 0;
-      const ay = sinHalf > 1e-6 ? (delta[1] * s) / sinHalf : 0;
-      const az = sinHalf > 1e-6 ? (delta[2] * s) / sinHalf : 0;
-      flickSpeed = angle / dtSec;
-      const armed = flickSpeed > XR_FLICK_SPEED_RAD_S;
-      if (armed && prev.flickArmed && (now - prev.lastFlickAt) > XR_FLICK_REFRACTORY_MS) {
-        const absX = Math.abs(ax), absY = Math.abs(ay), absZ = Math.abs(az);
-        const axis: 'roll' | 'pitch' | 'yaw' =
-          absX >= absY && absX >= absZ ? 'pitch' :
-          absY >= absZ                 ? 'yaw'   :
-                                         'roll';
-        const comp = axis === 'pitch' ? ax : axis === 'yaw' ? ay : az;
-        const sign: 1 | -1 = comp >= 0 ? 1 : -1;
-        gestures.push({ kind: 'wrist-flick', hand, axis, sign });
-        prev.lastFlickAt = now;
-      }
-      prev.flickArmed = armed;
-    } else {
-      prev.flickArmed = false;
-    }
-    prev.wristOrient = wristQuat ? [...wristQuat] : null;
-    prev.wristTime = now;
-
-    // Per-hand per-frame snapshot. Zero-cost when no subscriber — the recorder
-    // (or any future HUD / chart) subscribes only while active.
-    if (chanXrSnap.subscribers.size > 0) {
-      metrics.emit(chanXrSnap, {
-        hand,
-        handTracked: hf.joints !== null,
-        pinching: hf.pinch.active,
-        palmDot: hf.palmNormal ? hf.palmNormal[1] : null,
-        palmUp: prev.palmUp,
-        fineModifier: prev.fineModifier,
-        flickSpeed,
-        grip: hf.grip,
-      });
-    }
-  }
-
-  // Two-hand cooperative gestures.
-  if (bothActive && !prevBoth) {
-    gestures.push({ kind: 'two-hand-pinch-start' });
-  } else if (!bothActive && prevBoth) {
-    gestures.push({ kind: 'two-hand-pinch-end' });
-  }
-
-  // Snapshot for next frame's edge detection.
-  xrPrevPinch.left = leftActive;
-  xrPrevPinch.right = rightActive;
-
-  // Emit each gesture on the metrics bus. Guarded so no payloads or per-event
-  // property reads happen when nobody is subscribed. Two-hand gestures have no
-  // hand field — encode as null.
-  if (chanXrGesture.subscribers.size > 0) {
-    for (const g of gestures) {
-      metrics.emit(chanXrGesture, { hand: 'hand' in g ? g.hand : null, gesture: g });
-    }
-  }
-
-  return gestures;
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// PIPELINE STAGE 3: TRANSITION INTERACTION STATES
-// ═══════════════════════════════════════════════════════════════════════════════
-// Consumes gesture events and transitions per-hand InteractionState.
-
-function xrTransitionInteractions(gestures: XrGesture[], _frame: XRFrame): void {
-  for (const g of gestures) {
-    switch (g.kind) {
-      case 'pinch-start': {
-        // Enter pending window. Commit happens via two-hand-pinch-start
-        // (simultaneous → zoom) OR via the deadline pass below (sequential →
-        // single-hand attractor). No immediate dragging start.
-        xrSetInteraction(g.hand, {
-          kind: 'pending',
-          deadline: performance.now() + XR_SIMUL_WINDOW_MS,
-        });
-        break;
-      }
-      case 'two-hand-pinch-start': {
-        // Simultaneous pinch-start detected (both pinches within window →
-        // both hands are still 'pending'). Convert both to two-hand-scale.
-        // If either hand has already committed to 'dragging', the pinches
-        // were sequential — leave the committed hand alone and let the newly
-        // pending hand deadline-commit to its own attractor.
-        if (xrInteractions.left.kind === 'pending' && xrInteractions.right.kind === 'pending') {
-          const d = sub3(xrHandFrames.left.pinch.current, xrHandFrames.right.pinch.current);
-          twoHandState.startDistance = Math.max(0.01, Math.sqrt(dot3(d, d)));
-          twoHandState.startOffset = { ...xrViewOffset };
-          xrSetInteraction('left', { kind: 'two-hand-scale' });
-          xrSetInteraction('right', { kind: 'two-hand-scale' });
-        }
-        break;
-      }
-      case 'two-hand-pinch-end': {
-        // End scale on both hands. No auto-promote of the remaining pinching
-        // hand — user must release and re-pinch to create an attractor.
-        if (xrInteractions.left.kind === 'two-hand-scale') xrSetInteraction('left', { kind: 'idle' });
-        if (xrInteractions.right.kind === 'two-hand-scale') xrSetInteraction('right', { kind: 'idle' });
-        break;
-      }
-      case 'pinch-end': {
-        xrEndInteraction(g.hand);
-        break;
-      }
-      case 'pinch-hold':
-        break;
-      // Stubs — consumed when hand-tracking features land:
-      case 'fine-modifier-on':  xrTuning.gainMultiplier = 0.1; break;
-      case 'fine-modifier-off': xrTuning.gainMultiplier = 1.0; break;
-      case 'palm-up':
-      case 'palm-down':
-      case 'wrist-flick':
-        break;
-    }
-  }
-
-  // Deadline pass: any hand still 'pending' whose window has elapsed commits
-  // to single-hand dragging. Runs every frame — same code path whether the
-  // hand is fresh-pending (stays pending) or past-deadline (promotes).
-  // [LAW:dataflow-not-control-flow] Same work every frame; the state decides.
-  const now = performance.now();
-  for (const hand of ['left', 'right'] as XrHand[]) {
-    const ix = xrInteractions[hand];
-    if (ix.kind === 'pending' && now >= ix.deadline) {
-      // [LAW:single-enforcer] UI selection wins over sim attractor on the same
-      // pinch. xrUiStep set xrUiClaimed[hand] at the pinch-start frame; if true,
-      // drop the pending pinch instead of starting a sim drag. The pinch will
-      // continue feeding xrUiStep until pinch-end.
-      if (xrUiClaimed[hand]) {
-        xrSetInteraction(hand, { kind: 'idle' });
-      } else {
-        xrSetInteraction(hand, {
-          kind: 'dragging',
-          handOrigin: [...xrHandFrames[hand].pinch.origin],
-          hasSample: false,
-        });
-      }
-    }
-  }
-}
-
-// Clean up when a hand releases its pinch.
-function xrEndInteraction(hand: XrHand): void {
-  const ix = xrInteractions[hand];
-  switch (ix.kind) {
-    case 'dragging':
-      setSimulationInteractionInactive();
-      releaseAttractor(XR_ATTRACTOR_POINTER_ID[hand]);
-      break;
-    case 'pending':
-    case 'two-hand-scale':
-    case 'idle':
-      break;
-  }
-  xrSetInteraction(hand, { kind: 'idle' });
-  // [LAW:one-source-of-truth] Release ray has now been consumed (if needed by
-  // the 'pressing' case above). Final hand-frame cleanup here — guarded on
-  // !pinch.active so two-hand-pinch-start (which calls xrEndInteraction with
-  // pinches still active) doesn't stomp live channels.
-  const hf = xrHandFrames[hand];
-  if (!hf.pinch.active) {
-    hf.source = null;
-    hf.gazeRay = null;
-    hf.currentRay = null;
-  }
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// PIPELINE STAGE 4: APPLY SIDE EFFECTS
-// ═══════════════════════════════════════════════════════════════════════════════
-// Reads current InteractionState + HandFrame, produces outputs (state mutations,
-// reference space changes, UI state for rendering).
-
-function xrApplyInteractions(_frame: XRFrame): void {
-  // Two-hand scale: both hands cooperating.
-  if (xrInteractions.left.kind === 'two-hand-scale' && xrInteractions.right.kind === 'two-hand-scale') {
-    const d = sub3(xrHandFrames.left.pinch.current, xrHandFrames.right.pinch.current);
-    const dist = Math.sqrt(dot3(d, d));
-    if (twoHandState.startDistance >= 0.01) {
-      const ratio = dist / twoHandState.startDistance;
-      xrViewOffset.z = Math.max(-200, Math.min(-1, twoHandState.startOffset.z / ratio));
-      applyXrViewOffset();
-    }
-    return;
-  }
-
-  // Per-hand sim interaction — attractor (physics) / force injection (fluid).
-  let anySimDrag = false;
-  for (const hand of ['left', 'right'] as XrHand[]) {
-    const ix = xrInteractions[hand];
-    const hf = xrHandFrames[hand];
-    if (ix.kind !== 'dragging' || !hf.source) continue;
-    const ray = hf.currentRay;
-    if (!ray) continue;
-
-    anySimDrag = true;
-    const worldPoint = state.mode === 'fluid'
-      ? intersectRayWithPlane(ray.origin, ray.dir, 0)
-      : closestPointOnRayToOrigin(ray.origin, ray.dir);
-    if (!worldPoint) {
-      setSimulationInteractionInactive();
-      ix.hasSample = false;
-      continue;
-    }
-    state.mouse.down = true;
-    state.mouse.worldX = worldPoint[0];
-    state.mouse.worldY = worldPoint[1];
-    state.mouse.worldZ = worldPoint[2];
-    if (state.mode === 'fluid') {
-      const uv = worldToFluidUV(worldPoint);
-      if (!uv) { setSimulationInteractionInactive(); ix.hasSample = false; continue; }
-      state.mouse.dx = ix.hasSample ? (uv[0] - state.mouse.x) * 10 : 0;
-      state.mouse.dy = ix.hasSample ? (uv[1] - state.mouse.y) * 10 : 0;
-      state.mouse.x = uv[0];
-      state.mouse.y = uv[1];
-    } else {
-      state.mouse.dx = 0; state.mouse.dy = 0;
-      state.mouse.x = worldPoint[0]; state.mouse.y = worldPoint[1];
-    }
-    if (state.mode === 'physics') {
-      const pid = XR_ATTRACTOR_POINTER_ID[hand];
-      if (state.pointerToAttractor.has(pid)) {
-        moveAttractor(pid, worldPoint);
-      } else {
-        createAttractor(pid, worldPoint);
-      }
-    }
-    ix.hasSample = true;
-  }
-
-  // [LAW:single-enforcer] If no sim drag is active, ensure sim interaction state is clean.
-  if (!anySimDrag) {
-    // Only deactivate if we were previously active (avoid clobbering desktop mouse).
-    if (state.xrEnabled && state.mouse.down) setSimulationInteractionInactive();
-  }
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// PIPELINE ENTRY POINT
-// ═══════════════════════════════════════════════════════════════════════════════
-// Called once per XR frame. Runs all four stages in order.
-
-// Extract head pose in current xrRefSpace as the AnchorContext shape.
-// Returns null while the viewer pose is unavailable (e.g. tracking dropouts).
-function extractXrHeadPose(frame: XRFrame): { position: [number, number, number]; orientation: [number, number, number, number] } | null {
-  if (!xrRefSpace) return null;
-  const pose = frame.getViewerPose(xrRefSpace);
-  if (!pose) return null;
-  const t = pose.transform;
-  return {
-    position: [t.position.x, t.position.y, t.position.z],
-    orientation: [t.orientation.x, t.orientation.y, t.orientation.z, t.orientation.w],
-  };
-}
-
-function xrInputStep(frame: XRFrame): void {
-  xrUpdateHandFrames(frame);
-  // [LAW:single-enforcer] xrUiStep runs BEFORE gesture/transition stages so
-  // its claim flag is current by the time xrTransitionInteractions's deadline
-  // pass decides whether to promote a pending pinch to a sim attractor drag.
-  // [LAW:dataflow-not-control-flow] Always called; with no active layout it
-  // returns idle/empty. No "if UI active" branch around it.
-  const headPose = extractXrHeadPose(frame);
-  const uiResult = xrUiStep(xrUiRegistry, xrHandFrames, xrUiPrev, { hands: xrHandFrames, headPose }, xrTuning, 16);
-  xrUiApplyEffects(uiResult.sideEffects, xrUiRegistry);
-  xrUiPrev = uiResult.next;
-  xrUiRenderList = uiResult.renderList;
-  xrUiClaimed.left  = uiHandClaimed(uiResult.next.states.left);
-  xrUiClaimed.right = uiHandClaimed(uiResult.next.states.right);
-
-  const gestures = xrDetectGestures();
-  xrTransitionInteractions(gestures, frame);
-  xrApplyInteractions(frame);
-}
-
-// Called by selectend to release a hand's pinch state.
-// [LAW:one-source-of-truth] Leaves source/gazeRay/currentRay intact so the
-// next xrFrame's gesture pipeline (pinch-end → xrEndInteraction) can use the
-// release ray for the button-press commit hit test. Final hand-frame cleanup
-// happens in xrEndInteraction once the release ray has been consumed.
-function xrOnSelectEnd(source: XRInputSource): void {
-  const hand = findHandForSource(source);
-  if (hand) {
-    const hf = xrHandFrames[hand];
-    hf.pinch.active = false;
-    hf.tracked = false;
-  }
-  // Also remove from pending if it never resolved.
-  const pendingIdx = xrPendingSources.indexOf(source);
-  if (pendingIdx >= 0) xrPendingSources.splice(pendingIdx, 1);
-}
-
-// Reset all gesture state (called on session end).
-function xrResetInputState(): void {
-  xrPendingSources.length = 0;
-  xrHandFrames.left = makeIdleHandFrame('left');
-  xrHandFrames.right = makeIdleHandFrame('right');
-  xrSetInteraction('left', { kind: 'idle' });
-  xrSetInteraction('right', { kind: 'idle' });
-  xrPrevPinch.left = false;
-  xrPrevPinch.right = false;
-  xrPrevGestureSnap.left = makeGestureSnapshot();
-  xrPrevGestureSnap.right = makeGestureSnapshot();
-  xrTuning.gainMultiplier = 1.0;
-  xrUiPrev = xrUiMakeIdlePrev();
-  xrUiRenderList = [];
-  xrUiClaimed.left = false;
-  xrUiClaimed.right = false;
-  setSimulationInteractionInactive();
-  releaseAttractor(XR_ATTRACTOR_POINTER_ID.left);
-  releaseAttractor(XR_ATTRACTOR_POINTER_ID.right);
-}
-
 function setupXRButton() {
   const btn = document.getElementById('btn-xr') as HTMLButtonElement;
 
@@ -2018,29 +1127,29 @@ export async function startAppRuntimeImpl() {
     getPostFxSceneFormat: (index) => postFx.getSceneFormat(index),
     getPostFxSceneIndex: () => postFx.getSceneIndex(),
     getPostFxSceneView: (index) => postFx.getSceneView(index),
-    getRefSpace: () => xrRefSpace,
-    getUiRenderList: () => xrUiRenderList,
-    initializeReferenceSpace: initializeXrReferenceSpace,
-    inputStep: xrInputStep,
+    getRefSpace: () => xrInputSystem.getRefSpace(),
+    getUiRenderList: () => xrInputSystem.getRenderList(),
+    initializeReferenceSpace: (refSpace, gotFloor) => xrInputSystem.initializeReferenceSpace(refSpace, gotFloor),
+    inputStep: (frame) => xrInputSystem.inputStep(frame),
     logError,
     logInfo,
     markPostFxNeedsClear: () => postFx.markNeedsClear(),
-    onSelectEnd: xrOnSelectEnd,
+    onSelectEnd: (source) => xrInputSystem.onSelectEnd(source),
     postFxRunBloomChain: runBloomChain,
     postFxRunComposite: runComposite,
     pruneAttractors,
-    queuePendingSource: (source) => { xrPendingSources.push(source); },
+    queuePendingSource: (source) => { xrInputSystem.queuePendingSource(source); },
     refreshThemeColors,
     requestDesktopFrame: () => renderFrameRuntime.requestFrame(),
-    resetInputState: xrResetInputState,
-    clearReferenceSpace: clearXrReferenceSpace,
+    resetInputState: () => xrInputSystem.reset(),
+    clearReferenceSpace: () => xrInputSystem.clearReferenceSpace(),
     setCurrentPhase: (phase) => { currentGpuPhase = phase; },
     setHandTrackingAvailable: () => {},
     state,
     syncRenderConfig,
     tickFrameStats: (time) => renderFrameRuntime.tickFrameStats(time),
     tickMarkers,
-    uiRegistry: xrUiRegistry,
+    uiRegistry: xrInputSystem.getUiRegistry(),
     updateStats,
   });
 
@@ -2088,17 +1197,17 @@ export async function startAppRuntimeImpl() {
     getCurrentSimulation: () => simulations[state.mode],
     getGpuStats: () => renderFrameRuntime.getGpuStats(),
     bindings: bindingRegistry,
-    anchors: { evaluateAnchor, handFrames: xrHandFrames },
+    anchors: { evaluateAnchor, handFrames: xrInputSystem.getHandFrames() },
     xrUi: {
       layout: xrUiLayout,
       hitTestWidgets,
       step: xrUiStep,
       applyEffects: xrUiApplyEffects,
-      registry: xrUiRegistry,
+      registry: xrInputSystem.getUiRegistry(),
       makeIdlePrev: xrUiMakeIdlePrev,
-      getRenderList: () => xrUiRenderList,
-      getPrev: () => xrUiPrev,
-      getClaimed: () => ({ ...xrUiClaimed }),
+      getRenderList: () => xrInputSystem.getRenderList(),
+      getPrev: () => xrInputSystem.getPrev(),
+      getClaimed: () => xrInputSystem.getClaimed(),
     },
   });
 }
