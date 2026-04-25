@@ -20,13 +20,7 @@ import { createControls, type ControlsApi } from '../ui/controls';
 import { createBoidsSimulation as createBoidsSimulationModule } from '../simulations/boids';
 import { createFluidSimulation as createFluidSimulationModule } from '../simulations/fluid';
 import { createParametricSimulation as createParametricSimulationModule } from '../simulations/parametric';
-import { createPhysicsComputeService } from '../simulations/physics/compute';
-import { createPhysicsDiagnostics } from '../simulations/physics/diagnostics';
-import { createPhysicsInitialConditions } from '../simulations/physics/initial-conditions';
-import { createPhysicsParticleMesh } from '../simulations/physics/particle-mesh';
-import { createPhysicsStepController } from '../simulations/physics/params';
-import { createPhysicsRenderService } from '../simulations/physics/render';
-import { createPhysicsStatsService } from '../simulations/physics/stats';
+import { createPhysicsSimulation as createPhysicsSimulationModule } from '../simulations/physics';
 import { createPhysicsClassicSimulation as createPhysicsClassicSimulationModule } from '../simulations/physics-classic';
 import { isPhysicsSimulation, type PhysicsSimulation } from '../simulations/types';
 import { createReactionSimulation as createReactionSimulationModule } from '../simulations/reaction';
@@ -1321,189 +1315,17 @@ function createBoidsSimulation() {
 //   4. Ascent (l = maxLevel-1..0): prolong correction + post-smooth.
 //
 function createPhysicsSimulation() {
-  const count = state.physics.count;
-  const bodyBytes = count * 48; // pos(12) + mass(4) + vel(12) + pad(4) + home(12) + pad(4) = 48
-  const gasMassFraction = Math.max(0, Math.min(0.5, state.physics.gasMassFraction ?? 0.15));
-  const {
-    initData,
-    orbitalBasis,
-    totalStarMass,
-  } = createPhysicsInitialConditions(count, state.physics);
-  const orbitalTangent = orbitalBasis.tangent;
-  const orbitalBitangent = orbitalBasis.bitangent;
-
-  // ── PM (Particle-Mesh) gravity ──────────────────────────────────────────────
-  // Solver pipeline: CIC deposit → mean-subtract → V-cycle → CIC interpolate.
-  //
-  // Nested-grid layout post-A4/A5/A6:
-  //   Inner grid (this block): 128³ over ±16, cell 0.25 — subdomain. Uses
-  //     Dirichlet BC seeded from the outer potential, NOT periodic wrap.
-  //   Outer grid (allocated further below): 64³ over ±64, cell 2.0 — 3-torus.
-  //     [LAW:one-source-of-truth] This outer grid is the one whose domain
-  //     must match nbody.compute.wgsl's DOMAIN_HALF=64 periodic wrap so the
-  //     integrator's positional domain and the PM periodic domain coincide.
-  // The inner grid is intentionally a subdomain used via nested force
-  // interpolation (pm.interpolate_nested.wgsl).
-  //
-  // Tuning (shader-physics-brr.7):
-  //   PM_V_CYCLE_COUNT = 1
-  //     The V=4 figure assumed a cold solve (residual entering = 100%). This
-  //     simulation warm-starts: pmPotential[0] is preserved across frames
-  //     (see V-cycle loop, where only levels 1+ are zeroed each cycle), so
-  //     residual entering each frame is just the perturbation from one frame's
-  //     density change — typically ~10% since particles move <1 cell/frame at
-  //     dt≈0.016. One V-cycle then drops to ~1%, equivalent to the cold V=4
-  //     target. Vision Pro at 90 Hz has an 11 ms budget; V=4 was consuming
-  //     >50 ms by itself (~10 FPS in headset). Verify residual stays bounded
-  //     with __pmMaxResidual() and reversibility with __pmReversibilityTest().
-  //   PM_SMOOTH_PRE = PM_SMOOTH_POST = 2
-  //     Red-black GS converges ~2× faster per pass than Jacobi; 2 sweeps each
-  //     side of the V gives good damping of high-frequency error. 1 sweep is
-  //     usable but residual rises.
-  //   PM_FIXED_POINT_SCALE = 65536 (2¹⁶)
-  //     PARTICLE_MASS = 1/count ≈ 1.25e-5 at N=80k → per-particle deposit =
-  //     65536 × 1.25e-5 ≈ 0.82 integer units. Mean cell sum over all 2.1M
-  //     cells ≈ 65536 (total mass × scale) — 5 orders below u32 overflow.
-  //   DEFAULTS.physics.G = 0.3
-  //     First-cut after removing the old √(MASSIVE_BODY_COUNT/1000) ≈ 2.86
-  //     normalization. Sweep via the UI slider and __pmReversibilityTest to
-  //     verify dynamics are stable at your preferred preset.
-  //
-  // Verification: __pmReversibilityTest(1000) → maxErr < 0.01 world units.
-  // Values much larger indicate a sampling mismatch (pos vs posHalf) or a
-  // non-reversible operation slipped in somewhere.
-  const PM_GRID_RES = 128;                          // 128³ cells at level 0 (inner grid)
-  // Inner grid covers the central ±16 region at cell size 0.25 — 4× sharper
-  // than the ±64 uniform grid it replaces, enough to resolve the ~3–5 world-
-  // unit initial cloud in 24–40 cells. The outer grid (allocated below at
-  // ±64, cell 2.0) handles long-range gravity for particles outside the
-  // inner domain. pm.interpolate_nested smoothstep-blends force across the
-  // ±14..±16 transition shell so there is no seam.
-  const PM_DOMAIN_HALF = 16.0;
-  const PM_DOMAIN_SIZE = PM_DOMAIN_HALF * 2;        // = 32.0
-  const PM_CELL_SIZE = PM_DOMAIN_SIZE / PM_GRID_RES; // = 0.25 world units per cell
-  const PM_FIXED_POINT_SCALE = 65536;               // 2^16 — u32 atomic mass accumulation
-  const PM_MULTIGRID_LEVELS = 6;                    // 128³, 64³, 32³, 16³, 8³, 4³
-  const PM_V_CYCLE_COUNT = 1;                       // V-cycles per Poisson solve (warm-started; see header)
-  // Reduced from 2→1 per sweep when we collapsed the phase-split V-cycle
-  // (see compute() below). Each frame now runs ONE complete V-cycle instead
-  // of half across two frames. With warm-start from the previous frame's
-  // phi (density evolves slowly, so prior solution is a good initial guess),
-  // 1 pre + 1 post smooth per level delivers ~1 order of magnitude residual
-  // reduction per cycle — enough to hold maxResidual < 1% of peak density.
-  // Net per-frame smoother work is actually LESS than the old split (1+1
-  // vs 2+2 sweeps), so the full cycle fits well under the 11 ms budget.
-  const PM_SMOOTH_PRE = 1;                          // red-black GS passes before restriction
-  const PM_SMOOTH_POST = 1;                         // red-black GS passes after prolongation
-  // V-cycle scheduling: ONE complete V-cycle (descent + coarsest + ascent)
-  // runs each frame, producing a fully-solved pmPotential[0] every frame.
-  // No phase split, no partial state visible to the integrator. The prior
-  // scheme split the cycle across two frames; on "descent" frames the
-  // integrator read a half-solved phi (pre-smooth only, no coarse correction),
-  // making gravity alternate between short-range-only and full-range every
-  // frame — visible as 2-state frame-by-frame oscillation under debug
-  // stepping, and as subtle but real jitter at 60 Hz. The rewrite puts
-  // density snapshot + full solve + consumer read on the same frame, so
-  // every frame sees a consistent gravitational field.
-  // Silence noUnusedLocals until downstream tickets (.3 deposition, .4
-  // multigrid, .5 force sampling) reference these. Landing the canonical
-  // values now establishes the contract; later tickets only tune usage.
-  void PM_CELL_SIZE; void PM_FIXED_POINT_SCALE;
-  void PM_V_CYCLE_COUNT; void PM_SMOOTH_PRE; void PM_SMOOTH_POST;
-
-  const bufferA = device.createBuffer({ size: bodyBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC, mappedAtCreation: true });
-  new Float32Array(bufferA.getMappedRange()).set(initData);
-  bufferA.unmap();
-  const bufferB = device.createBuffer({ size: bodyBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC });
-
-  const cameraBuffer = device.createBuffer({ size: CAMERA_STRIDE * 2, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-  const diskNormal: [number, number, number] = [0, 1, 0];
-  const physicsStep = createPhysicsStepController({
+  // [LAW:locality-or-seam] Physics now owns its assembly in
+  // simulations/physics/index.ts; runtime only supplies shared capabilities.
+  return createPhysicsSimulationModule({
     attractorMax: ATTRACTOR_MAX,
     baseDt: PHYSICS_BASE_DT,
-    count,
-    device,
-    diskNormal,
-    getAttractorStrength: attractorStrength,
-    state,
-  });
-  const { blurBuffer, paramsBuffer } = physicsStep;
-
-  const particleMesh = createPhysicsParticleMesh({
-    bodyBuffers: [bufferA, bufferB],
-    cameraBuffer,
-    cameraSize: CAMERA_SIZE,
-    cameraStride: CAMERA_STRIDE,
-    count,
-    createShaderModuleChecked,
-    device,
-    gasMassFraction,
-    gravityScale: (state.physics.G ?? 0.3) * 0.001,
-    innerGrid: {
-      cellSize: PM_CELL_SIZE,
-      domainHalf: PM_DOMAIN_HALF,
-      filterOutOfDomain: 1,
-      fixedPointScale: PM_FIXED_POINT_SCALE,
-      gridRes: PM_GRID_RES,
-      levels: PM_MULTIGRID_LEVELS,
-    },
-    renderSampleCount,
-    renderTargetFormat,
-    totalStarMass,
-  });
-  const {
-    gas,
-    inner: {
-      densityF32: pmDensityF32,
-      densityStaging: pmDensityStaging,
-      densityU32: pmDensityU32,
-      getDiagPending: getPmDiagPending,
-      level0Cells: pmLevel0Cells,
-      meanScratch: pmMeanScratch,
-      potential: pmPotential,
-      residual: pmResidual,
-      setDiagPending: setPmDiagPending,
-    },
-    outer: {
-      densityF32: pmOuterDensityF32,
-      densityStaging: pmOuterDensityStaging,
-      getDiagPending: getPmOuterDiagPending,
-      level0Cells: pmOuterLevel0Cells,
-      potential: pmOuterPotential,
-      residual: pmOuterResidual,
-      setDiagPending: setPmOuterDiagPending,
-    },
-  } = particleMesh;
-  const pmForce = particleMesh.inner.force!;
-
-  const physicsStats = createPhysicsStatsService({
-    buffers: [bufferA, bufferB],
-    createShaderModuleChecked,
-    device,
-  });
-  const physicsCompute = createPhysicsComputeService({
-    bodyBuffers: [bufferA, bufferB],
-    count,
-    createShaderModuleChecked,
-    device,
-    paramsBuffer,
-    particleMesh,
-    physicsStats,
-    softeningDefault: 0.15,
-    stepController: physicsStep,
-    tsWrites,
-  });
-  const physicsRender = createPhysicsRenderService({
-    attractorMax: ATTRACTOR_MAX,
-    bodyBuffers: [bufferA, bufferB],
-    cameraBuffer,
     cameraSize: CAMERA_SIZE,
     cameraStride: CAMERA_STRIDE,
     clearColor: catalogDefaultClearColor,
-    count,
     createShaderModuleChecked,
+    destroyDepthRef,
     device,
-    gas,
     getAttractorStrength: attractorStrength,
     getCameraUniformData,
     getColorAttachment,
@@ -1511,7 +1333,6 @@ function createPhysicsSimulation() {
     getDefaultAspect: () => canvas.width / canvas.height,
     getDepthAttachment,
     getRenderViewport,
-    getSimStep: () => physicsStep.getSimStep(),
     getXrDepthOverride: () => xrDepthOverride,
     markersPerAttractor: MARKERS_PER_ATTRACTOR,
     nullColorView: postFx.nullColorView!,
@@ -1521,97 +1342,8 @@ function createPhysicsSimulation() {
     renderSampleCount,
     renderTargetFormat,
     state,
-    trailBlurBuffer: blurBuffer,
+    tsWrites,
   });
-
-  // Diagnostic readback: sample particles from the GPU for analysis.
-  const DIAG_SAMPLE = 2048;
-  const diagSampleBytes = Math.min(count, DIAG_SAMPLE) * 48;
-  const diagStaging = device.createBuffer({ size: diagSampleBytes, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
-
-  const depthRef: DepthRef = {};
-
-  let computeStepForDiagnostics: ((encoder: GPUCommandEncoder) => void) | null = null;
-  const physicsDiagnostics = createPhysicsDiagnostics({
-    bufferA,
-    bufferB,
-    computeStep: (encoder) => {
-      if (computeStepForDiagnostics) computeStepForDiagnostics(encoder);
-    },
-    count,
-    device,
-    diagSample: DIAG_SAMPLE,
-    diagStaging,
-    diskNormal,
-    gas,
-    getLastStats: () => physicsStats.getLastStats(),
-    getPingPong: () => physicsCompute.getPingPong(),
-    getPmDiagPending,
-    getPmOuterDiagPending,
-    getTimeDirection: () => physicsStep.getTimeDirection(),
-    orbitalBitangent,
-    orbitalTangent,
-    pmDensityF32,
-    pmDensityStaging,
-    pmLevel0Cells,
-    pmOuterDensityF32,
-    pmOuterDensityStaging,
-    pmOuterLevel0Cells,
-    pmOuterPotential: pmOuterPotential[0],
-    pmOuterResidual: pmOuterResidual[0],
-    pmPotential: pmPotential[0],
-    pmResidual: pmResidual[0],
-    setPmDiagPending,
-    setPmOuterDiagPending,
-    setPaused: (value) => { state.paused = value; },
-    setTimeDirection: (dir) => { physicsStep.setTimeDirection(dir); },
-    state,
-  });
-
-  const simulation = {
-    setTimeDirection(dir: number) { physicsStep.setTimeDirection(dir); },
-    getSimStep() { return physicsStep.getSimStep(); },
-    getTimeDirection() { return physicsStep.getTimeDirection(); },
-    setBlurTime(blurTime: number) { physicsStep.setBlurTime(blurTime); },
-    getJournalCapacity() { return physicsStep.getJournalCapacity(); },
-    getJournalHighWater() { return physicsStep.getJournalHighWater(); },
-
-    compute(encoder: GPUCommandEncoder) {
-      physicsCompute.compute(encoder);
-    },
-
-    render(encoder: GPUCommandEncoder, textureView: GPUTextureView, viewport: number[] | null, viewIndex = 0) {
-      physicsRender.render(encoder, textureView, viewport, viewIndex, physicsCompute.getPingPong(), depthRef, {
-        gasRender: tsWrites('gasRender'),
-        starsRender: tsWrites('starsRender'),
-      });
-    },
-
-    getCount() { return count; },
-
-    ...physicsDiagnostics,
-
-    destroy() {
-      bufferA.destroy(); bufferB.destroy();
-      physicsStep.destroy(); cameraBuffer.destroy();
-      physicsRender.destroy();
-      physicsStats.destroy();
-      diagStaging.destroy();
-      particleMesh.destroy();
-      destroyDepthRef(depthRef);
-    },
-    // PM internal state — not read by external callers today. Future tickets
-    // (CIC deposition .3, Poisson solver .4, force sampling .5) will dispatch
-    // compute work against these from inside this factory's closure.
-    pmDensityU32,
-    pmDensityF32,
-    pmPotential,
-    pmResidual,
-    pmForce,
-    pmMeanScratch,
-  };
-  computeStepForDiagnostics = simulation.compute.bind(simulation);
-  return simulation;
 }
 
 // --- 5b': N-BODY CLASSIC ---
