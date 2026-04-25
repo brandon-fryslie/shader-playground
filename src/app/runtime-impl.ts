@@ -26,6 +26,7 @@ import { isPhysicsSimulation, type PhysicsSimulation } from '../simulations/type
 import { createReactionSimulation as createReactionSimulationModule } from '../simulations/reaction';
 import { createSimulationRegistry, type SimulationRegistry } from '../simulations/registry';
 import { getShaderSources as getCatalogShaderSources, applyShaderEdit as applyCatalogShaderEdit, resetShaderEdit as resetCatalogShaderEdit } from '../gpu/shaders';
+import { createGpuTimingService, GPU_TIMING_BUCKETS, type GpuTimingBucket, type TimestampWrites } from '../gpu/timestamps';
 import { installDevtools } from '../diagnostics/devtools';
 import { createDiagnosticsLogger } from '../diagnostics/logging';
 import { createGridRenderer, type GridRenderer } from '../render/grid';
@@ -1116,6 +1117,7 @@ let context!: GPUCanvasContext;
 let canvasFormat!: GPUTextureFormat;
 let renderTargetFormat!: GPUTextureFormat;
 let renderSampleCount = 1;
+const gpuTiming = createGpuTimingService();
 
 async function initWebGPU(): Promise<boolean> {
   const fallbackEl = document.getElementById('fallback')!;
@@ -1150,7 +1152,7 @@ async function initWebGPU(): Promise<boolean> {
     return false;
   }
 
-  initGpuTimestamps();
+  gpuTiming.init(device);
 
   device.lost.then((info) => {
     logError('webgpu:device-lost', new Error(info.message), `reason=${info.reason}`);
@@ -4315,124 +4317,24 @@ let currentFps = 0;
 // frame's delta isn't a garbage huge number that would shrink the chunk unnecessarily.
 let lastFrameTimestamp = -1;
 
-// --- GPU profiling ---
-// Two paths: GPU timestamp queries give named per-bucket breakdowns when
-// supported. JS-side onSubmittedWorkDone fallback gives total frame GPU time.
-let gpuFrameMs = 0;
-const GPU_TIMING_BUCKETS = [
-  'pmDepositConvert',
-  'outerVCycle',
-  'boundarySample',
-  'innerVCycle',
-  'starInterpolate',
-  'gasInterpolatePressure',
-  'starGasIntegrate',
-  'starsRender',
-  'gasRender',
-  'bloomComposite',
-] as const;
-type GpuTimingBucket = typeof GPU_TIMING_BUCKETS[number];
-// [LAW:one-source-of-truth] This registry is the only source for GPU timing
-// query indices, public bucket names, and the zero-valued fallback shape.
-const GPU_TIMING_INDEX: Record<GpuTimingBucket, number> = Object.fromEntries(
-  GPU_TIMING_BUCKETS.map((bucket, index) => [bucket, index])
-) as Record<GpuTimingBucket, number>;
-function makeZeroGpuTimingDetail(): Record<GpuTimingBucket, number> {
-  return Object.fromEntries(GPU_TIMING_BUCKETS.map(bucket => [bucket, 0])) as Record<GpuTimingBucket, number>;
-}
-let gpuTimingDetail: Record<GpuTimingBucket, number> = makeZeroGpuTimingDetail();
-let activeGpuTimingBuckets = new Set<GpuTimingBucket>();
-let gpuTimingFrameActive = false;
-let profilingPending = false;
-let lastProfileTime = 0;
-const PROFILE_INTERVAL_MS = 2000;
-
-// GPU timestamp query state (null if unsupported)
-const GPU_TS_COUNT = GPU_TIMING_BUCKETS.length * 2; // begin/end pair per bucket
-let gpuTs: { querySet: GPUQuerySet; resolveBuf: GPUBuffer; stagingBuf: GPUBuffer; pending: boolean } | null = null;
-
-function initGpuTimestamps() {
-  if (!device.features.has('timestamp-query')) return;
-  gpuTs = {
-    querySet: device.createQuerySet({ type: 'timestamp', count: GPU_TS_COUNT }),
-    resolveBuf: device.createBuffer({ size: GPU_TS_COUNT * 8, usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC }),
-    stagingBuf: device.createBuffer({ size: GPU_TS_COUNT * 8, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ }),
-    pending: false,
-  };
-}
-
-function beginGpuTimingFrame() {
-  activeGpuTimingBuckets = new Set<GpuTimingBucket>();
-  gpuTimingFrameActive = true;
-}
-
-type TimestampWrites = { querySet: GPUQuerySet; beginningOfPassWriteIndex?: number; endOfPassWriteIndex?: number };
-
 function tsWrites(bucket: GpuTimingBucket): TimestampWrites | undefined {
-  if (!gpuTs || !gpuTimingFrameActive) return undefined;
-  activeGpuTimingBuckets.add(bucket);
-  const slotPair = GPU_TIMING_INDEX[bucket];
-  return { querySet: gpuTs.querySet, beginningOfPassWriteIndex: slotPair * 2, endOfPassWriteIndex: slotPair * 2 + 1 };
+  return gpuTiming.tsWrites(bucket);
 }
 
 function tsBegin(bucket: GpuTimingBucket): TimestampWrites | undefined {
-  if (!gpuTs || !gpuTimingFrameActive) return undefined;
-  activeGpuTimingBuckets.add(bucket);
-  return { querySet: gpuTs.querySet, beginningOfPassWriteIndex: GPU_TIMING_INDEX[bucket] * 2 };
+  return gpuTiming.tsBegin(bucket);
 }
 
 function tsEnd(bucket: GpuTimingBucket): TimestampWrites | undefined {
-  if (!gpuTs || !gpuTimingFrameActive) return undefined;
-  activeGpuTimingBuckets.add(bucket);
-  return { querySet: gpuTs.querySet, endOfPassWriteIndex: GPU_TIMING_INDEX[bucket] * 2 + 1 };
+  return gpuTiming.tsEnd(bucket);
 }
 
 function resolveTimestamps(encoder: GPUCommandEncoder, now: number) {
-  gpuTimingFrameActive = false;
-  if (!gpuTs || gpuTs.pending || now - lastProfileTime < PROFILE_INTERVAL_MS) return;
-  const activeBuckets = Array.from(activeGpuTimingBuckets);
-  if (activeBuckets.length === 0) return;
-  lastProfileTime = now;
-  encoder.resolveQuerySet(gpuTs.querySet, 0, GPU_TS_COUNT, gpuTs.resolveBuf, 0);
-  encoder.copyBufferToBuffer(gpuTs.resolveBuf, 0, gpuTs.stagingBuf, 0, GPU_TS_COUNT * 8);
-  gpuTs.pending = true;
-  const ts = gpuTs;
-  device.queue.onSubmittedWorkDone().then(() => {
-    ts.stagingBuf.mapAsync(GPUMapMode.READ).then(() => {
-      // [LAW:one-source-of-truth] GPU timestamp queries are unsigned 64-bit counters.
-      // BigUint64Array avoids negative durations if the high bit is ever set.
-      const ns = new BigUint64Array(ts.stagingBuf.getMappedRange().slice(0));
-      ts.stagingBuf.unmap();
-      ts.pending = false;
-      const toMs = (a: bigint, b: bigint) => b > a ? Number(b - a) / 1_000_000 : 0;
-      const detail = makeZeroGpuTimingDetail();
-      let first = 0n;
-      let last = 0n;
-      for (const bucket of activeBuckets) {
-        const idx = GPU_TIMING_INDEX[bucket] * 2;
-        const begin = ns[idx];
-        const end = ns[idx + 1];
-        detail[bucket] = toMs(begin, end);
-        if (begin > 0n && (first === 0n || begin < first)) first = begin;
-        if (end > last) last = end;
-      }
-      gpuTimingDetail = detail;
-      gpuFrameMs = first > 0n && last > first ? Number(last - first) / 1_000_000 : 0;
-    }).catch(() => { ts.pending = false; });
-  });
+  gpuTiming.endFrame(encoder, now);
 }
 
-// JS-side fallback: total frame GPU time (when timestamps unavailable).
 function measureGpuFrame(now: number) {
-  if (gpuTs) return; // timestamps handle it
-  if (profilingPending || now - lastProfileTime < PROFILE_INTERVAL_MS) return;
-  lastProfileTime = now;
-  profilingPending = true;
-  const t0 = performance.now();
-  device.queue.onSubmittedWorkDone().then(() => {
-    gpuFrameMs = performance.now() - t0;
-    profilingPending = false;
-  }).catch(() => { profilingPending = false; });
+  gpuTiming.measure(now);
 }
 
 function ensureSimulation() {
@@ -4451,6 +4353,7 @@ function resetCurrentSim() {
 
 function updateStats() {
   const msPerFrame = currentFps > 0 ? (1000 / currentFps).toFixed(1) : '--';
+  const { gpuFrameMs, gpuTimingDetail } = gpuTiming.getStats();
   const d = gpuTimingDetail;
   const hasDetailedTiming = GPU_TIMING_BUCKETS.some(bucket => d[bucket] > 0);
   const gpuDetail = hasDetailedTiming
@@ -4644,7 +4547,7 @@ function frame(now: DOMHighResTimeStamp) {
   const mode = state.mode;
 
   try {
-    beginGpuTimingFrame();
+    gpuTiming.beginFrame();
     const encoder = device.createCommandEncoder();
 
     // Debug stepping/skipping and normal play both funnel through runDebugCompute so the
@@ -4828,8 +4731,7 @@ export async function startAppRuntimeImpl() {
     getCurrentSimulation: () => simulations[state.mode],
     getGpuStats: () => ({
       currentFps,
-      gpuFrameMs,
-      gpuTimingDetail,
+      ...gpuTiming.getStats(),
     }),
     bindings: bindingRegistry,
     anchors: { evaluateAnchor, handFrames: xrHandFrames },
