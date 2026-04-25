@@ -30,6 +30,7 @@ import { createGpuTimingService, GPU_TIMING_BUCKETS, type GpuTimingBucket, type 
 import { installDevtools } from '../diagnostics/devtools';
 import { createDiagnosticsLogger } from '../diagnostics/logging';
 import { createGridRenderer, type GridRenderer } from '../render/grid';
+import { createPostFxService, type PostFxService } from '../render/post-fx';
 
 // WGSL shader imports — Vite loads these as raw strings
 import SHADER_BOIDS_COMPUTE from '../shaders/boids.compute.wgsl?raw';
@@ -48,10 +49,6 @@ import SHADER_PARAMETRIC_COMPUTE from '../shaders/parametric.compute.wgsl?raw';
 import SHADER_PARAMETRIC_RENDER from '../shaders/parametric.render.wgsl?raw';
 import SHADER_REACTION_COMPUTE from '../shaders/reaction.compute.wgsl?raw';
 import SHADER_REACTION_RENDER from '../shaders/reaction.render.wgsl?raw';
-import SHADER_POST_FADE from '../shaders/post.fade.wgsl?raw';
-import SHADER_POST_DOWNSAMPLE from '../shaders/post.downsample.wgsl?raw';
-import SHADER_POST_UPSAMPLE from '../shaders/post.upsample.wgsl?raw';
-import SHADER_POST_COMPOSITE from '../shaders/post.composite.wgsl?raw';
 
 let currentGpuPhase = 'boot';
 const diagnosticsLogger = createDiagnosticsLogger({
@@ -740,329 +737,35 @@ let xrCameraOverride: XRCameraOverride | null = null;
 // compositor can only planar-warp and the scene appears to shear/jitter as you turn.
 let xrDepthOverride: GPUTextureView | null = null;
 
-// ---------- HDR / Bloom / Post-FX shared state ----------
-// [LAW:one-source-of-truth] HDR scene textures, bloom mip chain, and post pipelines are owned here. Sims never see them directly.
-type PostFxState = {
-  scene: GPUTexture[];     // ping-pong [0,1]
-  sceneIdx: number;
-  depth: GPUTexture | null;
-  nullColor: GPUTexture | null;
-  nullDepth: GPUTexture | null;
-  nullColorView: GPUTextureView | null;
-  nullDepthView: GPUTextureView | null;
-  bloomMips: GPUTexture[]; // 5 mips, halved each level
-  width: number;
-  height: number;
-  needsClear: boolean;     // forces a one-frame clear after resize / sim swap
-  linSampler: GPUSampler | null;
-  // pipelines
-  fadePipeline: GPURenderPipeline | null;
-  downsamplePipeline: GPURenderPipeline | null;
-  upsamplePipelineAdditive: GPURenderPipeline | null;
-  upsamplePipelineReplace: GPURenderPipeline | null;
-  compositePipelines: Map<string, GPURenderPipeline>;
-  // bind group layouts
-  fadeBGL: GPUBindGroupLayout | null;
-  downsampleBGL: GPUBindGroupLayout | null;
-  upsampleBGL: GPUBindGroupLayout | null;
-  compositeBGL: GPUBindGroupLayout | null;
-  // per-frame uniform buffers (one each, rewritten per pass)
-  fadeUBO: GPUBuffer | null;
-  downsampleUBO: GPUBuffer[];   // one per mip level (so we can encode all in one frame)
-  upsampleUBO: GPUBuffer[];
-  compositeUBO: GPUBuffer | null;
-  // Cached views and bind groups — rebuilt only on resize, not per-frame.
-  sceneViews: GPUTextureView[];        // [0] and [1] for ping-pong
-  bloomMipViews: GPUTextureView[];     // one per mip
-  fadeBGs: GPUBindGroup[];             // [prevIdx] → bind group reading scene[prevIdx]
-  downsampleBGs: GPUBindGroup[];       // [i] → downsample from scene(i=0) or mip[i-1]
-  upsampleBGs: GPUBindGroup[];         // [i] → upsample from mip[i]
-  // Pre-allocated staging arrays to avoid per-frame Float32Array allocations.
-  // [LAW:one-source-of-truth] Explicit ArrayBuffer generic keeps WebGPU writeBuffer calls type-clean — TS 5.7+
-  // widened Float32Array to ArrayBufferLike by default, which GPUAllowSharedBufferSource won't accept.
-  fadeParams: Float32Array<ArrayBuffer>;
-  downsampleParams: Float32Array<ArrayBuffer>[];
-  upsampleParams: Float32Array<ArrayBuffer>[];
-  compositeParams: Float32Array<ArrayBuffer>;
-  compositeBGs: GPUBindGroup[];
-};
-const postFx: PostFxState = {
-  scene: [],
-  sceneIdx: 0,
-  depth: null,
-  nullColor: null,
-  nullDepth: null,
-  nullColorView: null,
-  nullDepthView: null,
-  bloomMips: [],
-  width: 0,
-  height: 0,
-  needsClear: true,
-  linSampler: null,
-  fadePipeline: null,
-  downsamplePipeline: null,
-  upsamplePipelineAdditive: null,
-  upsamplePipelineReplace: null,
-  compositePipelines: new Map(),
-  fadeBGL: null,
-  downsampleBGL: null,
-  upsampleBGL: null,
-  compositeBGL: null,
-  fadeUBO: null,
-  downsampleUBO: [],
-  upsampleUBO: [],
-  compositeUBO: null,
-  sceneViews: [],
-  bloomMipViews: [],
-  fadeBGs: [],
-  downsampleBGs: [],
-  upsampleBGs: [],
-  fadeParams: new Float32Array(4),
-  downsampleParams: [],
-  upsampleParams: [],
-  compositeBGs: [],
-  compositeParams: new Float32Array(16), // 64-byte UBO: 5 fx scalars + pads + primary vec3 + accent vec3
-};
-const HDR_FORMAT: GPUTextureFormat = 'rgba16float';
-const BLOOM_LEVELS = 3; // 5 mips made the largest blur radius half-screen, fusing dense clusters into a giant white blob.
+let postFx!: PostFxService;
 
 function initPostFx(): void {
-  // [LAW:dataflow-not-control-flow] Hidden optional render layers still encode
-  // their pass; the data-selected null attachments keep that pass from loading
-  // the full scene when the layer has no visible output.
-  postFx.nullColor = device.createTexture({
-    size: [1, 1],
-    format: HDR_FORMAT,
-    usage: GPUTextureUsage.RENDER_ATTACHMENT,
+  postFx = createPostFxService({
+    createShaderModuleChecked,
+    device,
+    renderSampleCount,
   });
-  postFx.nullDepth = device.createTexture({
-    size: [1, 1],
-    format: 'depth24plus',
-    usage: GPUTextureUsage.RENDER_ATTACHMENT,
-  });
-  postFx.nullColorView = postFx.nullColor.createView();
-  postFx.nullDepthView = postFx.nullDepth.createView();
-
-  postFx.linSampler = device.createSampler({
-    magFilter: 'linear', minFilter: 'linear',
-    addressModeU: 'clamp-to-edge', addressModeV: 'clamp-to-edge',
-  });
-
-  // Bind group layouts
-  postFx.fadeBGL = device.createBindGroupLayout({ entries: [
-    { binding: 0, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
-    { binding: 1, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'filtering' } },
-    { binding: 2, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
-  ]});
-  postFx.downsampleBGL = device.createBindGroupLayout({ entries: [
-    { binding: 0, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
-    { binding: 1, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'filtering' } },
-    { binding: 2, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
-  ]});
-  postFx.upsampleBGL = device.createBindGroupLayout({ entries: [
-    { binding: 0, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
-    { binding: 1, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'filtering' } },
-    { binding: 2, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
-  ]});
-  postFx.compositeBGL = device.createBindGroupLayout({ entries: [
-    { binding: 0, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
-    { binding: 1, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
-    { binding: 2, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'filtering' } },
-    { binding: 3, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
-  ]});
-
-  const fadeMod = createShaderModuleChecked('post.fade', SHADER_POST_FADE);
-  const downMod = createShaderModuleChecked('post.downsample', SHADER_POST_DOWNSAMPLE);
-  const upMod = createShaderModuleChecked('post.upsample', SHADER_POST_UPSAMPLE);
-
-  postFx.fadePipeline = device.createRenderPipeline({
-    layout: device.createPipelineLayout({ bindGroupLayouts: [postFx.fadeBGL] }),
-    vertex: { module: fadeMod, entryPoint: 'vs_main' },
-    fragment: { module: fadeMod, entryPoint: 'fs_main', targets: [{ format: HDR_FORMAT }] },
-    primitive: { topology: 'triangle-list' },
-  });
-  postFx.downsamplePipeline = device.createRenderPipeline({
-    layout: device.createPipelineLayout({ bindGroupLayouts: [postFx.downsampleBGL] }),
-    vertex: { module: downMod, entryPoint: 'vs_main' },
-    fragment: { module: downMod, entryPoint: 'fs_main', targets: [{ format: HDR_FORMAT }] },
-    primitive: { topology: 'triangle-list' },
-  });
-  postFx.upsamplePipelineAdditive = device.createRenderPipeline({
-    layout: device.createPipelineLayout({ bindGroupLayouts: [postFx.upsampleBGL] }),
-    vertex: { module: upMod, entryPoint: 'vs_main' },
-    fragment: { module: upMod, entryPoint: 'fs_main', targets: [{
-      format: HDR_FORMAT,
-      blend: {
-        color: { srcFactor: 'one', dstFactor: 'one', operation: 'add' },
-        alpha: { srcFactor: 'one', dstFactor: 'one', operation: 'add' },
-      },
-    }] },
-    primitive: { topology: 'triangle-list' },
-  });
-  postFx.upsamplePipelineReplace = device.createRenderPipeline({
-    layout: device.createPipelineLayout({ bindGroupLayouts: [postFx.upsampleBGL] }),
-    vertex: { module: upMod, entryPoint: 'vs_main' },
-    fragment: { module: upMod, entryPoint: 'fs_main', targets: [{ format: HDR_FORMAT }] },
-    primitive: { topology: 'triangle-list' },
-  });
-
-  // Allocate UBOs
-  postFx.fadeUBO = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-  postFx.downsampleUBO = [];
-  postFx.upsampleUBO = [];
-  for (let i = 0; i < BLOOM_LEVELS; i++) {
-    postFx.downsampleUBO.push(device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST }));
-    postFx.upsampleUBO.push(device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST }));
-  }
-  // [LAW:one-source-of-truth] Composite UBO size must match post.composite.wgsl CompositeParams:
-  // 5 fx scalars + 3 pads = 32 bytes, + vec3 primary + pad + vec3 accent + pad = 64 bytes total.
-  postFx.compositeUBO = device.createBuffer({ size: 64, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-
-  // Pre-allocate staging arrays — reused every frame instead of allocating new Float32Arrays.
-  postFx.fadeParams = new Float32Array(4);
-  postFx.compositeParams = new Float32Array(16); // 64-byte composite UBO
-  postFx.downsampleParams = [];
-  postFx.upsampleParams = [];
-  for (let i = 0; i < BLOOM_LEVELS; i++) {
-    postFx.downsampleParams.push(new Float32Array(4));
-    postFx.upsampleParams.push(new Float32Array(4));
-  }
-}
-
-function ensureCompositePipeline(format: GPUTextureFormat): GPURenderPipeline {
-  let p = postFx.compositePipelines.get(format);
-  if (p) return p;
-  const mod = createShaderModuleChecked('post.composite', SHADER_POST_COMPOSITE);
-  p = device.createRenderPipeline({
-    layout: device.createPipelineLayout({ bindGroupLayouts: [postFx.compositeBGL!] }),
-    vertex: { module: mod, entryPoint: 'vs_main' },
-    fragment: { module: mod, entryPoint: 'fs_main', targets: [{ format }] },
-    primitive: { topology: 'triangle-list' },
-  });
-  postFx.compositePipelines.set(format, p);
-  return p;
+  postFx.init();
 }
 
 function ensureHdrTargets(width: number, height: number): void {
-  if (postFx.width === width && postFx.height === height && postFx.scene.length === 2) return;
-  // destroy old
-  for (const t of postFx.scene) t.destroy();
-  for (const t of postFx.bloomMips) t.destroy();
-  postFx.depth?.destroy();
-  postFx.scene = [];
-  postFx.bloomMips = [];
-
-  postFx.width = width;
-  postFx.height = height;
-  for (let i = 0; i < 2; i++) {
-    postFx.scene.push(device.createTexture({
-      size: [width, height],
-      format: HDR_FORMAT,
-      usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
-    }));
-  }
-  postFx.depth = device.createTexture({
-    size: [width, height],
-    format: 'depth24plus',
-    usage: GPUTextureUsage.RENDER_ATTACHMENT,
-  });
-  let w = Math.max(1, Math.floor(width / 2));
-  let h = Math.max(1, Math.floor(height / 2));
-  for (let i = 0; i < BLOOM_LEVELS; i++) {
-    postFx.bloomMips.push(device.createTexture({
-      size: [w, h],
-      format: HDR_FORMAT,
-      usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
-    }));
-    w = Math.max(1, Math.floor(w / 2));
-    h = Math.max(1, Math.floor(h / 2));
-  }
-  postFx.needsClear = true;
-
-  // Cache texture views — stable until next resize.
-  postFx.sceneViews = postFx.scene.map(t => t.createView());
-  postFx.bloomMipViews = postFx.bloomMips.map(t => t.createView());
-
-  // Cache bind groups for fade (one per scene index as input).
-  postFx.fadeBGs = postFx.sceneViews.map(view =>
-    device.createBindGroup({ layout: postFx.fadeBGL!, entries: [
-      { binding: 0, resource: view },
-      { binding: 1, resource: postFx.linSampler! },
-      { binding: 2, resource: { buffer: postFx.fadeUBO! } },
-    ]})
-  );
-
-  // Cache bind groups for downsample chain.
-  // Index 0 reads scene (two variants for ping-pong); subsequent mips read the previous mip.
-  postFx.downsampleBGs = [];
-  // Two bind groups for mip 0 (one per scene texture)
-  for (let s = 0; s < 2; s++) {
-    postFx.downsampleBGs.push(device.createBindGroup({ layout: postFx.downsampleBGL!, entries: [
-      { binding: 0, resource: postFx.sceneViews[s] },
-      { binding: 1, resource: postFx.linSampler! },
-      { binding: 2, resource: { buffer: postFx.downsampleUBO[0] } },
-    ]}));
-  }
-  // One bind group per subsequent mip level
-  for (let i = 1; i < BLOOM_LEVELS; i++) {
-    postFx.downsampleBGs.push(device.createBindGroup({ layout: postFx.downsampleBGL!, entries: [
-      { binding: 0, resource: postFx.bloomMipViews[i - 1] },
-      { binding: 1, resource: postFx.linSampler! },
-      { binding: 2, resource: { buffer: postFx.downsampleUBO[i] } },
-    ]}));
-  }
-
-  // Cache bind groups for upsample chain.
-  postFx.upsampleBGs = postFx.bloomMipViews.map((view, i) =>
-    device.createBindGroup({ layout: postFx.upsampleBGL!, entries: [
-      { binding: 0, resource: view },
-      { binding: 1, resource: postFx.linSampler! },
-      { binding: 2, resource: { buffer: postFx.upsampleUBO[i] } },
-    ]})
-  );
-
-  // Cache composite bind groups — one per scene index (ping-pong).
-  // The render target (swapchain view) is not part of the bind group.
-  postFx.compositeBGs = postFx.sceneViews.map(sceneView =>
-    device.createBindGroup({ layout: postFx.compositeBGL!, entries: [
-      { binding: 0, resource: sceneView },
-      { binding: 1, resource: postFx.bloomMipViews[0] },
-      { binding: 2, resource: postFx.linSampler! },
-      { binding: 3, resource: { buffer: postFx.compositeUBO! } },
-    ]})
-  );
+  postFx.ensureHdrTargets(width, height);
 }
 
-// Sims call this to get the current HDR scene texture view (the render target).
 function getCurrentSceneView(): GPUTextureView {
-  return postFx.scene[postFx.sceneIdx].createView();
+  return postFx.getCurrentSceneView();
 }
 
-// [LAW:dataflow-not-control-flow] All sims always render into HDR offscreen; loadOp is data-driven from postFx.needsClear / trail persistence.
 function getColorAttachment(
-  _simDepthRef: DepthRef,
-  _resolveTarget: GPUTextureView,  // ignored — sims always render to HDR scene
-  _viewport: number[] | null
+  simDepthRef: DepthRef,
+  resolveTarget: GPUTextureView,
+  viewport: number[] | null,
 ): GPURenderPassColorAttachment {
-  const trails = state.fx.trailPersistence > 0.001;
-  const useLoad = trails && !postFx.needsClear;
-  return {
-    view: getCurrentSceneView(),
-    clearValue: catalogDefaultClearColor,
-    loadOp: useLoad ? 'load' : 'clear',
-    storeOp: 'store',
-  };
+  return postFx.getColorAttachment(simDepthRef, resolveTarget, viewport, state.fx.trailPersistence, catalogDefaultClearColor);
 }
 
-function getDepthAttachment(_simDepthRef: DepthRef, _viewport: number[] | null): GPURenderPassDepthStencilAttachment {
-  // [LAW:dataflow-not-control-flow] Same attachment shape every call; only the view varies.
-  // XR mode supplies the compositor's depth view so head-motion reprojection works correctly.
-  return {
-    view: xrDepthOverride ?? postFx.depth!.createView(),
-    depthClearValue: 1.0,
-    depthLoadOp: 'clear',
-    depthStoreOp: 'store',
-  };
+function getDepthAttachment(simDepthRef: DepthRef, viewport: number[] | null): GPURenderPassDepthStencilAttachment {
+  return postFx.getDepthAttachment(simDepthRef, viewport, xrDepthOverride);
 }
 
 function getRenderViewport(viewport: number[] | null): number[] | null {
@@ -1184,7 +887,7 @@ async function initWebGPU(): Promise<boolean> {
 function syncRenderConfig(_nextFormat: GPUTextureFormat, _nextSampleCount: number) {
   // [LAW:one-source-of-truth] All sims always render into HDR (rgba16float). Composite output format
   // is handled per-call by ensureCompositePipeline(); this function no longer needs to rebuild anything.
-  postFx.needsClear = true;
+  postFx.markNeedsClear();
 }
 
 
@@ -1303,9 +1006,9 @@ function createPhysicsSimulation() {
     getRenderViewport,
     getXrDepthOverride: () => xrDepthOverride,
     markersPerAttractor: MARKERS_PER_ATTRACTOR,
-    nullColorView: postFx.nullColorView!,
-    nullDepthView: postFx.nullDepthView!,
-    postFxDepthView: () => postFx.depth!.createView(),
+    nullColorView: postFx.getNullColorView(),
+    nullDepthView: postFx.getNullDepthView(),
+    postFxDepthView: () => postFx.getDepthView(),
     renderGrid,
     renderSampleCount,
     renderTargetFormat,
@@ -4255,10 +3958,10 @@ function xrFrame(time: DOMHighResTimeStamp, xrFrameData: XRFrame) {
       // (clobbered between eyes). Trails do not persist in XR.
       currentGpuPhase = `xr:frame:${xrFrameCount}:ensureHdrTargets(${width}x${height})`;
       ensureHdrTargets(width, height);
-      postFx.needsClear = true; // force loadOp:clear; no XR trails
-      const sceneIdx = postFx.sceneIdx;
+      postFx.markNeedsClear(); // force loadOp:clear; no XR trails
+      const sceneIdx = postFx.getSceneIndex();
       currentGpuPhase = `xr:frame:${xrFrameCount}:sim.render(${state.mode},eye=${viewIndex})`;
-      const sceneView = postFx.scene[sceneIdx].createView();
+      const sceneView = postFx.getSceneView(sceneIdx);
       sim.render(encoder, sceneView, null, viewIndex);
 
       // [LAW:dataflow-not-control-flow] Always run the UI render pass — empty
@@ -4276,7 +3979,7 @@ function xrFrame(time: DOMHighResTimeStamp, xrFrameData: XRFrame) {
         });
       }
       currentGpuPhase = `xr:frame:${xrFrameCount}:xr-widgets(eye=${viewIndex})`;
-      xrWidgetRenderer.draw(encoder, sceneView, postFx.scene[sceneIdx].format, viewIndex, xrUiRenderList);
+      xrWidgetRenderer.draw(encoder, sceneView, postFx.getSceneFormat(sceneIdx), viewIndex, xrUiRenderList);
 
       currentGpuPhase = `xr:frame:${xrFrameCount}:bloom(eye=${viewIndex})`;
       runBloomChain(encoder);
@@ -4396,70 +4099,11 @@ function resizeCanvas() {
 // After: composite is written into `finalView` (canvas swapchain or XR compositor texture).
 // `prevSceneIdx` (passed in) is the texture the fade pass should READ FROM (the previous frame's scene).
 function runFadePass(encoder: GPUCommandEncoder, prevSceneIdx: number, currSceneIdx: number) {
-  if (postFx.needsClear) return;
-  const persistence = state.fx.trailPersistence;
-  if (persistence < 0.001) return;
-  postFx.fadeParams[0] = persistence;
-  device.queue.writeBuffer(postFx.fadeUBO!, 0, postFx.fadeParams);
-  // [LAW:single-enforcer] Bind group is owned by ensureHdrTargets — allocate-on-resize, reuse-per-frame.
-  const pass = encoder.beginRenderPass({ colorAttachments: [{
-    view: postFx.sceneViews[currSceneIdx],
-    clearValue: catalogDefaultClearColor,
-    loadOp: 'clear',
-    storeOp: 'store',
-  }]});
-  pass.setPipeline(postFx.fadePipeline!);
-  pass.setBindGroup(0, postFx.fadeBGs[prevSceneIdx]);
-  pass.draw(3);
-  pass.end();
+  postFx.runFadePass(encoder, prevSceneIdx, currSceneIdx, state.fx.trailPersistence, catalogDefaultClearColor);
 }
 
 function runBloomChain(encoder: GPUCommandEncoder, timingBucket?: GpuTimingBucket) {
-  const fx = state.fx;
-  // Downsample chain: scene → mip0 → mip1 → ... → mipN
-  const sceneIdx = postFx.sceneIdx;
-  for (let i = 0; i < BLOOM_LEVELS; i++) {
-    const src = i === 0 ? postFx.scene[sceneIdx] : postFx.bloomMips[i - 1];
-    const p = postFx.downsampleParams[i];
-    p[0] = 1.0 / src.width; p[1] = 1.0 / src.height;
-    p[2] = fx.bloomThreshold; p[3] = i === 0 ? 1.0 : 0.0;
-    device.queue.writeBuffer(postFx.downsampleUBO[i], 0, p);
-    // [LAW:single-enforcer] downsampleBGs cache layout: [0]=mip0 reading scene[0], [1]=mip0 reading scene[1],
-    // [2..BLOOM_LEVELS]=mipK reading mipK-1. Keyed from (sceneIdx, i) here.
-    const bg = postFx.downsampleBGs[i === 0 ? sceneIdx : i + 1];
-    const bTsw = timingBucket && i === 0 ? tsBegin(timingBucket) : undefined;
-    const pass = encoder.beginRenderPass({
-      colorAttachments: [{
-        view: postFx.bloomMipViews[i],
-        clearValue: { r: 0, g: 0, b: 0, a: 1 },
-        loadOp: 'clear',
-        storeOp: 'store',
-      }],
-      ...(bTsw ? { timestampWrites: bTsw } : {}),
-    });
-    pass.setPipeline(postFx.downsamplePipeline!);
-    pass.setBindGroup(0, bg);
-    pass.draw(3);
-    pass.end();
-  }
-  // Upsample chain: mipN → mipN-1 (additive), ..., mip1 → mip0 (additive).
-  for (let i = BLOOM_LEVELS - 1; i > 0; i--) {
-    const src = postFx.bloomMips[i];
-    const p = postFx.upsampleParams[i];
-    p[0] = 1.0 / src.width; p[1] = 1.0 / src.height;
-    p[2] = fx.bloomRadius;
-    device.queue.writeBuffer(postFx.upsampleUBO[i], 0, p);
-    const pass = encoder.beginRenderPass({ colorAttachments: [{
-      view: postFx.bloomMipViews[i - 1],
-      clearValue: { r: 0, g: 0, b: 0, a: 1 },
-      loadOp: 'load',
-      storeOp: 'store',
-    }]});
-    pass.setPipeline(postFx.upsamplePipelineAdditive!);
-    pass.setBindGroup(0, postFx.upsampleBGs[i]);
-    pass.draw(3);
-    pass.end();
-  }
+  postFx.runBloomChain(encoder, state.fx, timingBucket ? tsBegin(timingBucket) : undefined);
 }
 
 function runComposite(
@@ -4469,39 +4113,15 @@ function runComposite(
   viewport: number[] | null = null,
   timingBucket?: GpuTimingBucket
 ) {
-  const fx = state.fx;
-  const tc = getThemeColors();
-  const buf = postFx.compositeParams;
-  buf[0] = fx.bloomIntensity;
-  buf[1] = fx.exposure;
-  buf[2] = fx.vignette;
-  buf[3] = fx.chromaticAberration;
-  buf[4] = fx.grading;
-  // f32 5..7 are padding.
-  buf[8] = tc.primary[0]; buf[9] = tc.primary[1]; buf[10] = tc.primary[2];
-  // pad 11
-  buf[12] = tc.accent[0]; buf[13] = tc.accent[1]; buf[14] = tc.accent[2];
-  // pad 15
-  device.queue.writeBuffer(postFx.compositeUBO!, 0, buf);
-
-  const pipeline = ensureCompositePipeline(finalFormat);
-  // [LAW:single-enforcer] compositeBGs cache is indexed by scene ping-pong slot; allocate-on-resize, reuse-per-frame.
-  const bg = postFx.compositeBGs[postFx.sceneIdx];
-  const pTsw = timingBucket ? tsEnd(timingBucket) : undefined;
-  const pass = encoder.beginRenderPass({
-    colorAttachments: [{
-      view: finalView,
-      clearValue: { r: 0, g: 0, b: 0, a: 1 },
-      loadOp: 'clear',
-      storeOp: 'store',
-    }],
-    ...(pTsw ? { timestampWrites: pTsw } : {}),
-  });
-  pass.setPipeline(pipeline);
-  pass.setBindGroup(0, bg);
-  if (viewport) pass.setViewport(viewport[0], viewport[1], viewport[2], viewport[3], 0, 1);
-  pass.draw(3);
-  pass.end();
+  postFx.runComposite(
+    encoder,
+    finalView,
+    finalFormat,
+    viewport,
+    state.fx,
+    getThemeColors(),
+    timingBucket ? tsEnd(timingBucket) : undefined,
+  );
 }
 
 function frame(now: DOMHighResTimeStamp) {
@@ -4555,13 +4175,13 @@ function frame(now: DOMHighResTimeStamp) {
     runDebugCompute(sim, encoder);
     updateDebugPanel();
 
-    const prevIdx = postFx.sceneIdx;
+    const prevIdx = postFx.getSceneIndex();
     const currIdx = 1 - prevIdx;
-    postFx.sceneIdx = currIdx;
+    postFx.setSceneIndex(currIdx);
 
     runFadePass(encoder, prevIdx, currIdx);
 
-    sim.render(encoder, postFx.sceneViews[currIdx], null);
+    sim.render(encoder, postFx.getSceneView(currIdx), null);
 
     runBloomChain(encoder, 'bloomComposite');
     const swapchainView = context.getCurrentTexture().createView();
@@ -4571,7 +4191,6 @@ function frame(now: DOMHighResTimeStamp) {
     device.queue.submit([encoder.finish()]);
     measureGpuFrame(now);
 
-    postFx.needsClear = false;
   } catch (e) {
     showSimError(mode, `frame threw: ${(e as Error).message}`);
     // Only drop the sim instance we were just rendering — not whatever lives
