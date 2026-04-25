@@ -1,14 +1,12 @@
 import '../../styles/main.css';
 import type { SimMode, Simulation, AppState, Attractor, Marker, ThemeColors, RGBThemeColors, ParamDef, ParamSection, ShapeParamDef, DepthRef, ModeParamsMap, ShapeName } from '../types';
 import { bindingRegistry } from '../xr-ui/bindings';
-import { evaluateAnchor, type Anchor } from '../xr-ui/anchors';
+import { evaluateAnchor } from '../xr-ui/anchors';
 import { layout as xrUiLayout, hitTestWidgets } from '../xr-ui/layout';
 import {
   xrUiStep, applySideEffects as xrUiApplyEffects, makeIdlePrev as xrUiMakeIdlePrev,
   uiHandClaimed, type XrUiPrev, type XrUiRegistry, type RenderCommand as XrRenderCommand,
 } from '../xr-ui/step';
-import { createXrWidgetRenderer, type XrWidgetRenderer } from '../xr-ui/renderer';
-import { HIG_DEFAULTS } from '../xr-ui/widgets';
 import { GAS_SHADER_SOURCES } from '../gasReservoir';
 import { DEFAULTS as catalogDefaults, PRESETS as catalogPresets, PARAM_DEFS as catalogParamDefs, COLOR_THEMES as catalogColorThemes, DEFAULT_THEME as catalogDefaultTheme, THEME_FADE_MS as catalogThemeFadeMs, DEFAULT_CLEAR_COLOR as catalogDefaultClearColor, SHAPE_IDS as catalogShapeIds, SHAPE_PARAMS as catalogShapeParams, FX_PARAM_DEFS as catalogFxParamDefs, MODE_TAB_LABELS as catalogModeTabLabels } from './catalog';
 import { createInitialState } from './state';
@@ -34,6 +32,7 @@ import { createCameraSystem, type CameraSystem } from '../render/camera';
 import { createFrameStatsService } from '../render/frame-stats';
 import { createGridRenderer, type GridRenderer } from '../render/grid';
 import { createPostFxService, type PostFxService } from '../render/post-fx';
+import { createXrRuntime, type XrRuntime } from '../xr/runtime';
 
 // WGSL shader imports — Vite loads these as raw strings
 import SHADER_BOIDS_COMPUTE from '../shaders/boids.compute.wgsl?raw';
@@ -630,14 +629,8 @@ const SHAPE_PARAMS: Partial<Record<ShapeName, Record<string, ShapeParamDef>>> = 
 };
 
 let cameraSystem!: CameraSystem;
-
-// [LAW:one-source-of-truth] When set, getDepthAttachment uses this XR-compositor-owned
-// depth view instead of postFx.depth. Submitting per-pixel depth to the compositor lets
-// Vision Pro do parallax-correct reprojection during head motion — without it, the
-// compositor can only planar-warp and the scene appears to shear/jitter as you turn.
-let xrDepthOverride: GPUTextureView | null = null;
-
 let postFx!: PostFxService;
+let xrRuntime: XrRuntime | null = null;
 
 function initPostFx(): void {
   postFx = createPostFxService({
@@ -665,7 +658,7 @@ function getColorAttachment(
 }
 
 function getDepthAttachment(simDepthRef: DepthRef, viewport: number[] | null): GPURenderPassDepthStencilAttachment {
-  return postFx.getDepthAttachment(simDepthRef, viewport, xrDepthOverride);
+  return postFx.getDepthAttachment(simDepthRef, viewport, xrRuntime?.getDepthOverride() ?? null);
 }
 
 function getRenderViewport(viewport: number[] | null): number[] | null {
@@ -876,7 +869,7 @@ function createPhysicsSimulation() {
     getDefaultAspect: () => canvas.width / canvas.height,
     getDepthAttachment,
     getRenderViewport,
-    getXrDepthOverride: () => xrDepthOverride,
+    getXrDepthOverride: () => xrRuntime?.getDepthOverride() ?? null,
     markersPerAttractor: MARKERS_PER_ATTRACTOR,
     nullColorView: postFx.getNullColorView(),
     nullDepthView: postFx.getNullDepthView(),
@@ -1244,9 +1237,10 @@ function setupRecordButton(): void {
   const idleLabel = 'Record XR Session';
   const tick = () => {
     const s = metrics.status();
+    const session = xrRuntime?.getSession() ?? null;
     if (s.phase === 'idle') {
       btn.textContent = idleLabel;
-      btn.disabled = !!xrSession;  // also disabled while XR session alive
+      btn.disabled = !!session;  // also disabled while XR session alive
       return;
     }
     btn.textContent = 'Recording — exit XR to stop';
@@ -1254,7 +1248,7 @@ function setupRecordButton(): void {
     requestAnimationFrame(tick);
   };
   btn.addEventListener('click', async () => {
-    if (metrics.status().phase !== 'idle' || xrSession) return;
+    if (metrics.status().phase !== 'idle' || xrRuntime?.getSession()) return;
     // Start the recording before the session so we capture session-setup
     // signals too. Producers are dormant until xrInputStep runs, so no
     // samples actually arrive until the first XR frame — this just ensures
@@ -1292,10 +1286,7 @@ function setupRecordButton(): void {
     });
     requestAnimationFrame(tick);
     await toggleXR();
-    // toggleXR assigns the module-level xrSession during the await — but the
-    // early guard's narrowing of that variable persists past the await in TS,
-    // so we un-narrow via an explicit cast to read the live value.
-    const session = xrSession as unknown as XRSession | null;
+    const session = xrRuntime?.getSession() ?? null;
     if (!session) {
       // Session failed to start — end the recording with whatever we have.
       metrics.stop();
@@ -2484,21 +2475,11 @@ const metrics = {
 
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// SECTION 8: WEBXR
+// SECTION 8: WEBXR INPUT PIPELINE
 // ═══════════════════════════════════════════════════════════════════════════════
 
-let xrSession: XRSession | null = null;
 let xrRefSpace: XRReferenceSpace | null = null;
 let xrBaseRefSpace: XRReferenceSpace | null = null; // pre-gesture reference space
-let xrBinding: XRGPUBinding | null = null;
-let xrLayer: XRProjectionLayer | null = null;
-// Diagnostic only: logged at session acquisition so the acquired-session log
-// line records whether the runtime granted hand-tracking. The hot path does
-// NOT consult this flag — per-source `source.hand` is the canonical truth
-// (xrUpdateHandFrames already gates joint queries on it). Mirroring that into
-// a session-level boolean and reading both would be a [LAW:one-source-of-truth]
-// violation. Reset on session end so a re-acquisition doesn't read stale state.
-let xrHandTrackingAvailable = false;
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // XR INPUT PIPELINE
@@ -2644,11 +2625,6 @@ const xrTuning = {
   gainMultiplier: 1.0,  // 0.1 when fine-modifier active (future)
 };
 
-// Which hand carries the bimanual clipboard panel. The other hand is free to
-// pinch widgets on the panel. [LAW:one-source-of-truth] One constant; don't
-// hardcode 'left' anywhere else in the XR code.
-const XR_PANEL_HAND: XrHand = 'left';
-
 // XR-UI module state. Single source of truth for the new widget pipeline:
 // - xrUiRegistry holds bindings + named layouts. Empty layouts map until ticket .13
 //   registers the first panel. xrUiStep returns idle/empty in that state.
@@ -2664,10 +2640,6 @@ const xrUiRegistry: XrUiRegistry = {
 let xrUiPrev: XrUiPrev = xrUiMakeIdlePrev();
 let xrUiRenderList: XrRenderCommand[] = [];
 const xrUiClaimed: Record<XrHand, boolean> = { left: false, right: false };
-// Created lazily on first XR frame (needs device + camera buffer). Empty render list
-// produces zero draw calls, so guarding the call site keeps desktop frames cheap.
-let xrWidgetRenderer: XrWidgetRenderer | null = null;
-let xrWidgetCameraBuffer: GPUBuffer | null = null;
 
 // View offset (modified by two-hand scale).
 // [LAW:one-source-of-truth] xrViewOffset is the single source for the user's
@@ -2926,6 +2898,23 @@ function applyXrViewOffset(): void {
   xrRefSpace = xrBaseRefSpace.getOffsetReferenceSpace(
     new RigidTransform({ x: xrViewOffset.x, y: xrViewOffset.y + xrViewOffsetY, z: xrViewOffset.z })
   );
+}
+
+function initializeXrReferenceSpace(refSpace: XRReferenceSpace, gotFloor: boolean): void {
+  // [LAW:one-source-of-truth] xrRefSpace/xrBaseRefSpace/xrViewOffset stay owned by
+  // the input pipeline so gesture updates and XR session startup mutate one shared state.
+  xrRefSpace = refSpace;
+  xrBaseRefSpace = refSpace;
+  xrViewOffsetY = gotFloor ? 1.6 : 0;
+  xrViewOffset.x = 0;
+  xrViewOffset.y = 0;
+  xrViewOffset.z = -5;
+  applyXrViewOffset();
+}
+
+function clearXrReferenceSpace(): void {
+  xrRefSpace = null;
+  xrBaseRefSpace = null;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -3414,461 +3403,7 @@ function setupXRButton() {
 }
 
 async function toggleXR() {
-  if (xrSession) {
-    logInfo('xr', 'exiting session (user clicked Exit VR)');
-    currentGpuPhase = 'xr:session.end';
-    xrSession.end();
-    return;
-  }
-
-  const btn = document.getElementById('btn-xr')!;
-  btn.textContent = 'Starting...';
-  logInfo('xr', 'toggleXR start', {
-    hasWebXR: !!navigator.xr,
-    userAgent: navigator.userAgent,
-  });
-
-  try {
-    // Safari visionOS: 'webgpu' is required to get XRGPUBinding.
-    // 'layers' is optional — Safari accepts it in updateRenderState({ layers: [...] })
-    // even when not listed as required. 'local-floor' is optional; fall back to 'local'.
-    currentGpuPhase = 'xr:requestSession';
-    xrSession = await navigator.xr!.requestSession('immersive-vr', {
-      requiredFeatures: ['webgpu'],
-      optionalFeatures: ['layers', 'local-floor', 'hand-tracking'],
-    });
-    // [LAW:one-source-of-truth] enabledFeatures is the WebXR-spec synchronous report
-    // of which optional features the runtime granted. Missing/empty → false, which
-    // is the correct conservative default ([LAW:no-defensive-null-guards]).
-    const enabledFeatures = xrSession.enabledFeatures;
-    xrHandTrackingAvailable = !!enabledFeatures && enabledFeatures.includes('hand-tracking');
-    logInfo('xr', 'session acquired', {
-      environmentBlendMode: (xrSession as unknown as { environmentBlendMode?: string }).environmentBlendMode,
-      interactionMode: (xrSession as unknown as { interactionMode?: string }).interactionMode,
-      visibilityState: (xrSession as unknown as { visibilityState?: string }).visibilityState,
-      handTracking: xrHandTrackingAvailable,
-      enabledFeatures,
-    });
-    let gotFloor = false;
-    try {
-      currentGpuPhase = 'xr:requestReferenceSpace(local-floor)';
-      xrRefSpace = await xrSession.requestReferenceSpace('local-floor');
-      gotFloor = true;
-      logInfo('xr', 'reference space = local-floor');
-    } catch (refErr) {
-      logInfo('xr', 'local-floor unavailable, falling back to local', (refErr as Error).message);
-      currentGpuPhase = 'xr:requestReferenceSpace(local)';
-      xrRefSpace = await xrSession.requestReferenceSpace('local');
-    }
-
-    // [LAW:one-source-of-truth] Store the base reference space before any offset.
-    // The gesture system rebuilds xrRefSpace from this base + xrViewOffset each frame
-    // that the two-hand scale gesture modifies the offset.
-    xrBaseRefSpace = xrRefSpace!;
-    xrViewOffsetY = gotFloor ? 1.6 : 0;
-    xrViewOffset.x = 0;
-    xrViewOffset.y = 0;
-    xrViewOffset.z = -5;
-    applyXrViewOffset();
-
-    // XRGPUBinding is the WebXR–WebGPU bridge. It takes the XR session and the
-    // GPUDevice (which must have been created with xrCompatible: true) and lets us
-    // create GPU-backed projection layers and retrieve per-eye GPUTextureViews each frame.
-    currentGpuPhase = 'xr:new XRGPUBinding';
-    xrBinding = new XRGPUBinding(xrSession, device);
-
-    // getPreferredColorFormat() returns the texture format the XR compositor expects.
-    // nativeProjectionScaleFactor is the device's native render resolution multiplier —
-    // passing it to scaleFactor renders at full resolution instead of a default lower res.
-    const preferredFormat = xrBinding.getPreferredColorFormat();
-    const scaleFactor = xrBinding.nativeProjectionScaleFactor;
-    logInfo('xr', 'binding ready', { preferredFormat, nativeProjectionScaleFactor: scaleFactor });
-    syncRenderConfig(preferredFormat, 1);
-
-    // Prefer texture-array configs WITH depth: the compositor needs per-pixel depth for
-    // parallax-correct reprojection, and texture-array layers guarantee the per-eye
-    // sub-image dimensions match our HDR scene target. Non-array layers share one wide
-    // texture between eyes (viewport-offset right eye), so pairing them with depth
-    // would produce a render-pass dimension mismatch (depth view wider than color view).
-    //
-    // depthStencilFormat is fixed to 'depth24plus' because all sim render pipelines are
-    // compiled with that format — a 'depth32float' layer would hand us a depth texture
-    // that no pipeline can bind. Adding 'depth32float' support would require either
-    // dual-compiling every pipeline or copying depth between formats each frame; neither
-    // is worth the complexity for a format fallback that likely never triggers in
-    // practice (depth24plus is universally supported).
-    //
-    // Fallback priority:
-    //   1. texture-array + depth24plus + native scale   ← ideal
-    //   2. texture-array + depth24plus, default scale   ← native scale rejected
-    //   3. texture-array, no depth                      ← depth rejected (loses reprojection)
-    //   4. non-array, no depth                          ← texture-array rejected
-    const layerConfigs: XRGPUProjectionLayerInit[] = [
-      { colorFormat: preferredFormat, depthStencilFormat: 'depth24plus', scaleFactor, textureType: 'texture-array' },
-      { colorFormat: preferredFormat, depthStencilFormat: 'depth24plus', textureType: 'texture-array' },
-      { colorFormat: preferredFormat, scaleFactor, textureType: 'texture-array' },
-      { colorFormat: preferredFormat, textureType: 'texture-array' },
-      { colorFormat: preferredFormat, scaleFactor },
-      { colorFormat: preferredFormat },
-    ];
-    currentGpuPhase = 'xr:createProjectionLayer';
-    let chosenConfig: XRGPUProjectionLayerInit | null = null;
-    const attemptLog: Array<{ config: XRGPUProjectionLayerInit; error: string }> = [];
-    for (const config of layerConfigs) {
-      try {
-        xrLayer = xrBinding.createProjectionLayer(config);
-        chosenConfig = config;
-        break;
-      } catch (e) {
-        const msg = (e as Error).message;
-        attemptLog.push({ config, error: msg });
-        logInfo('xr', 'projection layer config rejected', { config, error: msg });
-        xrLayer = null;
-      }
-    }
-    if (!xrLayer) {
-      throw new Error(`All projection layer configurations failed. Attempts: ${JSON.stringify(attemptLog)}`);
-    }
-    logInfo('xr', 'projection layer created', {
-      config: chosenConfig,
-      textureWidth: xrLayer.textureWidth,
-      textureHeight: xrLayer.textureHeight,
-      textureArrayLength: (xrLayer as unknown as { textureArrayLength?: number }).textureArrayLength,
-      ignoreDepthValues: (xrLayer as unknown as { ignoreDepthValues?: boolean }).ignoreDepthValues,
-    });
-
-    // fixedFoveation = 0 → no peripheral blur. Vision Pro's default is non-zero and
-    // visibly softens anything not in the center of view. Silently ignored if the
-    // property isn't implemented on this platform.
-    try {
-      (xrLayer as unknown as { fixedFoveation: number }).fixedFoveation = 0;
-      logInfo('xr', 'fixedFoveation set to 0');
-    } catch (foveErr) {
-      logInfo('xr', 'fixedFoveation unsupported on this platform', (foveErr as Error).message);
-    }
-
-    // Assign our GPU projection layer as the sole render target for this session.
-    // This replaces the default baseLayer (canvas-backed) with our GPU texture layer.
-    currentGpuPhase = 'xr:updateRenderState';
-    try {
-      xrSession.updateRenderState({ layers: [xrLayer] });
-      logInfo('xr', 'render state updated with projection layer');
-    } catch (rsErr) {
-      logError('xr:updateRenderState', rsErr);
-      throw rsErr;
-    }
-    // [LAW:single-enforcer] All XR input enters through xrPendingSources.
-    // selectstart queues a source; xrUpdateHandFrames resolves it to a hand.
-    // selectend releases the hand via xrOnSelectEnd.
-    xrSession.addEventListener('selectstart', (event) => {
-      xrPendingSources.push((event as XRInputSourceEvent).inputSource);
-    });
-    xrSession.addEventListener('selectend', (event) => {
-      xrOnSelectEnd((event as XRInputSourceEvent).inputSource);
-    });
-
-    btn.textContent = 'Exit VR';
-    state.xrEnabled = true;
-    currentGpuPhase = 'xr:awaiting first frame';
-
-    // Auto-register debug widget fixture so the renderer always has something
-    // visible without a console snippet. Expanded for ticket .19 to cover all
-    // 9 widget kinds — two rows, the new kinds in the second row. Remove when
-    // ticket .13 lands the real clipboard.
-    const idQuat: [number, number, number, number] = [0, 0, 0, 1];
-    const widgetSize = { x: 0.16, y: 0.06 };
-    const widgetPad  = { x: 0.02, y: 0.02 };
-    xrUiRegistry.layouts.set('debug', {
-      id: 'debug-panel', kind: 'panel',
-      // head-hud anchor pins the debug fixture ~70cm in front of the user's
-      // face so it stays interactive regardless of xrViewOffset (the
-      // simulation pan/zoom). World-anchored at z=-0.6 it appeared 4.4m
-      // away because the default xrViewOffset.z = -5 puts the camera 5m
-      // back from world origin — widgets shrunk to pixel-sized squares
-      // (per first XR session screenshots). Offset y=-0.15 drops the panel
-      // below eye-line so it doesn't block the simulation.
-      anchor: { kind: 'head-hud', distance: 0.7,
-                offset: { position: [0, -0.15, 0], orientation: idQuat } },
-      size: { x: 1.1, y: 0.5 },
-      children: [
-        {
-          id: 'debug-row-1', kind: 'group', layout: 'row',
-          children: [
-            { id: 'debug-s1', kind: 'slider', binding: 'physics.G',
-              orientation: 'horizontal', interaction: { kind: 'direct-drag', axis: 'x' },
-              visualSize: widgetSize, hitPadding: widgetPad },
-            { id: 'debug-b1', kind: 'button', binding: 'preset.physics.Default',
-              style: 'primary', visualSize: widgetSize, hitPadding: widgetPad },
-            { id: 'debug-r1', kind: 'readout', binding: 'physics.G',
-              visualSize: widgetSize, hitPadding: widgetPad },
-            { id: 'debug-d1', kind: 'dial', binding: 'physics.softening',
-              interaction: { kind: 'direct-drag', axis: 'x' },
-              visualSize: widgetSize, hitPadding: widgetPad },
-          ],
-        },
-        {
-          id: 'debug-row-2', kind: 'group', layout: 'row',
-          children: [
-            { id: 'debug-tg1', kind: 'toggle', binding: 'app.paused', style: 'switch',
-              visualSize: widgetSize, hitPadding: widgetPad },
-            { id: 'debug-st1', kind: 'stepper', binding: 'physics.count', step: 1000,
-              visualSize: widgetSize, hitPadding: widgetPad },
-            { id: 'debug-en1', kind: 'enum-chips', binding: 'physics.distribution',
-              visualSize: widgetSize, hitPadding: widgetPad },
-            { id: 'debug-pt1', kind: 'preset-tile', binding: 'preset.physics.Spiral Galaxy',
-              visualSize: widgetSize, hitPadding: widgetPad },
-            { id: 'debug-ct1', kind: 'category-tile', targetTabId: 'physics',
-              summary: {},
-              visualSize: widgetSize, hitPadding: widgetPad },
-          ],
-        },
-      ],
-    });
-
-    // Bimanual clipboard — first real XR panel (ticket .13). Held on the non-
-    // dominant hand; the dominant hand pinches widgets.
-    //
-    // The anchor is stored by reference in clipboardAnchor so the offset can
-    // be live-tweaked from DevTools (window.__xrUi.registry.layouts.get('clipboard').anchor)
-    // without re-deploying. Expect several iterations of on-headset tuning
-    // before these values feel right.
-    //
-    // Position: +0.15m "up" in wrist frame to lift the panel above the arm,
-    // -0.10m along wrist-local Z so it's on the palm side.
-    // Orientation: ~60° rotation around wrist-local X so the panel tilts up
-    // toward the user instead of lying flat along the forearm.
-    const tiltX = Math.sin(Math.PI * 0.33);
-    const tiltW = Math.cos(Math.PI * 0.33);
-    const clipboardOffset = {
-      position: [0.00, 0.15, -0.10] as [number, number, number],
-      orientation: [tiltX, 0, 0, tiltW] as [number, number, number, number],
-    };
-    const clipboardAnchor: Anchor = { kind: 'held', hand: XR_PANEL_HAND, offset: clipboardOffset };
-    const sliderSize = { x: 0.17, y: 0.030 };
-    const readoutSize = { x: 0.18, y: 0.025 };
-    xrUiRegistry.layouts.set('clipboard', {
-      id: 'clipboard-panel', kind: 'panel',
-      anchor: clipboardAnchor,
-      size: { x: 0.20, y: 0.28 },
-      children: [{
-        id: 'clipboard-col', kind: 'group', layout: 'column', gap: 0.015,
-        children: [
-          // Title readout uses a concrete continuous binding. app.mode is an
-          // EnumBinding and the MVP readout renderer formats continuous values.
-          { id: 'clipboard-title', kind: 'readout', binding: 'physics.G',
-            visualSize: readoutSize, hitPadding: { x: 0, y: 0 } },
-          { id: 'clipboard-G', kind: 'slider', binding: 'physics.G',
-            orientation: 'horizontal', interaction: { kind: 'direct-drag', axis: 'x' },
-            visualSize: sliderSize, hitPadding: HIG_DEFAULTS.defaultHitPadding },
-          { id: 'clipboard-soft', kind: 'slider', binding: 'physics.softening',
-            orientation: 'horizontal', interaction: { kind: 'direct-drag', axis: 'x' },
-            visualSize: sliderSize, hitPadding: HIG_DEFAULTS.defaultHitPadding },
-          { id: 'clipboard-int', kind: 'slider', binding: 'physics.interactionStrength',
-            orientation: 'horizontal', interaction: { kind: 'direct-drag', axis: 'x' },
-            visualSize: sliderSize, hitPadding: HIG_DEFAULTS.defaultHitPadding },
-        ],
-      }],
-    });
-    // Default to the clipboard. The 'debug' layout remains registered — switch
-    // via window.__xrUi-style inspection tools when the renderer test fixture
-    // is needed.
-    xrUiRegistry.activeLayoutId = 'clipboard';
-
-    xrSession.addEventListener('visibilitychange', () => {
-      logInfo('xr', 'visibilitychange', {
-        visibilityState: (xrSession as unknown as { visibilityState?: string } | null)?.visibilityState,
-      });
-    });
-
-    xrSession.requestAnimationFrame(xrFrame);
-    logInfo('xr', 'first frame requested; waiting for xrFrame callback');
-
-    xrSession.addEventListener('end', () => {
-      logInfo('xr', 'session ended', { finalPhase: currentGpuPhase, framesRendered: xrFrameCount });
-      xrSession = null;
-      xrRefSpace = null;
-      xrBaseRefSpace = null;
-      xrBinding = null;
-      xrLayer = null;
-      xrHandTrackingAvailable = false;
-      state.xrEnabled = false;
-      xrFrameCount = 0;
-      currentGpuPhase = 'desktop';
-      syncRenderConfig(canvasFormat, 1);
-      xrResetInputState();
-      btn.textContent = 'Enter VR';
-      requestAnimationFrame(frame);
-    });
-  } catch (e) {
-    logError('xr:toggle', e, `session failed to start (phase=${currentGpuPhase})`);
-    btn.textContent = `XR Error: ${(e as Error).message}`;
-    if (xrSession) { try { xrSession.end(); } catch (endErr) { logError('xr:cleanup-end', endErr); } }
-    xrSession = null;
-    currentGpuPhase = 'desktop';
-    setTimeout(() => { btn.textContent = 'Enter VR'; }, 4000);
-  }
-}
-
-let xrFrameCount = 0;
-const XR_FIRST_FRAMES_TO_LOG = 3;
-
-function xrFrame(time: DOMHighResTimeStamp, xrFrameData: XRFrame) {
-  if (!xrSession) return;
-  xrSession.requestAnimationFrame(xrFrame);
-  refreshThemeColors(time);
-  const isEarlyFrame = xrFrameCount < XR_FIRST_FRAMES_TO_LOG;
-  if (isEarlyFrame) logInfo('xr:frame', `xrFrame #${xrFrameCount} entered`, { mode: state.mode });
-  // [LAW:single-enforcer] Same prune + marker tick as the desktop loop — XR must see the same visual state.
-  pruneAttractors(currentSimStep());
-  const { frameDeltaMs: xrFrameDeltaMs, fpsUpdated: xrFpsUpdated } = frameStats.tick(time);
-  tickMarkers(Math.min(0.05, xrFrameDeltaMs * 0.001) * state.fx.timeScale * currentTimeDirection());
-  if (xrFpsUpdated) updateStats();
-
-  // Scope GPU validation errors to this frame so we can attribute them to the
-  // XR render path specifically (otherwise uncapturederror reports them without
-  // any indication that they came from XR encoding).
-  currentGpuPhase = `xr:frame:${xrFrameCount}:pre-encode`;
-  device.pushErrorScope('validation');
-
-  try {
-    const pose = xrFrameData.getViewerPose(xrRefSpace!);
-    if (!pose) {
-      if (isEarlyFrame) logInfo('xr:frame', 'no viewer pose yet');
-      // Don't pop here — finally handles it. Popping twice corrupts the scope stack.
-      return;
-    }
-
-    const sim = simulations[state.mode];
-    if (!sim) {
-      logError('xr:frame', new Error(`simulation for mode=${state.mode} is not initialized`));
-      return;
-    }
-
-    // [LAW:single-enforcer] Four-stage input pipeline:
-    // HandFrames → Gestures → InteractionState transitions → side effects.
-    xrInputStep(xrFrameData);
-
-    currentGpuPhase = `xr:frame:${xrFrameCount}:createCommandEncoder`;
-    const encoder = device.createCommandEncoder({ label: `xr-frame-${xrFrameCount}` });
-
-    // Compute runs once per frame — both eyes share the same simulation state.
-    if (!state.paused) {
-      currentGpuPhase = `xr:frame:${xrFrameCount}:sim.compute(${state.mode})`;
-      sim.compute(encoder);
-    }
-
-    // Render once per eye. pose.views is typically [left, right] on stereo devices.
-    //
-    // Each eye writes its camera data to a different 256-byte-aligned offset in the
-    // camera buffer (viewIndex * CAMERA_STRIDE), so both writeBuffer calls coexist
-    // in the queue without overwriting each other before the command buffer executes.
-    // Each eye's render pass binds the camera buffer at its own offset via renderBGs[viewIndex].
-    if (isEarlyFrame) logInfo('xr:frame', `pose has ${pose.views.length} views`);
-    for (let viewIndex = 0; viewIndex < pose.views.length; viewIndex++) {
-      const view = pose.views[viewIndex];
-
-      // getViewSubImage (Safari) / getSubImage (Chrome) returns the per-eye render target.
-      // The returned GPUTexture is owned by the XR compositor — don't hold refs across frames.
-      currentGpuPhase = `xr:frame:${xrFrameCount}:getViewSubImage(eye=${viewIndex})`;
-      const binding = xrBinding!;
-      const subImage = binding.getViewSubImage
-        ? binding.getViewSubImage(xrLayer!, view)
-        : binding.getSubImage!(xrLayer!, view);
-      if (!subImage) {
-        logError('xr:frame', new Error(`subImage null for eye ${viewIndex}`));
-        continue;
-      }
-      if (isEarlyFrame && viewIndex === 0) {
-        logInfo('xr:frame', 'subImage', {
-          viewport: subImage.viewport,
-          colorFormat: subImage.colorTexture.format,
-          hasDepth: !!subImage.depthStencilTexture,
-        });
-      }
-
-      // getViewDescriptor() returns the correct GPUTextureViewDescriptor for this eye,
-      // including the array layer index when the compositor uses a texture array.
-      currentGpuPhase = `xr:frame:${xrFrameCount}:createView(color,eye=${viewIndex})`;
-      const viewDesc = subImage.getViewDescriptor ? subImage.getViewDescriptor() : {};
-      const textureView = subImage.colorTexture.createView(viewDesc);
-
-      // [LAW:one-source-of-truth] Scene depth is written directly into the XR compositor's
-      // depth texture. With depth in hand, Vision Pro does per-pixel parallax-correct
-      // reprojection between render and scanout — eliminating the jitter/shear that
-      // planar-only warp produces during head motion.
-      //
-      // Safety gate: only use the XR depth view when the layer is a texture-array. For
-      // non-array layers the depth texture is full-width (2·eyeW) while our HDR scene
-      // is per-eye (eyeW, eyeH); mixing them in one render pass fails dimension
-      // validation. When we can't use it, getDepthAttachment falls back to postFx.depth
-      // (renders fine, no reprojection benefit — same as if depth wasn't requested).
-      currentGpuPhase = `xr:frame:${xrFrameCount}:createView(depth,eye=${viewIndex})`;
-      const isTextureArray = ((xrLayer as unknown as { textureArrayLength?: number }).textureArrayLength ?? 1) > 1;
-      const depthTex = subImage.depthStencilTexture;
-      xrDepthOverride = (depthTex && isTextureArray) ? depthTex.createView(viewDesc) : null;
-
-      // Set the per-eye camera override so getCameraUniformData() uses XR matrices.
-      const pos = view.transform.position;
-      cameraSystem.setXrOverride({
-        viewMatrix: new Float32Array(view.transform.inverse.matrix),
-        projMatrix: new Float32Array(view.projectionMatrix),
-        eye: [pos.x, pos.y, pos.z],
-      });
-
-      const { x, y, width, height } = subImage.viewport;
-
-      // [LAW:dataflow-not-control-flow] XR uses the same HDR + bloom + composite pipeline as desktop.
-      // HDR scene is sized to the eye render area; we share one HDR scene across both eyes
-      // (clobbered between eyes). Trails do not persist in XR.
-      currentGpuPhase = `xr:frame:${xrFrameCount}:ensureHdrTargets(${width}x${height})`;
-      ensureHdrTargets(width, height);
-      postFx.markNeedsClear(); // force loadOp:clear; no XR trails
-      const sceneIdx = postFx.getSceneIndex();
-      currentGpuPhase = `xr:frame:${xrFrameCount}:sim.render(${state.mode},eye=${viewIndex})`;
-      const sceneView = postFx.getSceneView(sceneIdx);
-      sim.render(encoder, sceneView, null, viewIndex);
-
-      // [LAW:dataflow-not-control-flow] Always run the UI render pass — empty
-      // render list → zero draw calls → effectively a no-op. Lazy-init the
-      // renderer on first frame so it doesn't allocate when XR is never used.
-      if (!xrWidgetRenderer) {
-        xrWidgetCameraBuffer = device.createBuffer({
-          label: 'xr-widgets-camera',
-          size: CAMERA_STRIDE * 2,
-          usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-        });
-        xrWidgetRenderer = createXrWidgetRenderer(device, xrWidgetCameraBuffer, () => {
-          const aspect = width / height;
-          return getCameraUniformData(aspect);
-        });
-      }
-      currentGpuPhase = `xr:frame:${xrFrameCount}:xr-widgets(eye=${viewIndex})`;
-      xrWidgetRenderer.draw(encoder, sceneView, postFx.getSceneFormat(sceneIdx), viewIndex, xrUiRenderList);
-
-      currentGpuPhase = `xr:frame:${xrFrameCount}:bloom(eye=${viewIndex})`;
-      runBloomChain(encoder);
-      currentGpuPhase = `xr:frame:${xrFrameCount}:composite(eye=${viewIndex})`;
-      const ctFormat = subImage.colorTexture.format;
-      runComposite(encoder, textureView, ctFormat, [x, y, width, height]);
-    }
-
-    currentGpuPhase = `xr:frame:${xrFrameCount}:submit`;
-    device.queue.submit([encoder.finish()]);
-    if (isEarlyFrame) logInfo('xr:frame', `frame #${xrFrameCount} submitted OK`);
-  } catch (e) {
-    logError('xr:frame', e, `frame #${xrFrameCount} threw synchronously`);
-  } finally {
-    // Clear overrides unconditionally: if anything threw inside the try, a non-null
-    // xrDepthOverride would retain a compositor-owned GPUTextureView past the frame
-    // boundary (unsafe — compositor reclaims these between frames). A stale XR
-    // camera override would also poison the desktop frame loop. // [LAW:single-enforcer]
-    cameraSystem.clearXrOverride();
-    xrDepthOverride = null;
-    device.popErrorScope().then(err => {
-      if (err) logError('xr:frame:validation', err, `frame #${xrFrameCount}`);
-    }).catch(popErr => logError('xr:frame:popScope', popErr));
-    xrFrameCount++;
-  }
+  await xrRuntime?.toggle();
 }
 
 
@@ -4137,6 +3672,45 @@ export async function startAppRuntimeImpl() {
   const ok = await initWebGPU();
   if (!ok) return;
   initializeSimulationRegistry();
+  xrRuntime = createXrRuntime({
+    cameraStride: CAMERA_STRIDE,
+    cameraSystem,
+    canvasFormat: () => canvasFormat,
+    currentSimStep,
+    currentTimeDirection,
+    device,
+    ensureHdrTargets,
+    getCameraUniformData,
+    getCurrentPhase: () => currentGpuPhase,
+    getCurrentSimulation: () => simulations[state.mode],
+    getPostFxSceneFormat: (index) => postFx.getSceneFormat(index),
+    getPostFxSceneIndex: () => postFx.getSceneIndex(),
+    getPostFxSceneView: (index) => postFx.getSceneView(index),
+    getRefSpace: () => xrRefSpace,
+    getUiRenderList: () => xrUiRenderList,
+    initializeReferenceSpace: initializeXrReferenceSpace,
+    inputStep: xrInputStep,
+    logError,
+    logInfo,
+    markPostFxNeedsClear: () => postFx.markNeedsClear(),
+    onSelectEnd: xrOnSelectEnd,
+    postFxRunBloomChain: runBloomChain,
+    postFxRunComposite: runComposite,
+    pruneAttractors,
+    queuePendingSource: (source) => { xrPendingSources.push(source); },
+    refreshThemeColors,
+    requestDesktopFrame: () => requestAnimationFrame(frame),
+    resetInputState: xrResetInputState,
+    clearReferenceSpace: clearXrReferenceSpace,
+    setCurrentPhase: (phase) => { currentGpuPhase = phase; },
+    setHandTrackingAvailable: () => {},
+    state,
+    syncRenderConfig,
+    tickFrameStats: (time) => frameStats.tick(time),
+    tickMarkers,
+    uiRegistry: xrUiRegistry,
+    updateStats,
+  });
 
   // Mobile detection — gates touch controls, bottom sheet, and performance defaults
   isMobile = mobileQuery.matches;
