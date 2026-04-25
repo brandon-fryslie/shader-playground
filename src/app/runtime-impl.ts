@@ -1,5 +1,5 @@
 import '../../styles/main.css';
-import type { SimMode, Simulation, AppState, Attractor, Marker, ThemeColors, RGBThemeColors, ParamDef, ParamSection, ShapeParamDef, DepthRef, ModeParamsMap, ShapeName } from '../types';
+import type { SimMode, Simulation, AppState, ThemeColors, RGBThemeColors, ParamDef, ParamSection, ShapeParamDef, DepthRef, ModeParamsMap, ShapeName } from '../types';
 import { bindingRegistry } from '../xr-ui/bindings';
 import { evaluateAnchor } from '../xr-ui/anchors';
 import { layout as xrUiLayout, hitTestWidgets } from '../xr-ui/layout';
@@ -28,6 +28,9 @@ import { createGpuTimingService, type GpuTimingBucket, type TimestampWrites } fr
 import { installDevtools } from '../diagnostics/devtools';
 import { createDiagnosticsLogger } from '../diagnostics/logging';
 import { cross3, dot3, normalize3, sub3 } from '../math/vec3';
+import { createAttractorSystem, type AttractorSystem, ATTRACTOR_MAX, MARKERS_PER_ATTRACTOR, PHYSICS_BASE_DT } from '../input/attractors';
+import { createPointerSystem, type PointerSystem } from '../input/pointer';
+import { createMobileInput, type MobileInput } from '../input/mobile';
 import { createCameraSystem, type CameraSystem } from '../render/camera';
 import { createFrameStatsService } from '../render/frame-stats';
 import { createGridRenderer, type GridRenderer } from '../render/grid';
@@ -372,216 +375,38 @@ const themeSystem = createThemeSystem({
   themes: catalogColorThemes,
 });
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// ATTRACTOR LIFECYCLE
-// ═══════════════════════════════════════════════════════════════════════════════
+let attractorSystem!: AttractorSystem;
 
-// [LAW:one-source-of-truth] Lifecycle is driven by sim step — forces are a pure function of (attractor, simStep).
-// This makes reverse→forward→reverse deterministic: rewinding to step K and replaying forward produces the
-// exact same force field unless the user branches (creates/moves a wand), in which case fresh journal entries
-// from step K onward overwrite the old history. No wall-clock leaks in; no cross-clock drift possible.
-// Step constants derive from the canonical base dt (0.016s at timeScale=1) so "seconds" sliders convert
-// to the same step count the sim actually advances per simulated second. Actual wall-clock duration varies
-// with timeScale, but the slider is intentionally indexed to simulated time at timeScale=1.
-const PHYSICS_BASE_DT = 0.016;
-const STEPS_PER_SECOND = 1 / PHYSICS_BASE_DT; // 62.5 — matches `baseDt = 0.016 * timeScale` in physics compute
-const ATTRACTOR_CHARGE_STEPS = 90;          // ~1.5s at timeScale=1 — quadratic ramp to full strength
-const ATTRACTOR_MAX = 32;                   // hard cap; oldest evicted if exceeded
-const ATTRACTOR_MIN_DECAY_STEPS = 3;        // ~0.05s — lower bound so releases are always visible
-// Slider values at or above this threshold treat the attractor as permanent
-// (decaySteps = Infinity). Matches the PARAM_DEFS attractorDecayTime max of 30.
-const ATTRACTOR_PERMANENT_THRESHOLD = 30.0;
-
-// [LAW:single-enforcer] Sim step + time direction accessed through these helpers so attractor lifecycle
-// always agrees with the physics sim's canonical clock. Returns safe defaults when physics is inactive.
 function currentSimStep(): number {
-  const sim = simulations['physics'];
-  if (isPhysicsSimulation(sim)) return sim.getSimStep();
-  return 0;
+  return attractorSystem.currentSimStep();
 }
 
 function currentTimeDirection(): number {
-  const sim = simulations['physics'];
-  if (isPhysicsSimulation(sim)) return sim.getTimeDirection();
-  return 1;
+  return attractorSystem.currentTimeDirection();
 }
 
-// [LAW:single-enforcer] Decay window in steps is computed here, from the
-// attractorDecayTime slider (seconds, converted via STEPS_PER_SECOND).
-// Slider at max → Infinity (attractor never decays — "Permanent" mode).
-// Minimum floor prevents zero-duration decay on instant-release taps.
-// Unused `a` kept in signature for future per-attractor decay overrides.
-function attractorDecaySteps(_a: Attractor): number {
-  const decayTime = state.physics.attractorDecayTime ?? 2.0;
-  if (decayTime >= ATTRACTOR_PERMANENT_THRESHOLD) return Number.POSITIVE_INFINITY;
-  return Math.max(ATTRACTOR_MIN_DECAY_STEPS, decayTime * STEPS_PER_SECOND);
+function attractorStrength(attractor: Parameters<AttractorSystem['attractorStrength']>[0], currentStep: number, ceiling: number): number {
+  return attractorSystem.attractorStrength(attractor, currentStep, ceiling);
 }
 
-// [LAW:dataflow-not-control-flow] Strength is a pure function of (attractor, currentStep). The same quadratic
-// formula handles charging and decay; step ordering selects which branch of the curve. No branches on wall time.
-// The charging branch covers both "still held" (releaseStep < 0) and "held in the past, replaying before release"
-// (currentStep < releaseStep) — after rewinding below a release point, forward replay must see the charging curve
-// the original pass saw, otherwise the journal gets overwritten with 0 and reverse→forward→reverse diverges.
-function attractorStrength(a: Attractor, currentStep: number, ceiling: number): number {
-  if (a.releaseStep < 0 || currentStep < a.releaseStep) {
-    const stepsHeld = Math.max(0, currentStep - a.chargeStep);
-    const t = Math.min(1, stepsHeld / ATTRACTOR_CHARGE_STEPS);
-    return t * t * ceiling;
-  }
-  const peakT = Math.min(1, a.holdSteps / ATTRACTOR_CHARGE_STEPS);
-  const peak = peakT * peakT * ceiling;
-  const elapsedSteps = currentStep - a.releaseStep;
-  const decaySteps = attractorDecaySteps(a);
-  if (elapsedSteps >= decaySteps) return 0;
-  const remaining = 1 - elapsedSteps / decaySteps;
-  return peak * remaining * remaining;
-}
-
-function attractorDead(a: Attractor, currentStep: number): boolean {
-  if (a.releaseStep < 0) return false;
-  return (currentStep - a.releaseStep) >= attractorDecaySteps(a);
-}
-
-// [LAW:single-enforcer] Pruning happens in exactly one place per frame, before uniform upload.
-// Rebuilds pointerToAttractor index mapping since array indices shift after splice.
-// Skipped during reverse: decrementing simStep could un-kill an attractor (d(currentStep - releaseStep) < 0),
-// and prune-then-un-kill would leave the live array out of sync with the reverse branch's state.
-function pruneAttractors(currentStep: number) {
-  if (currentTimeDirection() < 0) return;
-  const kept: Attractor[] = [];
-  const oldToNew = new Map<number, number>();
-  for (let i = 0; i < state.attractors.length; i++) {
-    const a = state.attractors[i];
-    if (!attractorDead(a, currentStep)) {
-      oldToNew.set(i, kept.length);
-      kept.push(a);
-    }
-  }
-  state.attractors = kept;
-  const newMap = new Map<number, number>();
-  state.pointerToAttractor.forEach((oldIdx, pointerId) => {
-    const newIdx = oldToNew.get(oldIdx);
-    if (newIdx !== undefined) newMap.set(pointerId, newIdx);
-  });
-  state.pointerToAttractor = newMap;
-  reindexMarkers(oldToNew);
+function pruneAttractors(currentStep: number): void {
+  attractorSystem.prune(currentStep);
 }
 
 function createAttractor(pointerId: number, pos: number[]): void {
-  // [LAW:single-enforcer] Block attractor creation during reverse — the journal owns attractor forces
-  // there; a new wand would branch mid-reverse and its journal write would collide with the replay.
-  if (currentTimeDirection() < 0) return;
-  // Force-evict oldest if we're at the cap. Oldest by insertion order.
-  if (state.attractors.length >= ATTRACTOR_MAX) {
-    state.attractors.shift();
-    // All indices shift down by 1.
-    const rebuilt = new Map<number, number>();
-    state.pointerToAttractor.forEach((idx, pid) => {
-      if (idx > 0) rebuilt.set(pid, idx - 1);
-    });
-    state.pointerToAttractor = rebuilt;
-    // Marker pool mirrors the shift — markers of the evicted attractor (idx 0) drop, rest shift down.
-    const survivors: Marker[] = [];
-    for (const m of state.markers) {
-      if (m.attractorIdx > 0) { m.attractorIdx -= 1; survivors.push(m); }
-    }
-    state.markers = survivors;
-  }
-  const step = currentSimStep();
-  state.attractors.push({
-    x: pos[0], y: pos[1], z: pos[2],
-    chargeStep: step, releaseStep: -1, holdSteps: -1,
-  });
-  const idx = state.attractors.length - 1;
-  state.pointerToAttractor.set(pointerId, idx);
-  spawnMarkersFor(idx, pos[0], pos[1], pos[2]);
+  attractorSystem.create(pointerId, pos);
 }
 
 function moveAttractor(pointerId: number, pos: number[]): void {
-  const idx = state.pointerToAttractor.get(pointerId);
-  if (idx === undefined) return;
-  const a = state.attractors[idx];
-  if (!a || a.releaseStep >= 0) return;
-  a.x = pos[0]; a.y = pos[1]; a.z = pos[2];
+  attractorSystem.move(pointerId, pos);
 }
 
 function releaseAttractor(pointerId: number): void {
-  const idx = state.pointerToAttractor.get(pointerId);
-  if (idx === undefined) return;
-  state.pointerToAttractor.delete(pointerId);
-  const a = state.attractors[idx];
-  if (!a || a.releaseStep >= 0) return;
-  const step = currentSimStep();
-  a.releaseStep = step;
-  a.holdSteps = Math.max(1, step - a.chargeStep); // min 1 step to avoid zero-duration divide
+  attractorSystem.release(pointerId);
 }
 
-// ─── MARKER PARTICLES (diegetic attractor indicator) ────────────────────────────
-// [LAW:one-source-of-truth] Markers are a flat pool keyed by parent attractor index. Lifecycle mirrors
-// the attractor's: spawnMarkersFor on createAttractor, reindexed on pruneAttractors, integrated each
-// frame via tickMarkers. They render into the HDR scene so bloom carries them — no overlay pass.
-const MARKERS_PER_ATTRACTOR = 36;
-const MARKER_SPAWN_RADIUS = 0.22;
-const MARKER_ORBIT_SPEED = 1.1;
-
-function spawnMarkersFor(attractorIdx: number, x: number, y: number, z: number): void {
-  const tc = getThemeColors();
-  for (let i = 0; i < MARKERS_PER_ATTRACTOR; i++) {
-    // Uniform point on sphere via inverse-CDF of cos(theta).
-    const u = Math.random() * 2 - 1;
-    const phi = Math.random() * Math.PI * 2;
-    const s = Math.sqrt(1 - u * u);
-    const dx = s * Math.cos(phi), dy = u, dz = s * Math.sin(phi);
-    const r = MARKER_SPAWN_RADIUS * (0.6 + Math.random() * 0.8);
-    // Tangent vector: cross(radial, arbitrary up) then normalize. Yields orbital velocity.
-    let tx = -dz, ty = 0, tz = dx;
-    const tLen = Math.hypot(tx, ty, tz) || 1;
-    tx /= tLen; ty /= tLen; tz /= tLen;
-    const orbitSign = Math.random() < 0.5 ? -1 : 1;
-    const orbitSpeed = MARKER_ORBIT_SPEED * (0.7 + Math.random() * 0.6) * orbitSign;
-    state.markers.push({
-      x: x + dx * r, y: y + dy * r, z: z + dz * r,
-      vx: tx * orbitSpeed, vy: ty * orbitSpeed, vz: tz * orbitSpeed,
-      tintR: tc.accent[0], tintG: tc.accent[1], tintB: tc.accent[2],
-      seed: Math.random(),
-      attractorIdx,
-    });
-  }
-}
-
-function reindexMarkers(oldToNew: Map<number, number>): void {
-  const kept: Marker[] = [];
-  for (const m of state.markers) {
-    const newIdx = oldToNew.get(m.attractorIdx);
-    if (newIdx !== undefined) {
-      m.attractorIdx = newIdx;
-      kept.push(m);
-    }
-  }
-  state.markers = kept;
-}
-
-// [LAW:dataflow-not-control-flow] Marker integration is a straight-line pass: every marker gets a pull
-// from its parent attractor and a light global drag so orbits stay bounded. No branches skip work.
 function tickMarkers(dt: number): void {
-  if (state.markers.length === 0) return;
-  const attractors = state.attractors;
-  const softSq = 0.04; // softening squared — matches the visual scale of the well
-  // Drag always dissipates regardless of sign(dt) — otherwise reverse play amplifies velocity.
-  const drag = Math.exp(-0.6 * Math.abs(dt));
-  for (const m of state.markers) {
-    const a = attractors[m.attractorIdx];
-    if (!a) continue; // safety; prune should keep these in sync
-    const rx = a.x - m.x, ry = a.y - m.y, rz = a.z - m.z;
-    const r2 = rx * rx + ry * ry + rz * rz + softSq;
-    const inv = 1 / Math.sqrt(r2);
-    const pull = 3.0 * inv * inv; // ~1/r² — mild spring-ish
-    m.vx += rx * inv * pull * dt;
-    m.vy += ry * inv * pull * dt;
-    m.vz += rz * inv * pull * dt;
-    m.vx *= drag; m.vy *= drag; m.vz *= drag;
-    m.x += m.vx * dt; m.y += m.vy * dt; m.z += m.vz * dt;
-  }
+  attractorSystem.tickMarkers(dt);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -744,6 +569,39 @@ async function initWebGPU(): Promise<boolean> {
   renderSampleCount = 1; // MSAA dropped — bloom + HDR replace it.
   context.configure({ device, format: canvasFormat, alphaMode: 'opaque' });
   cameraSystem = createCameraSystem(state.camera);
+  attractorSystem = createAttractorSystem({
+    getCurrentPhysicsStep: () => {
+      const sim = simulations['physics'];
+      return isPhysicsSimulation(sim) ? sim.getSimStep() : 0;
+    },
+    getCurrentTimeDirection: () => {
+      const sim = simulations['physics'];
+      return isPhysicsSimulation(sim) ? sim.getTimeDirection() : 1;
+    },
+    getThemeColors,
+    state,
+  });
+  pointerSystem = createPointerSystem({
+    fluidWorldSize: FLUID_WORLD_SIZE,
+    getCanvas: () => canvas,
+    onCreateAttractor: createAttractor,
+    onMoveAttractor: moveAttractor,
+    onReleaseAttractor: releaseAttractor,
+    state,
+  });
+  mobileInput = createMobileInput({
+    applySimulationInteraction: (pointerId, mx, my, isMove) => pointerSystem.applySimulationInteraction(pointerId, mx, my, isMove),
+    cancelDebugMovement,
+    getCanvas: () => canvas,
+    modeTabLabels: MODE_TAB_LABELS,
+    releasePointerInteraction: (pointerId) => pointerSystem.releasePointerInteraction(pointerId),
+    resetCurrentSimulation: resetCurrentSim,
+    selectMode,
+    setSimulationInteractionInactive,
+    state,
+    storageKey,
+    syncPauseButtons,
+  });
   initPostFx();
 
   return true;
@@ -1623,460 +1481,46 @@ function buildThemeSelector() {
   themeSystem.buildThemeSelector();
 }
 
-// Compute camera eye position and basis vectors from orbit state
-function getCameraBasis() {
-  const cam = state.camera;
-  const cosRx = Math.cos(cam.rotX), sinRx = Math.sin(cam.rotX);
-  const cosRy = Math.cos(cam.rotY), sinRy = Math.sin(cam.rotY);
-  const eye = [cam.distance * cosRx * sinRy, cam.distance * sinRx, cam.distance * cosRx * cosRy];
-  const forward = normalize3(sub3([0, 0, 0], eye));
-  const worldUp = [0, 1, 0];
-  const right = normalize3(cross3(forward, worldUp));
-  const up = cross3(right, forward);
-  return { eye, forward, right, up };
+let pointerSystem!: PointerSystem;
+let mobileInput!: MobileInput;
+
+function worldToFluidUV(worldPoint: number[]): number[] | null {
+  return pointerSystem.worldToFluidUV(worldPoint);
 }
 
-// Build a ray from screen coords (0-1) through the camera
-function screenRay(mx: number, my: number) {
-  const cam = state.camera;
-  const fovRad = cam.fov * Math.PI / 180;
-  const aspect = canvas.width / canvas.height;
-  const { eye, forward, right, up } = getCameraBasis();
-  const halfFov = Math.tan(fovRad * 0.5);
-  const ndcX = (mx * 2 - 1) * halfFov * aspect;
-  const ndcY = (my * 2 - 1) * halfFov;
-  const dir = normalize3([
-    forward[0] + right[0] * ndcX + up[0] * ndcY,
-    forward[1] + right[1] * ndcX + up[1] * ndcY,
-    forward[2] + right[2] * ndcX + up[2] * ndcY,
-  ]);
-  return { eye, dir };
+function intersectRayWithPlane(origin: number[], dir: number[], planeY: number): number[] | null {
+  return pointerSystem.intersectRayWithPlane(origin, dir, planeY);
 }
 
-// Unproject screen coords to a world-space point on a plane through the origin,
-// perpendicular to the view direction.
-function screenToWorld(mx: number, my: number) {
-  const { dir } = screenRay(mx, my);
-  // Intersect with a plane at origin perpendicular to the view
-  const spread = state.camera.distance * 0.5;
-  return [dir[0] * spread, dir[1] * spread, dir[2] * spread];
+function closestPointOnRayToOrigin(origin: number[], dir: number[]): number[] {
+  return pointerSystem.closestPointOnRayToOrigin(origin, dir);
 }
 
-// Unproject screen coords onto a plane through the origin perpendicular to the view direction.
-// Unlike screenToWorld, this does a proper ray-plane intersection with no artificial spread cap.
-function screenToSimPlane(mx: number, my: number) {
-  const { eye, dir } = screenRay(mx, my);
-  // Plane normal = direction from origin toward camera (view-perpendicular, through origin).
-  const n = normalize3(eye);
-  const denom = dot3(dir, n);
-  // Ray nearly parallel to plane — fall back to closest approach to origin.
-  if (Math.abs(denom) < 0.0001) return closestPointOnRayToOrigin(eye, dir);
-  const t = -dot3(eye, n) / denom;
-  return [eye[0] + dir[0] * t, eye[1] + dir[1] * t, eye[2] + dir[2] * t];
+function setSimulationInteractionInactive(): void {
+  pointerSystem.setSimulationInteractionInactive();
 }
-
-// Unproject screen coords onto the fluid plane (y=0) using the shared fluid footprint.
-// Returns [u, v] in 0-1 range, or null if ray misses.
-function screenToFluidUV(mx: number, my: number) {
-  const { eye, dir } = screenRay(mx, my);
-  if (Math.abs(dir[1]) < 0.0001) return null;
-  const t = -eye[1] / dir[1];
-  if (t < 0) return null;
-  const hitX = eye[0] + dir[0] * t;
-  const hitZ = eye[2] + dir[2] * t;
-  const halfSize = FLUID_WORLD_SIZE * 0.5;
-  if (Math.abs(hitX) > halfSize || Math.abs(hitZ) > halfSize) return null;
-  return [
-    (hitX + halfSize) / FLUID_WORLD_SIZE,
-    (hitZ + halfSize) / FLUID_WORLD_SIZE,
-  ];
-}
-
-function worldToFluidUV(worldPoint: number[]) {
-  const halfSize = FLUID_WORLD_SIZE * 0.5;
-  if (Math.abs(worldPoint[0]) > halfSize || Math.abs(worldPoint[2]) > halfSize) return null;
-  return [
-    (worldPoint[0] + halfSize) / FLUID_WORLD_SIZE,
-    (worldPoint[2] + halfSize) / FLUID_WORLD_SIZE,
-  ];
-}
-
-function intersectRayWithPlane(origin: number[], dir: number[], planeY: number) {
-  if (Math.abs(dir[1]) < 0.0001) return null;
-  const t = (planeY - origin[1]) / dir[1];
-  if (t < 0) return null;
-  return [
-    origin[0] + dir[0] * t,
-    origin[1] + dir[1] * t,
-    origin[2] + dir[2] * t,
-  ];
-}
-
-function closestPointOnRayToOrigin(origin: number[], dir: number[]) {
-  const denom = dot3(dir, dir) || 1;
-  const t = Math.max(0, -dot3(origin, dir) / denom);
-  return [
-    origin[0] + dir[0] * t,
-    origin[1] + dir[1] * t,
-    origin[2] + dir[2] * t,
-  ];
-}
-
-function setSimulationInteractionInactive() {
-  state.mouse.down = false;
-  state.mouse.dx = 0;
-  state.mouse.dy = 0;
-}
-
-function setupMouseControls() {
-  const c = canvas;
-  let dragging = false;
-  let interacting = false; // plain drag = sim interaction; ctrl/meta = orbit camera
-
-  c.addEventListener('pointerdown', (e) => {
-    if (state.xrEnabled) return;
-    dragging = true;
-    interacting = !(e.ctrlKey || e.metaKey);
-    const rect = c.getBoundingClientRect();
-    const mx = (e.clientX - rect.left) / rect.width;
-    const my = 1.0 - (e.clientY - rect.top) / rect.height;
-    state.mouse.dx = 0;
-    state.mouse.dy = 0;
-
-    if (interacting) {
-      // Set initial position in correct coord system for fluid
-      if (state.mode === 'fluid') {
-        const uv = screenToFluidUV(mx, my);
-        // [LAW:dataflow-not-control-flow] Out-of-bounds hits become null data and flow through the same interaction path as inactive input instead of being clamped to the edge.
-        if (!uv) {
-          setSimulationInteractionInactive();
-        } else {
-          state.mouse.down = true;
-          const wp = screenToWorld(mx, my);
-          state.mouse.worldX = wp[0];
-          state.mouse.worldY = wp[1];
-          state.mouse.worldZ = wp[2];
-          state.mouse.x = uv[0];
-          state.mouse.y = uv[1];
-        }
-      } else {
-        // [LAW:one-source-of-truth] Ray-plane intersection at y=0 (the simulation disk plane) gives
-        // unlimited spatial reach and stable depth mapping — no artificial spread limit.
-        const hit = screenToSimPlane(mx, my);
-        state.mouse.down = true;
-        state.mouse.worldX = hit[0];
-        state.mouse.worldY = hit[1];
-        state.mouse.worldZ = hit[2];
-        state.mouse.x = mx; state.mouse.y = my;
-        // [LAW:single-enforcer] N-body interaction is owned by the attractor system exclusively.
-        // Other sims still consume state.mouse.worldX/Y/Z; the attractor state is additive, not replacing.
-        if (state.mode === 'physics') createAttractor(e.pointerId, hit);
-      }
-    } else {
-      state.mouse.x = mx; state.mouse.y = my;
-    }
-    e.preventDefault();
-  });
-
-  c.addEventListener('pointermove', (e) => {
-    if (state.xrEnabled) return;
-    if (!dragging) return;
-    const rect = c.getBoundingClientRect();
-    const mx = (e.clientX - rect.left) / rect.width;
-    const my = 1.0 - (e.clientY - rect.top) / rect.height;
-
-    // Mode is committed at pointerdown — modifier changes mid-drag are ignored.
-    const interact = interacting;
-
-    if (interact) {
-      // For fluid: ray-cast onto y=0 plane for camera-correct coordinates
-      if (state.mode === 'fluid') {
-        const uv = screenToFluidUV(mx, my);
-        if (!uv) {
-          setSimulationInteractionInactive();
-        } else {
-          state.mouse.down = true;
-          const wp = screenToWorld(mx, my);
-          state.mouse.worldX = wp[0];
-          state.mouse.worldY = wp[1];
-          state.mouse.worldZ = wp[2];
-          state.mouse.dx = (uv[0] - state.mouse.x) * 10;
-          state.mouse.dy = (uv[1] - state.mouse.y) * 10;
-          state.mouse.x = uv[0];
-          state.mouse.y = uv[1];
-        }
-      } else {
-        // Sim interaction (plain drag — no modifier)
-        const hit = screenToSimPlane(mx, my);
-        state.mouse.down = true;
-        state.mouse.worldX = hit[0];
-        state.mouse.worldY = hit[1];
-        state.mouse.worldZ = hit[2];
-        state.mouse.dx = (mx - state.mouse.x) * 10;
-        state.mouse.dy = (my - state.mouse.y) * 10;
-        state.mouse.x = mx;
-        state.mouse.y = my;
-        // Wand behavior: held attractor tracks cursor.
-        if (state.mode === 'physics') moveAttractor(e.pointerId, hit);
-      }
-    } else {
-      // Orbit camera (cmd/ctrl+drag)
-      state.camera.rotY += e.movementX * 0.005;
-      state.camera.rotX += e.movementY * 0.005;
-      state.camera.rotX = Math.max(-Math.PI * 0.45, Math.min(Math.PI * 0.45, state.camera.rotX));
-      state.mouse.down = false;
-    }
-  });
-
-  const onPointerRelease = (e: PointerEvent) => {
-    if (state.xrEnabled) return;
-    dragging = false;
-    interacting = false;
-    state.mouse.down = false;
-    state.mouse.dx = 0;
-    state.mouse.dy = 0;
-    releaseAttractor(e.pointerId); // no-op if pointer wasn't tracked
-  };
-  c.addEventListener('pointerup', onPointerRelease);
-  c.addEventListener('pointercancel', onPointerRelease);
-  c.addEventListener('pointerleave', onPointerRelease);
-
-  c.addEventListener('contextmenu', (e) => e.preventDefault());
-
-  c.addEventListener('wheel', (e) => {
-    if (state.xrEnabled) return;
-    state.camera.distance *= (1 + e.deltaY * 0.001);
-    state.camera.distance = Math.max(0.5, Math.min(200, state.camera.distance));
-    e.preventDefault();
-  }, { passive: false });
-}
-
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// SECTION 6b: MOBILE TOUCH & UI
-// ═══════════════════════════════════════════════════════════════════════════════
 
 const mobileQuery = matchMedia('(max-width: 768px)');
 let isMobile = mobileQuery.matches;
 
+function setupMouseControls() {
+  pointerSystem.setupMouseControls();
+}
+
 function setupMobileTouchControls() {
-  const c = canvas;
-  const pointers = new Map<number, { x: number; y: number }>();
-  let prevPinchDist = 0;
-  let prevMidX = 0;
-  let prevMidY = 0;
-
-  // Reuse the same sim-interaction logic as desktop for 1-finger
-  function applySimInteraction(pointerId: number, mx: number, my: number, isMove: boolean) {
-    if (state.mode === 'fluid') {
-      const uv = screenToFluidUV(mx, my);
-      if (!uv) {
-        setSimulationInteractionInactive();
-      } else {
-        state.mouse.down = true;
-        const wp = screenToWorld(mx, my);
-        state.mouse.worldX = wp[0];
-        state.mouse.worldY = wp[1];
-        state.mouse.worldZ = wp[2];
-        state.mouse.dx = isMove ? (uv[0] - state.mouse.x) * 10 : 0;
-        state.mouse.dy = isMove ? (uv[1] - state.mouse.y) * 10 : 0;
-        state.mouse.x = uv[0];
-        state.mouse.y = uv[1];
-      }
-    } else {
-      const hit = screenToSimPlane(mx, my);
-      state.mouse.down = true;
-      state.mouse.worldX = hit[0];
-      state.mouse.worldY = hit[1];
-      state.mouse.worldZ = hit[2];
-      state.mouse.dx = isMove ? (mx - state.mouse.x) * 10 : 0;
-      state.mouse.dy = isMove ? (my - state.mouse.y) * 10 : 0;
-      state.mouse.x = mx;
-      state.mouse.y = my;
-      // Wand: create on touch-start, track on move.
-      if (state.mode === 'physics') {
-        if (isMove) moveAttractor(pointerId, hit);
-        else createAttractor(pointerId, hit);
-      }
-    }
-  }
-
-  c.addEventListener('pointerdown', (e) => {
-    if (state.xrEnabled) return;
-    e.preventDefault();
-    pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
-
-    // 1 finger: start sim interaction
-    if (pointers.size === 1) {
-      const rect = c.getBoundingClientRect();
-      const mx = (e.clientX - rect.left) / rect.width;
-      const my = 1.0 - (e.clientY - rect.top) / rect.height;
-      state.mouse.dx = 0;
-      state.mouse.dy = 0;
-      applySimInteraction(e.pointerId, mx, my, false);
-    }
-    // 2 fingers: initialize pinch/orbit baseline, stop sim interaction
-    if (pointers.size === 2) {
-      setSimulationInteractionInactive();
-      // Release all held attractors — transitioning to orbit mode.
-      pointers.forEach((_, pid) => releaseAttractor(pid));
-      const pts = [...pointers.values()];
-      prevMidX = (pts[0].x + pts[1].x) / 2;
-      prevMidY = (pts[0].y + pts[1].y) / 2;
-      prevPinchDist = Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y);
-    }
-  }, { passive: false });
-
-  c.addEventListener('pointermove', (e) => {
-    if (state.xrEnabled) return;
-    if (!pointers.has(e.pointerId)) return;
-    e.preventDefault();
-    pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
-
-    if (pointers.size === 1) {
-      // 1 finger: sim interaction
-      const rect = c.getBoundingClientRect();
-      const mx = (e.clientX - rect.left) / rect.width;
-      const my = 1.0 - (e.clientY - rect.top) / rect.height;
-      applySimInteraction(e.pointerId, mx, my, true);
-    } else if (pointers.size === 2) {
-      // 2 fingers: orbit + pinch zoom
-      const pts = [...pointers.values()];
-      const midX = (pts[0].x + pts[1].x) / 2;
-      const midY = (pts[0].y + pts[1].y) / 2;
-      const dist = Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y);
-
-      // Orbit from midpoint delta
-      state.camera.rotY += (midX - prevMidX) * 0.005;
-      state.camera.rotX += (midY - prevMidY) * 0.005;
-      state.camera.rotX = Math.max(-Math.PI * 0.45, Math.min(Math.PI * 0.45, state.camera.rotX));
-
-      // Pinch zoom
-      if (prevPinchDist > 0) {
-        state.camera.distance *= prevPinchDist / dist;
-        state.camera.distance = Math.max(0.5, Math.min(200, state.camera.distance));
-      }
-
-      prevMidX = midX;
-      prevMidY = midY;
-      prevPinchDist = dist;
-      state.mouse.down = false;
-    }
-  }, { passive: false });
-
-  const onPointerEnd = (e: PointerEvent) => {
-    pointers.delete(e.pointerId);
-    releaseAttractor(e.pointerId); // no-op if not tracked as attractor
-    if (pointers.size === 0) {
-      state.mouse.down = false;
-      state.mouse.dx = 0;
-      state.mouse.dy = 0;
-      prevPinchDist = 0;
-    }
-    // If going from 2→1 finger, re-initialize the remaining finger as sim interaction start
-    if (pointers.size === 1) {
-      const [remainingId, remaining] = [...pointers.entries()][0];
-      const rect = c.getBoundingClientRect();
-      const mx = (remaining.x - rect.left) / rect.width;
-      const my = 1.0 - (remaining.y - rect.top) / rect.height;
-      state.mouse.dx = 0;
-      state.mouse.dy = 0;
-      applySimInteraction(remainingId, mx, my, false);
-    }
-  };
-  c.addEventListener('pointerup', onPointerEnd);
-  c.addEventListener('pointercancel', onPointerEnd);
-
-  c.addEventListener('contextmenu', (e) => e.preventDefault());
+  mobileInput.setupTouchControls();
 }
 
 function setupMobileFab() {
-  document.getElementById('fab-pause')!.addEventListener('click', () => {
-    state.paused = !state.paused;
-    if (state.paused) cancelDebugMovement();
-    syncPauseButtons();
-  });
-
-  document.getElementById('fab-reset')!.addEventListener('click', () => {
-    resetCurrentSim();
-  });
-
-  const modeOrder: SimMode[] = ['physics', 'boids', 'physics_classic', 'fluid', 'parametric', 'reaction'];
-  const stepMode = (delta: number) => {
-    const idx = modeOrder.indexOf(state.mode);
-    const next = modeOrder[(idx + delta + modeOrder.length) % modeOrder.length];
-    selectMode(next);
-  };
-  document.getElementById('mode-prev')!.addEventListener('click', () => stepMode(-1));
-  document.getElementById('mode-next')!.addEventListener('click', () => stepMode(1));
-
-  // Sync stepper label to initial state
-  document.getElementById('mode-stepper-label')!.textContent = MODE_TAB_LABELS[state.mode];
+  mobileInput.setupFab();
 }
 
 function setupBottomSheet() {
-  const controls = document.getElementById('controls')!;
-  let startY = 0;
-  let startScrollTop = 0;
-  let tracking = false;
-  const SWIPE_THRESHOLD = 30;
-
-  // Touch on the entire sheet — decide whether to swipe-expand/collapse or scroll
-  controls.addEventListener('touchstart', (e) => {
-    startY = e.touches[0].clientY;
-    startScrollTop = controls.scrollTop;
-    const expanded = controls.classList.contains('mobile-expanded');
-    // Track for swipe when: collapsed (always), or expanded and at scroll top
-    tracking = !expanded || startScrollTop <= 0;
-  }, { passive: true });
-
-  controls.addEventListener('touchmove', (e) => {
-    if (!tracking) return;
-    const dy = e.touches[0].clientY - startY;
-    const expanded = controls.classList.contains('mobile-expanded');
-
-    // When collapsed and swiping up, prevent the sheet from scrolling
-    if (!expanded && dy < 0) {
-      e.preventDefault();
-    }
-    // When expanded at scroll top and pulling down, prevent scroll bounce
-    if (expanded && startScrollTop <= 0 && dy > 0) {
-      e.preventDefault();
-    }
-  }, { passive: false });
-
-  controls.addEventListener('touchend', (e) => {
-    if (!tracking) return;
-    tracking = false;
-    const dy = e.changedTouches[0].clientY - startY;
-    const expanded = controls.classList.contains('mobile-expanded');
-
-    if (!expanded && dy < -SWIPE_THRESHOLD) {
-      controls.classList.add('mobile-expanded');
-    } else if (expanded && startScrollTop <= 0 && dy > SWIPE_THRESHOLD) {
-      controls.classList.remove('mobile-expanded');
-    } else if (Math.abs(dy) < 10) {
-      // Small move = tap on handle area — toggle
-      const handleRect = controls.querySelector('.mobile-drag-handle')!.getBoundingClientRect();
-      if (e.changedTouches[0].clientY >= handleRect.top && e.changedTouches[0].clientY <= handleRect.bottom) {
-        controls.classList.toggle('mobile-expanded');
-      }
-    }
-  });
-
-  // Tap on canvas collapses the sheet
-  canvas.addEventListener('pointerdown', () => {
-    controls.classList.remove('mobile-expanded');
-  }, { capture: true });
+  mobileInput.setupBottomSheet();
 }
 
 function applyMobileDefaults() {
-  // [LAW:one-source-of-truth] Only override defaults for fresh installs — saved state is authoritative
-  if (localStorage.getItem(storageKey)) return;
-  state.boids.count = 500;
-  state.physics.count = 2000;
-  state.physics_classic.count = 200;
-  state.reaction.resolution = 64;
+  mobileInput.applyMobileDefaults();
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
