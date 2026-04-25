@@ -24,6 +24,7 @@ import { createPhysicsDiagnostics } from '../simulations/physics/diagnostics';
 import { createPhysicsInitialConditions } from '../simulations/physics/initial-conditions';
 import { createPhysicsRenderOverlays } from '../simulations/physics/markers';
 import { createPhysicsParticleMesh } from '../simulations/physics/particle-mesh';
+import { createPhysicsStepController } from '../simulations/physics/params';
 import { createPhysicsStatsService } from '../simulations/physics/stats';
 import { createPhysicsClassicSimulation as createPhysicsClassicSimulationModule } from '../simulations/physics-classic';
 import { isPhysicsSimulation, type PhysicsSimulation } from '../simulations/types';
@@ -1415,15 +1416,18 @@ function createPhysicsSimulation() {
   bufferA.unmap();
   const bufferB = device.createBuffer({ size: bodyBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC });
 
-  // [LAW:one-source-of-truth] Params struct size must match nbody.compute.wgsl:
-  // 96 bytes of header + 32 × 16-byte Attractor = 608 bytes total.
-  const paramsBuffer = device.createBuffer({ size: 608, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
   const cameraBuffer = device.createBuffer({ size: CAMERA_STRIDE * 2, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-  // [LAW:one-source-of-truth] Motion-blur parameter owned by the sim. Written by setBlurTime() per frame
-  // (non-zero only during skip). The shader's capsule geometry collapses to a point when blurTime=0.
-  const blurBuffer = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-  const blurScratch = new Float32Array(4);
-  device.queue.writeBuffer(blurBuffer, 0, blurScratch); // init to 0 so the first pre-skip frames render circles
+  const diskNormal: [number, number, number] = [0, 1, 0];
+  const physicsStep = createPhysicsStepController({
+    attractorMax: ATTRACTOR_MAX,
+    baseDt: PHYSICS_BASE_DT,
+    count,
+    device,
+    diskNormal,
+    getAttractorStrength: attractorStrength,
+    state,
+  });
+  const { blurBuffer, paramsBuffer } = physicsStep;
 
   const particleMesh = createPhysicsParticleMesh({
     bodyBuffers: [bufferA, bufferB],
@@ -1566,7 +1570,7 @@ function createPhysicsSimulation() {
     createShaderModuleChecked,
     device,
     getAttractorStrength: attractorStrength,
-    getSimStep: () => simStep,
+    getSimStep: () => physicsStep.getSimStep(),
     markersPerAttractor: MARKERS_PER_ATTRACTOR,
     renderSampleCount,
     renderTargetFormat,
@@ -1590,34 +1594,6 @@ function createPhysicsSimulation() {
 
   let pingPong = 0;
   const depthRef: DepthRef = {};
-  // [LAW:one-source-of-truth] Simulation clock: monotonic step counter replaces wall-clock.
-  // Deterministic tidal angle and attractor timing derive from simStep × dt, not performance.now().
-  let simStep = 0;
-  // Time direction: 1 = forward (normal), -1 = reverse (rewind).
-  // Controlled by UI (hold R key / mobile FAB). Negating dt in the DKD leapfrog gives exact reversal.
-  let timeDirection = 1;
-  // [LAW:one-source-of-truth] Disk normal is fixed — the dark matter MN potential defines the disk plane.
-  const diskNormal: [number, number, number] = [0, 1, 0];
-
-  // ── ATTRACTOR JOURNAL ────────────────────────────────────────────────────────
-  // [LAW:one-source-of-truth] The journal is the canonical record of attractor forces at each sim step.
-  // Forward: compute attractor strengths normally, write to journal[simStep].
-  // Reverse: read from journal[simStep], skip live attractor computation.
-  // This ensures the reversed simulation sees the EXACT same forces that were applied forward.
-  const JOURNAL_CAPACITY = 18000;         // 5 minutes at 60fps
-  const JOURNAL_ENTRY_FLOATS = 1 + ATTRACTOR_MAX * 4; // count + 32 × (x, y, z, strength)
-  const journal = new Float32Array(JOURNAL_CAPACITY * JOURNAL_ENTRY_FLOATS);
-  let journalHighWater = 0;               // highest simStep ever written (for reverse boundary)
-
-  // --- Diagnostic stats (no feedback into simulation) ---
-  // Stats reduction still runs once/second for KE, PE, angular momentum readback.
-  // Dark matter provides stability — no virial controller needed.
-  // Pre-allocated params staging buffer — avoids GC churn from per-frame ArrayBuffer allocation.
-  // 608 bytes = 96-byte header + 32 × 16-byte Attractor array. Matches nbody.compute.wgsl Params struct.
-  const paramsData = new ArrayBuffer(608);
-  const f32 = new Float32Array(paramsData);
-  const u32 = new Uint32Array(paramsData);
-  const paramsBytes = new Uint8Array(paramsData);
 
   let computeStepForDiagnostics: ((encoder: GPUCommandEncoder) => void) | null = null;
   const physicsDiagnostics = createPhysicsDiagnostics({
@@ -1636,7 +1612,7 @@ function createPhysicsSimulation() {
     getPingPong: () => pingPong,
     getPmDiagPending,
     getPmOuterDiagPending,
-    getTimeDirection: () => timeDirection,
+    getTimeDirection: () => physicsStep.getTimeDirection(),
     orbitalBitangent,
     orbitalTangent,
     pmDensityF32,
@@ -1652,100 +1628,22 @@ function createPhysicsSimulation() {
     setPmDiagPending,
     setPmOuterDiagPending,
     setPaused: (value) => { state.paused = value; },
-    setTimeDirection: (dir) => { timeDirection = dir; },
+    setTimeDirection: (dir) => { physicsStep.setTimeDirection(dir); },
     state,
   });
 
   const simulation = {
-    setTimeDirection(dir: number) { timeDirection = dir; },
-    getSimStep() { return simStep; },
-    getTimeDirection() { return timeDirection; },
-    // [LAW:single-enforcer] blurTime is written here, nowhere else, so the per-frame blurBuffer state
-    // is always synchronized with whatever runDebugCompute computed for this frame.
-    setBlurTime(blurTime: number) {
-      blurScratch[0] = blurTime;
-      blurScratch[1] = 0; blurScratch[2] = 0; blurScratch[3] = 0;
-      device.queue.writeBuffer(blurBuffer, 0, blurScratch);
-    },
-    getJournalCapacity() { return JOURNAL_CAPACITY; },
-    getJournalHighWater() { return journalHighWater; },
+    setTimeDirection(dir: number) { physicsStep.setTimeDirection(dir); },
+    getSimStep() { return physicsStep.getSimStep(); },
+    getTimeDirection() { return physicsStep.getTimeDirection(); },
+    setBlurTime(blurTime: number) { physicsStep.setBlurTime(blurTime); },
+    getJournalCapacity() { return physicsStep.getJournalCapacity(); },
+    getJournalHighWater() { return physicsStep.getJournalHighWater(); },
 
     compute(encoder: GPUCommandEncoder) {
-      // [LAW:dataflow-not-control-flow] Reverse boundary check: can't rewind past the journal start or step 0.
-      if (timeDirection < 0 && simStep <= 0) {
-        state.paused = true;
-        return;
-      }
-
-      // [LAW:one-source-of-truth] simStep adjustment happens BEFORE param packing so that
-      // time, attractor journal index, and tidal angle all refer to the same simulation step.
-      // Forward: enter with simStep=N, pack params(N), advance to N+1 by end of compute.
-      // Reverse: enter with simStep=N+1, decrement to N here, pack params(N) — same params
-      // as the original forward step that produced the current state. reverse(forward(s)) = s.
-      if (timeDirection < 0) simStep--;
-
-      const p = state.physics;
-      const baseDt = PHYSICS_BASE_DT * state.fx.timeScale;
-      const dt = baseDt * timeDirection;
-      // PM gravity is uniform across all particles — no sqrt(sourceCount)
-      // normalization. Total mass is now 1.0 (PARTICLE_MASS = 1/count) so
-      // the effective gravity strength is set purely by G.
-      f32[0] = dt;
-      f32[1] = p.G * 0.001;
-      f32[2] = p.softening;
-      f32[3] = p.haloMass ?? 5.0;
-      u32[4] = count;
-      u32[5] = 0;  // was sourceCount; tile-pair gravity removed in ticket .6
-      f32[6] = p.haloScale ?? 2.0;
-      // [LAW:one-source-of-truth] Simulation clock: simStep × baseDt gives deterministic tidal angle.
-      f32[7] = simStep * baseDt;
-      // diskNormal: fixed orientation for the Miyamoto-Nagai potential.
-      f32[12] = diskNormal[0]; f32[13] = diskNormal[1]; f32[14] = diskNormal[2];
-      f32[16] = p.diskMass ?? 3.0;
-      f32[17] = p.diskScaleA ?? 1.5;
-      f32[18] = p.diskScaleB ?? 0.3;
-      f32[19] = 0;  // was pmBlend; tile-pair gravity removed in ticket .6
-      f32[20] = 0; f32[21] = 0; f32[22] = 0;
-      f32[23] = p.tidalStrength ?? 0.005;
-
-      // ── ATTRACTOR DATA: forward computes + journals; reverse reads from journal ──
-      if (timeDirection > 0) {
-        // Forward: compute attractor strengths from live state, write to journal.
-        // [LAW:one-source-of-truth] simStep drives the lifecycle — forces are a pure function of step,
-        // so rewinding to step K and replaying forward produces identical forces unless the user branches
-        // (moves/creates a wand). Branching naturally overwrites journal[K..] with the new force field,
-        // and subsequent reverse reads those fresh entries. No wall-clock drift between write and read.
-        const ceiling = p.interactionStrength ?? 1;
-        const attractors = state.attractors;
-        const attractorN = Math.min(attractors.length, ATTRACTOR_MAX);
-        u32[8] = attractorN;
-        u32[9] = 0; u32[10] = 0; u32[11] = 0;
-        for (let i = 0; i < attractorN; i++) {
-          const a = attractors[i];
-          const base = 24 + i * 4;
-          f32[base] = a.x;
-          f32[base + 1] = a.y;
-          f32[base + 2] = a.z;
-          f32[base + 3] = attractorStrength(a, simStep, ceiling);
-        }
-        for (let i = attractorN; i < ATTRACTOR_MAX; i++) {
-          const base = 24 + i * 4;
-          f32[base] = 0; f32[base + 1] = 0; f32[base + 2] = 0; f32[base + 3] = 0;
-        }
-        // Journal write: snapshot the packed attractor data at this simStep.
-        const jBase = (simStep % JOURNAL_CAPACITY) * JOURNAL_ENTRY_FLOATS;
-        journal[jBase] = attractorN;
-        for (let i = 0; i < ATTRACTOR_MAX * 4; i++) journal[jBase + 1 + i] = f32[24 + i];
-        journalHighWater = Math.max(journalHighWater, simStep);
-        simStep++;
-      } else {
-        // Reverse: read attractor data from journal at simStep (already decremented above).
-        const jBase = (simStep % JOURNAL_CAPACITY) * JOURNAL_ENTRY_FLOATS;
-        u32[8] = journal[jBase]; // attractorCount
-        u32[9] = 0; u32[10] = 0; u32[11] = 0;
-        for (let i = 0; i < ATTRACTOR_MAX * 4; i++) f32[24 + i] = journal[jBase + 1 + i];
-      }
-      device.queue.writeBuffer(paramsBuffer, 0, paramsBytes);
+      const preparedStep = physicsStep.prepareComputeStep();
+      if (!preparedStep) return;
+      const { dt, physics: p } = preparedStep;
 
       // ── PM density field (CIC deposition → mean reduction → subtract/convert) ──
       // Produces pmDensityF32 (mean-zero density) for the Poisson solver in .4.
@@ -1929,7 +1827,7 @@ function createPhysicsSimulation() {
 
     destroy() {
       bufferA.destroy(); bufferB.destroy();
-      paramsBuffer.destroy(); cameraBuffer.destroy(); blurBuffer.destroy();
+      physicsStep.destroy(); cameraBuffer.destroy();
       physicsRenderOverlays.destroy();
       physicsStats.destroy();
       diagStaging.destroy();
