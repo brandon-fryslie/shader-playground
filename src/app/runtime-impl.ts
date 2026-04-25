@@ -24,6 +24,7 @@ import { createPhysicsDiagnostics } from '../simulations/physics/diagnostics';
 import { createPhysicsInitialConditions } from '../simulations/physics/initial-conditions';
 import { createPhysicsRenderOverlays } from '../simulations/physics/markers';
 import { createPhysicsParticleMesh } from '../simulations/physics/particle-mesh';
+import { createPhysicsStatsService } from '../simulations/physics/stats';
 import { createPhysicsClassicSimulation as createPhysicsClassicSimulationModule } from '../simulations/physics-classic';
 import { isPhysicsSimulation, type PhysicsSimulation } from '../simulations/types';
 import { runPmVCycle } from '../simulations/physics-vcycle';
@@ -37,7 +38,6 @@ import { createDiagnosticsLogger } from '../diagnostics/logging';
 import SHADER_BOIDS_COMPUTE from '../shaders/boids.compute.wgsl?raw';
 import SHADER_BOIDS_RENDER from '../shaders/boids.render.wgsl?raw';
 import SHADER_NBODY_COMPUTE from '../shaders/nbody.compute.wgsl?raw';
-import SHADER_NBODY_STATS from '../shaders/nbody.stats.wgsl?raw';
 import SHADER_NBODY_RENDER from '../shaders/nbody.render.wgsl?raw';
 import SHADER_NBODY_CLASSIC_COMPUTE from '../shaders/nbody.classic.compute.wgsl?raw';
 import SHADER_NBODY_CLASSIC_RENDER from '../shaders/nbody.classic.render.wgsl?raw';
@@ -1508,35 +1508,11 @@ function createPhysicsSimulation() {
     compute: { module: computeModule, entryPoint: 'main' }
   });
 
-  // --- Stats reduction: KE, PE, rmsRadius, rmsHeight, angular momentum, total mass ---
-  // [LAW:one-source-of-truth] Disk normal is derived from angular momentum (slots 4-6) in this same pass.
-  const statsShaderModule = createShaderModuleChecked('nbody.stats', SHADER_NBODY_STATS);
-  const statsBGL = device.createBindGroupLayout({
-    entries: [
-      { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
-      { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
-      { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
-    ]
+  const physicsStats = createPhysicsStatsService({
+    buffers: [bufferA, bufferB],
+    createShaderModuleChecked,
+    device,
   });
-  const statsPipeline = device.createComputePipeline({
-    layout: device.createPipelineLayout({ bindGroupLayouts: [statsBGL] }),
-    compute: { module: statsShaderModule, entryPoint: 'main' }
-  });
-  const statsOutBuffer = device.createBuffer({ size: 32, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
-  const statsStaging = device.createBuffer({ size: 32, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
-  const statsParamsBuffer = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-  const statsBG = [
-    device.createBindGroup({ layout: statsBGL, entries: [
-      { binding: 0, resource: { buffer: bufferB } },
-      { binding: 1, resource: { buffer: statsOutBuffer } },
-      { binding: 2, resource: { buffer: statsParamsBuffer } },
-    ]}),
-    device.createBindGroup({ layout: statsBGL, entries: [
-      { binding: 0, resource: { buffer: bufferA } },
-      { binding: 1, resource: { buffer: statsOutBuffer } },
-      { binding: 2, resource: { buffer: statsParamsBuffer } },
-    ]}),
-  ];
 
   const renderBGL = device.createBindGroupLayout({
     entries: [
@@ -1636,11 +1612,6 @@ function createPhysicsSimulation() {
   // --- Diagnostic stats (no feedback into simulation) ---
   // Stats reduction still runs once/second for KE, PE, angular momentum readback.
   // Dark matter provides stability — no virial controller needed.
-  let statsPendingMap = false;
-  let lastStatsTime = 0;
-  const STATS_INTERVAL_MS = 1000;
-  let lastStats = { ke: 0, pe: 0, virial: 0, rmsR: 0, rmsH: 0 };
-
   // Pre-allocated params staging buffer — avoids GC churn from per-frame ArrayBuffer allocation.
   // 608 bytes = 96-byte header + 32 × 16-byte Attractor array. Matches nbody.compute.wgsl Params struct.
   const paramsData = new ArrayBuffer(608);
@@ -1661,7 +1632,7 @@ function createPhysicsSimulation() {
     diagStaging,
     diskNormal,
     gas,
-    getLastStats: () => lastStats,
+    getLastStats: () => physicsStats.getLastStats(),
     getPingPong: () => pingPong,
     getPmDiagPending,
     getPmOuterDiagPending,
@@ -1886,45 +1857,14 @@ function createPhysicsSimulation() {
       pass.dispatchWorkgroups(Math.ceil(count / 256));
       pass.end();
 
-      // --- Stats + disk normal reduction: once per second ---
-      // [LAW:one-source-of-truth] Angular momentum (stats slots 4-6) is the single source for disk normal.
-      // Running this once/second instead of every frame eliminates a per-frame GPU pipeline bubble
-      // (single-workgroup serial read of the entire particle buffer was stalling the pipeline).
-      const nextPing = 1 - pingPong;
-      const now = performance.now();
-      if (!statsPendingMap && now - lastStatsTime > STATS_INTERVAL_MS) {
-        lastStatsTime = now;
-        const Geff = (p.G ?? 0.3) * 0.001;
-        const statsParamsData = new Float32Array(4);
-        const statsParamsU32 = new Uint32Array(statsParamsData.buffer);
-        statsParamsU32[0] = count;
-        statsParamsU32[1] = count;  // was MASSIVE_BODY_COUNT; every particle is a source now
-        statsParamsData[2] = (p.softening ?? 0.15) * (p.softening ?? 0.15);
-        statsParamsData[3] = Geff;
-        device.queue.writeBuffer(statsParamsBuffer, 0, statsParamsData);
-
-        const statsPass = encoder.beginComputePass();
-        statsPass.setPipeline(statsPipeline);
-        statsPass.setBindGroup(0, statsBG[nextPing]);
-        statsPass.dispatchWorkgroups(1);
-        statsPass.end();
-
-        encoder.copyBufferToBuffer(statsOutBuffer, 0, statsStaging, 0, 32);
-        statsPendingMap = true;
-        device.queue.onSubmittedWorkDone().then(() => {
-          statsStaging.mapAsync(GPUMapMode.READ).then(() => {
-            const d = new Float32Array(statsStaging.getMappedRange().slice(0));
-            statsStaging.unmap();
-            statsPendingMap = false;
-
-            const ke = d[0], pe = d[1];
-            const virial = Math.abs(pe) > 0.001 ? (2 * ke) / Math.abs(pe) : 1.0;
-            const rmsR = Math.sqrt(d[2] / Math.max(count, 1));
-            const rmsH = Math.sqrt(d[3] / Math.max(count, 1));
-            lastStats = { ke, pe, virial, rmsR, rmsH };
-          }).catch(() => { statsPendingMap = false; });
-        });
-      }
+      physicsStats.schedule(
+        encoder,
+        count,
+        (p.G ?? 0.3) * 0.001,
+        performance.now(),
+        pingPong,
+        p.softening ?? 0.15,
+      );
 
       pingPong = 1 - pingPong;
     },
@@ -1991,7 +1931,7 @@ function createPhysicsSimulation() {
       bufferA.destroy(); bufferB.destroy();
       paramsBuffer.destroy(); cameraBuffer.destroy(); blurBuffer.destroy();
       physicsRenderOverlays.destroy();
-      statsOutBuffer.destroy(); statsStaging.destroy(); statsParamsBuffer.destroy();
+      physicsStats.destroy();
       diagStaging.destroy();
       particleMesh.destroy();
       destroyDepthRef(depthRef);
