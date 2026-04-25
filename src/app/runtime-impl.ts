@@ -1,5 +1,5 @@
 import '../../styles/main.css';
-import type { SimMode, Simulation, AppState, ThemeColors, RGBThemeColors, ParamDef, ParamSection, ShapeParamDef, DepthRef, ModeParamsMap, ShapeName } from '../types';
+import type { SimMode, Simulation, AppState, RGBThemeColors, DepthRef } from '../types';
 import { bindingRegistry } from '../xr-ui/bindings';
 import { evaluateAnchor } from '../xr-ui/anchors';
 import { layout as xrUiLayout, hitTestWidgets } from '../xr-ui/layout';
@@ -15,12 +15,14 @@ import { saveState as persistState, loadState as hydrateState, STORAGE_KEY as st
 import { updatePrompt as renderPrompt } from '../ui/prompt';
 import { createThemeSystem } from '../ui/theme';
 import { createControls, type ControlsApi } from '../ui/controls';
+import { createDebugPanel, type DebugPanel } from '../ui/debug-panel';
+import { createShaderPanel, type ShaderPanel } from '../ui/shader-panel';
 import { createBoidsSimulation as createBoidsSimulationModule } from '../simulations/boids';
 import { createFluidSimulation as createFluidSimulationModule } from '../simulations/fluid';
 import { createParametricSimulation as createParametricSimulationModule } from '../simulations/parametric';
 import { createPhysicsSimulation as createPhysicsSimulationModule } from '../simulations/physics';
 import { createPhysicsClassicSimulation as createPhysicsClassicSimulationModule } from '../simulations/physics-classic';
-import { isPhysicsSimulation, type PhysicsSimulation } from '../simulations/types';
+import { isPhysicsSimulation } from '../simulations/types';
 import { createReactionSimulation as createReactionSimulationModule } from '../simulations/reaction';
 import { createSimulationRegistry, type SimulationRegistry } from '../simulations/registry';
 import { getShaderSources as getCatalogShaderSources, applyShaderEdit as applyCatalogShaderEdit, resetShaderEdit as resetCatalogShaderEdit } from '../gpu/shaders';
@@ -37,24 +39,6 @@ import { createGridRenderer, type GridRenderer } from '../render/grid';
 import { createPostFxService, type PostFxService } from '../render/post-fx';
 import { createXrRuntime, type XrRuntime } from '../xr/runtime';
 
-// WGSL shader imports — Vite loads these as raw strings
-import SHADER_BOIDS_COMPUTE from '../shaders/boids.compute.wgsl?raw';
-import SHADER_BOIDS_RENDER from '../shaders/boids.render.wgsl?raw';
-import SHADER_NBODY_COMPUTE from '../shaders/nbody.compute.wgsl?raw';
-import SHADER_NBODY_RENDER from '../shaders/nbody.render.wgsl?raw';
-import SHADER_NBODY_CLASSIC_COMPUTE from '../shaders/nbody.classic.compute.wgsl?raw';
-import SHADER_NBODY_CLASSIC_RENDER from '../shaders/nbody.classic.render.wgsl?raw';
-import SHADER_FLUID_FORCES_ADVECT from '../shaders/fluid.forces.wgsl?raw';
-import SHADER_FLUID_DIFFUSE from '../shaders/fluid.diffuse.wgsl?raw';
-import SHADER_FLUID_PRESSURE from '../shaders/fluid.pressure.wgsl?raw';
-import SHADER_FLUID_DIVERGENCE from '../shaders/fluid.divergence.wgsl?raw';
-import SHADER_FLUID_GRADIENT from '../shaders/fluid.gradient.wgsl?raw';
-import SHADER_FLUID_RENDER from '../shaders/fluid.render.wgsl?raw';
-import SHADER_PARAMETRIC_COMPUTE from '../shaders/parametric.compute.wgsl?raw';
-import SHADER_PARAMETRIC_RENDER from '../shaders/parametric.render.wgsl?raw';
-import SHADER_REACTION_COMPUTE from '../shaders/reaction.compute.wgsl?raw';
-import SHADER_REACTION_RENDER from '../shaders/reaction.render.wgsl?raw';
-
 let currentGpuPhase = 'boot';
 const diagnosticsLogger = createDiagnosticsLogger({
   getDevice: () => device,
@@ -63,303 +47,6 @@ const diagnosticsLogger = createDiagnosticsLogger({
 diagnosticsLogger.installGlobalHandlers();
 const { createShaderModuleChecked, logError, logInfo, showSimError } = diagnosticsLogger;
 
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// SECTION 1: CONSTANTS, DEFAULTS, PRESETS
-// ═══════════════════════════════════════════════════════════════════════════════
-
-const DEFAULTS: ModeParamsMap = {
-  boids: {
-    count: 1000, separationRadius: 25, alignmentRadius: 50, cohesionRadius: 50,
-    maxSpeed: 2.0, maxForce: 0.05, visualRange: 100
-  },
-  physics: {
-    // G retuned for PM gravity (ticket .6). Old normalization divided G by
-    // sqrt(MASSIVE_BODY_COUNT / 1000) ≈ 2.86 for typical N; PM applies G
-    // directly with total_mass = 1.0. First-cut default; .7 handles proper
-    // tuning.
-    count: 80000, G: 0.3, softening: 1.5, distribution: 'disk',
-    interactionStrength: 1.0, tidalStrength: 0.008,
-    attractorDecayTime: 2.0,
-    gasMassFraction: 0.15, gasSoundSpeed: 2.0, gasVisible: true,
-    haloMass: 5.0, haloScale: 2.0, diskMass: 3.0, diskScaleA: 1.5, diskScaleB: 0.3,
-  },
-  physics_classic: {
-    // Verbatim defaults from the original shader-playground for fair A/B comparison.
-    count: 500, G: 1.0, softening: 0.5, damping: 0.999, distribution: 'random',
-  },
-  fluid: {
-    resolution: 256, viscosity: 0.1, diffusionRate: 0.001, forceStrength: 100, volumeScale: 1.5,
-    dyeMode: 'rainbow', jacobiIterations: 40
-  },
-  parametric: {
-    shape: 'torus', scale: 1.0,
-    p1Min: 0.7,    p1Max: 1.3,  p1Rate: 0.3,
-    p2Min: 0.2,    p2Max: 0.55, p2Rate: 0.5,
-    p3Min: 0.15,   p3Max: 0.45, p3Rate: 0.7,
-    p4Min: 0.5,    p4Max: 2.0,  p4Rate: 0.4,
-    twistMin: 0.0, twistMax: 0.4, twistRate: 0.15,
-  },
-  reaction: {
-    resolution: 128,
-    feed: 0.055, kill: 0.062,
-    Du: 0.2097, Dv: 0.105,
-    stepsPerFrame: 4,
-    isoThreshold: 0.25,
-    preset: 'Spots',
-  },
-};
-
-const PRESETS: Record<SimMode, Record<string, Record<string, number | string | boolean>>> = {
-  boids: {
-    'Default':     { ...DEFAULTS.boids },
-    'Tight Flock': { count: 3000, separationRadius: 10, alignmentRadius: 30, cohesionRadius: 80, maxSpeed: 3.0, maxForce: 0.08, visualRange: 60 },
-    'Dispersed':   { count: 2000, separationRadius: 60, alignmentRadius: 100, cohesionRadius: 20, maxSpeed: 1.5, maxForce: 0.03, visualRange: 200 },
-    'Massive':     { count: 20000, separationRadius: 15, alignmentRadius: 40, cohesionRadius: 40, maxSpeed: 2.5, maxForce: 0.04, visualRange: 80 },
-    'Slow Dance':  { count: 500, separationRadius: 40, alignmentRadius: 80, cohesionRadius: 100, maxSpeed: 0.5, maxForce: 0.01, visualRange: 150 },
-  },
-  physics: {
-    'Default':       { ...DEFAULTS.physics },
-    'Spiral Galaxy': { count: 100000, G: 1.5, softening: 0.15, distribution: 'spiral',
-                       interactionStrength: 1.0, tidalStrength: 0.005,
-                       haloMass: 8.0, haloScale: 2.5, diskMass: 4.0, diskScaleA: 1.2, diskScaleB: 0.15 },
-    'Cosmic Web':    { count: 80000, G: 0.8, softening: 2.0, distribution: 'web',
-                       interactionStrength: 1.0, tidalStrength: 0.025,
-                       haloMass: 2.0, haloScale: 4.0, diskMass: 0.0, diskScaleA: 1.5, diskScaleB: 0.3 },
-    'Star Cluster':  { count: 60000, G: 0.3, softening: 1.2, distribution: 'cluster',
-                       interactionStrength: 1.0, tidalStrength: 0.001,
-                       haloMass: 3.0, haloScale: 1.5, diskMass: 0.0, diskScaleA: 1.0, diskScaleB: 0.5 },
-    'Maelstrom':     { count: 120000, G: 0.25, softening: 2.5, distribution: 'maelstrom',
-                       interactionStrength: 1.5, tidalStrength: 0.005,
-                       haloMass: 6.0, haloScale: 1.8, diskMass: 5.0, diskScaleA: 0.8, diskScaleB: 0.2 },
-    'Dust Cloud':    { count: 150000, G: 0.08, softening: 3.5, distribution: 'dust',
-                       interactionStrength: 0.5, tidalStrength: 0.003,
-                       haloMass: 1.0, haloScale: 5.0, diskMass: 0.0, diskScaleA: 2.0, diskScaleB: 0.5 },
-    'Binary':        { count: 80000, G: 0.6, softening: 1.0, distribution: 'binary',
-                       interactionStrength: 1.0, tidalStrength: 0.04,
-                       haloMass: 4.0, haloScale: 2.0, diskMass: 2.0, diskScaleA: 1.0, diskScaleB: 0.25 },
-  },
-  physics_classic: {
-    'Default':  { ...DEFAULTS.physics_classic },
-    'Galaxy':   { count: 3000, G: 0.5, softening: 1.0, damping: 0.998, distribution: 'disk' },
-    'Collapse': { count: 2000, G: 10.0, softening: 0.1, damping: 0.995, distribution: 'shell' },
-    'Gentle':   { count: 1000, G: 0.1, softening: 2.0, damping: 0.9999, distribution: 'random' },
-  },
-  fluid: {
-    'Default':   { ...DEFAULTS.fluid },
-    'Thick':     { resolution: 256, viscosity: 0.8, diffusionRate: 0.005, forceStrength: 200, volumeScale: 1.8, dyeMode: 'rainbow', jacobiIterations: 40 },
-    'Turbulent': { resolution: 512, viscosity: 0.01, diffusionRate: 0.0001, forceStrength: 300, volumeScale: 1.3, dyeMode: 'rainbow', jacobiIterations: 60 },
-    'Ink Drop':  { resolution: 256, viscosity: 0.3, diffusionRate: 0.0, forceStrength: 50, volumeScale: 2.1, dyeMode: 'single', jacobiIterations: 40 },
-  },
-  parametric: {
-    'Default':       { shape: 'torus',   scale: 1.0, p1Min: 0.7,  p1Max: 1.3,  p1Rate: 0.3,  p2Min: 0.2,  p2Max: 0.55, p2Rate: 0.5,  p3Min: 0.15, p3Max: 0.45, p3Rate: 0.7,  p4Min: 0.5, p4Max: 2.0, p4Rate: 0.4,  twistMin: 0,   twistMax: 0.4, twistRate: 0.15 },
-    'Rippling Ring': { shape: 'torus',   scale: 1.0, p1Min: 0.5,  p1Max: 1.5,  p1Rate: 0.5,  p2Min: 0.15, p2Max: 0.7,  p2Rate: 0.7,  p3Min: 0.3,  p3Max: 0.8,  p3Rate: 1.0,  p4Min: 1.0, p4Max: 3.0, p4Rate: 0.6,  twistMin: 0,   twistMax: 1.0, twistRate: 0.2  },
-    'Wild Möbius':   { shape: 'mobius',  scale: 1.5, p1Min: 0.8,  p1Max: 2.0,  p1Rate: 0.3,  p2Min: 1.0,  p2Max: 3.0,  p2Rate: 0.15, p3Min: 0.2,  p3Max: 0.6,  p3Rate: 0.8,  p4Min: 0.5, p4Max: 2.5, p4Rate: 0.5,  twistMin: 1.0, twistMax: 4.0, twistRate: 0.1  },
-    'Trefoil Pulse': { shape: 'trefoil', scale: 1.2, p1Min: 0.08, p1Max: 0.35, p1Rate: 0.9,  p2Min: 0.25, p2Max: 0.55, p2Rate: 0.4,  p3Min: 0.3,  p3Max: 0.9,  p3Rate: 1.2,  p4Min: 1.0, p4Max: 4.0, p4Rate: 0.7,  twistMin: 0,   twistMax: 0.5, twistRate: 0.2  },
-    'Klein Chaos':   { shape: 'klein',   scale: 1.2, p1Min: 0.5,  p1Max: 1.5,  p1Rate: 0.4,  p2Min: 0,    p2Max: 0,    p2Rate: 0,    p3Min: 0.2,  p3Max: 0.6,  p3Rate: 0.9,  p4Min: 0.8, p4Max: 3.5, p4Rate: 0.5,  twistMin: 0,   twistMax: 0.8, twistRate: 0.15 },
-  },
-  reaction: {
-    'Spots':   { resolution: 128, feed: 0.055,  kill: 0.062,  Du: 0.2097, Dv: 0.105, stepsPerFrame: 4, isoThreshold: 0.25, preset: 'Spots' },
-    'Mazes':   { resolution: 128, feed: 0.029,  kill: 0.057,  Du: 0.2097, Dv: 0.105, stepsPerFrame: 4, isoThreshold: 0.25, preset: 'Mazes' },
-    'Worms':   { resolution: 128, feed: 0.058,  kill: 0.065,  Du: 0.2097, Dv: 0.105, stepsPerFrame: 4, isoThreshold: 0.25, preset: 'Worms' },
-    'Mitosis': { resolution: 128, feed: 0.0367, kill: 0.0649, Du: 0.2097, Dv: 0.105, stepsPerFrame: 4, isoThreshold: 0.25, preset: 'Mitosis' },
-    'Coral':   { resolution: 128, feed: 0.062,  kill: 0.062,  Du: 0.2097, Dv: 0.105, stepsPerFrame: 4, isoThreshold: 0.25, preset: 'Coral' },
-  },
-};
-
-const PARAM_DEFS: Record<SimMode, ParamSection[]> = {
-  boids: [
-    { section: 'Flock', params: [
-      { key: 'count', label: 'Count', min: 100, max: 30000, step: 100, requiresReset: true },
-      { key: 'visualRange', label: 'Visual Range', min: 10, max: 500, step: 5 },
-    ]},
-    { section: 'Forces', params: [
-      { key: 'separationRadius', label: 'Separation', min: 1, max: 100, step: 1 },
-      { key: 'alignmentRadius', label: 'Alignment', min: 1, max: 200, step: 1 },
-      { key: 'cohesionRadius', label: 'Cohesion', min: 1, max: 200, step: 1 },
-      { key: 'maxSpeed', label: 'Max Speed', min: 0.1, max: 10.0, step: 0.1 },
-      { key: 'maxForce', label: 'Max Force', min: 0.001, max: 0.5, step: 0.001 },
-    ]},
-  ],
-  physics: [
-    { section: 'Simulation', params: [
-      { key: 'count', label: 'Bodies', min: 10, max: 150000, step: 10, requiresReset: true },
-      { key: 'G', label: 'Gravity (G)', min: 0.05, max: 5.0, step: 0.01 },
-      { key: 'softening', label: 'Softening', min: 0.2, max: 4.0, step: 0.05 },
-      { key: 'interactionStrength', label: 'Interaction Pull', min: 0.1, max: 100, step: 0.01, logScale: true },
-      { key: 'attractorDecayTime', label: 'Decay Time (s)', min: 0.1, max: 30.0, step: 0.1, maxLabel: 'Permanent' },
-      { key: 'tidalStrength', label: 'Tidal Field', min: 0.0, max: 0.05, step: 0.0005 },
-    ]},
-    { section: 'Gas Reservoir', params: [
-      { key: 'gasMassFraction', label: 'Gas Mass', min: 0.0, max: 0.5, step: 0.01, requiresReset: true },
-      { key: 'gasSoundSpeed', label: 'Sound Speed', min: 0.5, max: 5.0, step: 0.05 },
-      { key: 'gasVisible', label: 'Gas Visible', type: 'toggle' },
-    ]},
-    { section: 'Initial State', params: [
-      { key: 'distribution', label: 'Distribution', type: 'dropdown', options: ['random', 'disk', 'shell'] },
-    ]},
-    { section: 'Dark Matter', params: [
-      { key: 'haloMass', label: 'Halo Mass', min: 0.0, max: 15.0, step: 0.1 },
-      { key: 'haloScale', label: 'Halo Scale', min: 0.5, max: 8.0, step: 0.1 },
-      { key: 'diskMass', label: 'Disk Mass', min: 0.0, max: 10.0, step: 0.1 },
-      { key: 'diskScaleA', label: 'Disk Scale A', min: 0.1, max: 5.0, step: 0.05 },
-      { key: 'diskScaleB', label: 'Disk Scale B', min: 0.05, max: 2.0, step: 0.01 },
-    ]},
-  ],
-  physics_classic: [
-    { section: 'Simulation', params: [
-      { key: 'count', label: 'Bodies', min: 10, max: 10000, step: 10, requiresReset: true },
-      { key: 'G', label: 'Gravity (G)', min: 0.01, max: 100.0, step: 0.01 },
-      { key: 'softening', label: 'Softening', min: 0.01, max: 10.0, step: 0.01 },
-      { key: 'damping', label: 'Damping', min: 0.9, max: 1.0, step: 0.001 },
-    ]},
-    { section: 'Initial State', params: [
-      { key: 'distribution', label: 'Distribution', type: 'dropdown', options: ['random', 'disk', 'shell'], requiresReset: true },
-    ]},
-  ],
-  fluid: [
-    { section: 'Grid', params: [
-      { key: 'resolution', label: 'Resolution', type: 'dropdown', options: [64, 128, 256, 512], requiresReset: true },
-    ]},
-    { section: 'Physics', params: [
-      { key: 'viscosity', label: 'Viscosity', min: 0.0, max: 1.0, step: 0.01 },
-      { key: 'diffusionRate', label: 'Diffusion', min: 0.0, max: 0.01, step: 0.0001 },
-      { key: 'forceStrength', label: 'Force', min: 1, max: 500, step: 1 },
-      { key: 'jacobiIterations', label: 'Iterations', min: 10, max: 80, step: 5 },
-    ]},
-    { section: 'Appearance', params: [
-      { key: 'volumeScale', label: 'Volume', min: 0.4, max: 3.0, step: 0.05 },
-      { key: 'dyeMode', label: 'Dye Mode', type: 'dropdown', options: ['rainbow', 'single', 'temperature'] },
-    ]},
-  ],
-  parametric: [
-    { section: 'Shape', params: [
-      { key: 'shape', label: 'Equation', type: 'dropdown', options: ['torus', 'klein', 'mobius', 'sphere', 'trefoil'] },
-    ]},
-    { section: 'Shape Parameters', id: 'shape-params-section', params: [], dynamic: true },
-    { section: 'Transform', params: [
-      { key: 'scale', label: 'Scale', min: 0.1, max: 5.0, step: 0.1 },
-    ]},
-    { section: 'Twist', params: [
-      { key: 'twistMin',  label: 'Min',  min: 0.0, max: 12.56, step: 0.05 },
-      { key: 'twistMax',  label: 'Max',  min: 0.0, max: 12.56, step: 0.05 },
-      { key: 'twistRate', label: 'Rate', min: 0.0, max: 3.0,   step: 0.05 },
-    ]},
-    { section: 'Wave Amplitude', params: [
-      { key: 'p3Min',  label: 'Min',  min: 0.0, max: 2.0, step: 0.05 },
-      { key: 'p3Max',  label: 'Max',  min: 0.0, max: 2.0, step: 0.05 },
-      { key: 'p3Rate', label: 'Rate', min: 0.0, max: 3.0, step: 0.05 },
-    ]},
-    { section: 'Wave Frequency', params: [
-      { key: 'p4Min',  label: 'Min',  min: 0.0, max: 5.0, step: 0.1  },
-      { key: 'p4Max',  label: 'Max',  min: 0.0, max: 5.0, step: 0.1  },
-      { key: 'p4Rate', label: 'Rate', min: 0.0, max: 3.0, step: 0.05 },
-    ]},
-  ],
-  reaction: [
-    { section: 'Volume', params: [
-      { key: 'resolution', label: 'Resolution', type: 'dropdown', options: [64, 128], requiresReset: true },
-      { key: 'stepsPerFrame', label: 'Steps/Frame', min: 1, max: 12, step: 1 },
-    ]},
-    { section: 'Reaction', params: [
-      { key: 'feed', label: 'Feed',  min: 0.01, max: 0.10, step: 0.0005 },
-      { key: 'kill', label: 'Kill',  min: 0.03, max: 0.08, step: 0.0005 },
-      { key: 'Du',   label: 'Du',    min: 0.05, max: 0.35, step: 0.001 },
-      { key: 'Dv',   label: 'Dv',    min: 0.02, max: 0.20, step: 0.001 },
-    ]},
-    { section: 'Render', params: [
-      { key: 'isoThreshold', label: 'Iso Threshold', min: 0.05, max: 0.6, step: 0.01 },
-    ]},
-  ],
-};
-
-const COLOR_THEMES: Record<string, ThemeColors> = {
-  'Dracula':       { primary: '#BD93F9', secondary: '#FF79C6', accent: '#50FA7B', bg: '#282A36', fg: '#F8F8F2' },
-  'Nord':          { primary: '#88C0D0', secondary: '#81A1C1', accent: '#A3BE8C', bg: '#2E3440', fg: '#D8DEE9' },
-  'Monokai':       { primary: '#AE81FF', secondary: '#F82672', accent: '#A5E22E', bg: '#272822', fg: '#D6D6D6' },
-  'Rose Pine':     { primary: '#C4A7E7', secondary: '#EBBCBA', accent: '#9CCFD8', bg: '#191724', fg: '#E0DEF4' },
-  'Gruvbox':       { primary: '#85A598', secondary: '#F9BD2F', accent: '#B7BB26', bg: '#282828', fg: '#FBF1C7' },
-  'Solarized':     { primary: '#268BD2', secondary: '#2AA198', accent: '#849900', bg: '#002B36', fg: '#839496' },
-  'Tokyo Night':   { primary: '#BB9AF7', secondary: '#7AA2F7', accent: '#9ECE6A', bg: '#1A1B26', fg: '#A9B1D6' },
-  'Catppuccin':    { primary: '#F5C2E7', secondary: '#CBA6F7', accent: '#ABE9B3', bg: '#181825', fg: '#CDD6F4' },
-  'Atom One':      { primary: '#61AFEF', secondary: '#C678DD', accent: '#62F062', bg: '#282C34', fg: '#ABB2BF' },
-  'Flexoki':       { primary: '#205EA6', secondary: '#24837B', accent: '#65800B', bg: '#100F0F', fg: '#FFFCF0' },
-};
-const DEFAULT_THEME = 'Dracula';
-const THEME_FADE_MS = 12000;
-const DEFAULT_CLEAR_COLOR: GPUColor = { r: 0.02, g: 0.02, b: 0.025, a: 1 };
-
-function hexToRgb(hex: string): number[] {
-  const n = parseInt(hex.slice(1), 16);
-  return [(n >> 16 & 255) / 255, (n >> 8 & 255) / 255, (n & 255) / 255];
-}
-
-function getThemeColorsForName(themeName: string): RGBThemeColors {
-  const t = COLOR_THEMES[themeName] || COLOR_THEMES[DEFAULT_THEME];
-  return {
-    primary: hexToRgb(t.primary),
-    secondary: hexToRgb(t.secondary),
-    accent: hexToRgb(t.accent),
-    bg: hexToRgb(t.bg),
-    fg: hexToRgb(t.fg),
-    clearColor: { r: hexToRgb(t.bg)[0], g: hexToRgb(t.bg)[1], b: hexToRgb(t.bg)[2], a: 1 },
-  };
-}
-
-function mixRgb(a: number[], b: number[], t: number): number[] {
-  return a.map((value, index) => value + (b[index] - value) * t);
-}
-
-function mixThemeColors(from: RGBThemeColors, to: RGBThemeColors, t: number): RGBThemeColors {
-  const bg = mixRgb(from.bg, to.bg, t);
-  return {
-    primary: mixRgb(from.primary, to.primary, t),
-    secondary: mixRgb(from.secondary, to.secondary, t),
-    accent: mixRgb(from.accent, to.accent, t),
-    bg,
-    fg: mixRgb(from.fg, to.fg, t),
-    clearColor: { r: bg[0], g: bg[1], b: bg[2], a: 1 },
-  };
-}
-
-// [LAW:one-source-of-truth] Selected theme name is canonical; animated render colors derive from this transition state.
-const themeTransition = {
-  from: getThemeColorsForName(DEFAULT_THEME),
-  to: getThemeColorsForName(DEFAULT_THEME),
-  startedAtMs: 0,
-};
-
-let currentThemeColors = getThemeColorsForName(DEFAULT_THEME);
-
-function computeThemeColors(now: number): RGBThemeColors {
-  const progress = Math.max(0, Math.min(1, (now - themeTransition.startedAtMs) / THEME_FADE_MS));
-  return mixThemeColors(themeTransition.from, themeTransition.to, progress);
-}
-
-function getThemeColors(): RGBThemeColors {
-  return themeSystem.getThemeColors();
-}
-
-function refreshThemeColors(now: number): void {
-  themeSystem.refreshThemeColors(now);
-}
-
-function syncThemeTransition(themeName: string): void {
-  themeSystem.syncThemeTransition(themeName);
-}
-
-function startThemeTransition(themeName: string, now = performance.now()): void {
-  themeSystem.startThemeTransition(themeName, now);
-}
-
-function syncThemeButtons(themeName: string): void {
-  themeSystem.syncThemeButtons(themeName);
-}
-
-// Dynamic access to mode-specific params — casts for TypeScript's correlated types limitation
-function modeParams(mode: SimMode): Record<string, number | string | boolean> {
-  return state[mode] as unknown as Record<string, number | string | boolean>;
-}
 
 // [LAW:one-source-of-truth] AppState creation is centralized in app/state.ts so
 // boot and tests share one canonical initialization shape.
@@ -374,6 +61,26 @@ const themeSystem = createThemeSystem({
   state,
   themes: catalogColorThemes,
 });
+
+function getThemeColors(): RGBThemeColors {
+  return themeSystem.getThemeColors();
+}
+
+function refreshThemeColors(now: number): void {
+  themeSystem.refreshThemeColors(now);
+}
+
+function syncThemeTransition(themeName: string): void {
+  themeSystem.syncThemeTransition(themeName);
+}
+
+function syncThemeButtons(themeName: string): void {
+  themeSystem.syncThemeButtons(themeName);
+}
+
+function modeParams(mode: SimMode): Record<string, number | string | boolean> {
+  return state[mode] as unknown as Record<string, number | string | boolean>;
+}
 
 let attractorSystem!: AttractorSystem;
 
@@ -436,22 +143,6 @@ const CAMERA_STRIDE = 256; // >= CAMERA_SIZE, multiple of minUniformBufferOffset
 
 // All shape equations baked into one shader — shapeId uniform selects which runs.
 // p1–p4 are per-shape parameters passed as uniforms (no recompilation on change).
-
-// Shape ID mapping for the shader's switch statement
-const SHAPE_IDS: Record<ShapeName, number> = { torus: 0, klein: 1, mobius: 2, sphere: 3, trefoil: 4 };
-
-// Per-shape parameter definitions: label + default value for p1–p4
-const SHAPE_PARAMS: Partial<Record<ShapeName, Record<string, ShapeParamDef>>> = {
-  torus:   { p1: { label: 'Major Radius', animMin: 0.7,  animMax: 1.3,  animRate: 0.3,  min: 0.2,  max: 2.5, step: 0.05 },
-             p2: { label: 'Minor Radius', animMin: 0.2,  animMax: 0.6,  animRate: 0.5,  min: 0.05, max: 1.2, step: 0.05 } },
-  klein:   { p1: { label: 'Bulge',        animMin: 0.7,  animMax: 1.5,  animRate: 0.4,  min: 0.2,  max: 3.0, step: 0.05 } },
-  mobius:  { p1: { label: 'Width',        animMin: 0.5,  animMax: 1.8,  animRate: 0.35, min: 0.1,  max: 3.0, step: 0.05 },
-             p2: { label: 'Half-Twists',  animMin: 1.0,  animMax: 3.0,  animRate: 0.15, min: 0.5,  max: 5.0, step: 0.5  } },
-  sphere:  { p1: { label: 'XY Stretch',  animMin: 0.6,  animMax: 1.5,  animRate: 0.4,  min: 0.1,  max: 3.0, step: 0.05 },
-             p2: { label: 'Z Stretch',   animMin: 0.5,  animMax: 1.8,  animRate: 0.6,  min: 0.1,  max: 3.0, step: 0.05 } },
-  trefoil: { p1: { label: 'Tube Radius', animMin: 0.08, animMax: 0.35, animRate: 0.6,  min: 0.05, max: 1.0, step: 0.05 },
-             p2: { label: 'Knot Scale',  animMin: 0.25, animMax: 0.5,  animRate: 0.35, min: 0.1,  max: 1.0, step: 0.05 } },
-};
 
 let cameraSystem!: CameraSystem;
 let postFx!: PostFxService;
@@ -593,7 +284,7 @@ async function initWebGPU(): Promise<boolean> {
     applySimulationInteraction: (pointerId, mx, my, isMove) => pointerSystem.applySimulationInteraction(pointerId, mx, my, isMove),
     cancelDebugMovement,
     getCanvas: () => canvas,
-    modeTabLabels: MODE_TAB_LABELS,
+    modeTabLabels: catalogModeTabLabels,
     releasePointerInteraction: (pointerId) => pointerSystem.releasePointerInteraction(pointerId),
     resetCurrentSimulation: resetCurrentSim,
     selectMode,
@@ -601,6 +292,22 @@ async function initWebGPU(): Promise<boolean> {
     state,
     storageKey,
     syncPauseButtons,
+  });
+  debugPanel = createDebugPanel({
+    canvas,
+    getPhysicsSimulation: () => {
+      const sim = simulations['physics'];
+      return isPhysicsSimulation(sim) ? sim : null;
+    },
+    state,
+    syncPauseButtons,
+  });
+  shaderPanel = createShaderPanel({
+    applyShaderEdit,
+    createShaderModule: (code) => device.createShaderModule({ code }),
+    getShaderSources,
+    resetShaderEdit: resetCatalogShaderEdit,
+    state,
   });
   initPostFx();
 
@@ -836,237 +543,13 @@ function createReactionSimulation() {
 // SECTION 6: UI & CONTROLS
 // ═══════════════════════════════════════════════════════════════════════════════
 
-const FX_PARAM_DEFS: { key: keyof typeof state.fx; label: string; min: number; max: number; step: number }[] = [
-  { key: 'timeScale',           label: 'Time',        min: -2.0, max: 2.0, step: 0.05 },
-  { key: 'bloomIntensity',      label: 'Bloom',       min: 0,    max: 4.0, step: 0.01 },
-  { key: 'bloomThreshold',      label: 'Threshold',   min: 0,    max: 8.0, step: 0.01 },
-  { key: 'bloomRadius',         label: 'Bloom Radius',min: 0.5,  max: 2.0, step: 0.01 },
-  { key: 'trailPersistence',    label: 'Trails',      min: 0,    max: 0.995, step: 0.001 },
-  { key: 'exposure',            label: 'Exposure',    min: 0.2,  max: 4.0, step: 0.01 },
-  { key: 'vignette',            label: 'Vignette',    min: 0,    max: 1.5, step: 0.01 },
-  { key: 'chromaticAberration', label: 'Chromatic',   min: 0,    max: 2.0, step: 0.01 },
-  { key: 'grading',             label: 'Color Grade', min: 0,    max: 1.5, step: 0.01 },
-];
-
-function buildFxSection(container: HTMLElement) {
-  const secDiv = document.createElement('div');
-  secDiv.className = 'param-section';
-  const title = document.createElement('div');
-  title.className = 'param-section-title';
-  title.textContent = 'Visual FX';
-  secDiv.appendChild(title);
-
-  for (const def of FX_PARAM_DEFS) {
-    const row = document.createElement('div');
-    row.className = 'control-row';
-    const label = document.createElement('span');
-    label.className = 'control-label';
-    label.textContent = def.label;
-    row.appendChild(label);
-    const input = document.createElement('input');
-    input.type = 'range';
-    input.min = String(def.min);
-    input.max = String(def.max);
-    input.step = String(def.step);
-    input.value = String(state.fx[def.key]);
-    const valueSpan = document.createElement('span');
-    valueSpan.className = 'control-value';
-    valueSpan.textContent = formatValue(state.fx[def.key], def.step);
-    input.addEventListener('input', () => {
-      const val = Number(input.value);
-      state.fx[def.key] = val;
-      valueSpan.textContent = formatValue(val, def.step);
-      saveState();
-    });
-    row.appendChild(input);
-    row.appendChild(valueSpan);
-    secDiv.appendChild(row);
-  }
-  container.appendChild(secDiv);
-}
-
 function buildControls() {
   getControlsApi().buildControls();
-}
-
-function buildParamRow(container: HTMLElement, mode: SimMode, param: ParamDef) {
-  const row = document.createElement('div');
-  row.className = 'control-row';
-
-  const label = document.createElement('span');
-  label.className = 'control-label';
-  label.textContent = param.label;
-  row.appendChild(label);
-
-  if (param.type === 'dropdown') {
-    const select = document.createElement('select');
-    select.dataset.mode = mode;
-    select.dataset.key = param.key;
-    for (const opt of param.options ?? []) {
-      const option = document.createElement('option');
-      option.value = String(opt);
-      option.textContent = String(opt);
-      select.appendChild(option);
-    }
-    select.value = String(modeParams(mode)[param.key]);
-    select.addEventListener('change', () => {
-      const val = Number.isNaN(Number(select.value)) ? select.value : Number(select.value);
-      modeParams(mode)[param.key] = val;
-      if (param.requiresReset) resetCurrentSim();
-      // When shape changes, set default shape params and rebuild UI
-      if (param.key === 'shape') {
-        applyShapeDefaults(String(val));
-        rebuildShapeParams();
-      }
-      updateAll();
-    });
-    row.appendChild(select);
-  } else if (param.type === 'toggle') {
-    const input = document.createElement('input');
-    input.type = 'checkbox';
-    input.dataset.mode = mode;
-    input.dataset.key = param.key;
-    input.checked = Boolean(modeParams(mode)[param.key]);
-    input.addEventListener('change', () => {
-      modeParams(mode)[param.key] = input.checked;
-      updateAll();
-    });
-    row.appendChild(input);
-  } else {
-    const input = document.createElement('input');
-    input.type = 'range';
-    // [LAW:dataflow-not-control-flow] logScale shapes the slider's tick-space
-    // vs. real-value-space mapping. Dataset flags let sync code (applyPreset,
-    // syncUIFromState) do the same mapping without re-reading PARAM_DEFS.
-    if (param.logScale && param.min !== undefined && param.max !== undefined) {
-      input.min = '0';
-      input.max = String(LOG_SLIDER_TICKS);
-      input.step = '1';
-      input.value = String(realToLogTick(Number(modeParams(mode)[param.key]), param.min, param.max));
-      input.dataset.logScale = '1';
-    } else {
-      input.min = String(param.min);
-      input.max = String(param.max);
-      input.step = String(param.step);
-      input.value = String(modeParams(mode)[param.key]);
-    }
-    input.dataset.mode = mode;
-    input.dataset.key = param.key;
-
-    const valueSpan = document.createElement('span');
-    valueSpan.className = 'control-value';
-    valueSpan.textContent = formatValueWithMax(Number(modeParams(mode)[param.key]), param);
-
-    input.addEventListener('input', () => {
-      const val = (param.logScale && param.min !== undefined && param.max !== undefined)
-        ? logTickToReal(Number(input.value), param.min, param.max)
-        : Number(input.value);
-      modeParams(mode)[param.key] = val;
-      valueSpan.textContent = formatValueWithMax(val, param);
-      if (param.requiresReset) {
-        input.dataset.needsReset = '1';
-      }
-      updateAll();
-    });
-    input.addEventListener('change', () => {
-      if (input.dataset.needsReset === '1') {
-        input.dataset.needsReset = '0';
-        resetCurrentSim();
-      }
-    });
-
-    row.appendChild(input);
-    row.appendChild(valueSpan);
-  }
-
-  container.appendChild(row);
-  return row;
-}
-
-// Set shape-specific animated param ranges when switching shapes.
-// Wave/twist params are global and not reset on shape change.
-function applyShapeDefaults(shape: string) {
-  const sp = SHAPE_PARAMS[shape as ShapeName] ?? {};
-  const p = state.parametric;
-  if (sp.p1) { p.p1Min = sp.p1.animMin; p.p1Max = sp.p1.animMax; p.p1Rate = sp.p1.animRate; }
-  else        { p.p1Min = 0; p.p1Max = 0; p.p1Rate = 0; }
-  if (sp.p2) { p.p2Min = sp.p2.animMin; p.p2Max = sp.p2.animMax; p.p2Rate = sp.p2.animRate; }
-  else        { p.p2Min = 0; p.p2Max = 0; p.p2Rate = 0; }
-}
-
-// Rebuild the dynamic "Shape Parameters" section based on current shape.
-// Each parameter renders as a labelled group with Min / Max / Rate sliders.
-function rebuildShapeParams() {
-  const container = document.getElementById('shape-params-section');
-  if (!container) return;
-
-  while (container.children.length > 1) container.removeChild(container.lastChild!);
-
-  const shape = state.parametric.shape;
-  const sp = SHAPE_PARAMS[shape] ?? {};
-
-  for (const [pKey, def] of Object.entries(sp)) {
-    const subLabel = document.createElement('div');
-    subLabel.className = 'anim-param-label';
-    subLabel.textContent = def.label;
-    container.appendChild(subLabel);
-    buildParamRow(container, 'parametric', { key: `${pKey}Min`,  label: 'Min',  min: def.min, max: def.max, step: def.step });
-    buildParamRow(container, 'parametric', { key: `${pKey}Max`,  label: 'Max',  min: def.min, max: def.max, step: def.step });
-    buildParamRow(container, 'parametric', { key: `${pKey}Rate`, label: 'Rate', min: 0.0,     max: 3.0,     step: 0.05    });
-  }
-}
-
-function formatValue(val: number, step: number) {
-  if (step >= 1) return String(Math.round(val));
-  const decimals = Math.max(0, -Math.floor(Math.log10(step)));
-  return val.toFixed(decimals);
-}
-
-// [LAW:single-enforcer] All slider value readouts flow through this so the
-// "Permanent"-at-max behavior (and any future label overrides) never drifts
-// between buildParamRow, applyPreset, and syncUIFromState.
-function formatValueWithMax(val: number, def: ParamDef | null): string {
-  const step = def?.step ?? 0.01;
-  if (def?.maxLabel !== undefined && def.max !== undefined && val >= def.max - step / 2) {
-    return def.maxLabel;
-  }
-  return formatValue(val, step);
-}
-
-// Linear-to-log tick mapping: slider position lives in [0, 1000] tick space,
-// real values span [min, max] logarithmically. Kept here (not inlined) so the
-// three slider touchpoints (build, preset apply, load sync) agree exactly.
-const LOG_SLIDER_TICKS = 1000;
-function realToLogTick(real: number, min: number, max: number): number {
-  const t = (Math.log(real) - Math.log(min)) / (Math.log(max) - Math.log(min));
-  return Math.round(LOG_SLIDER_TICKS * Math.max(0, Math.min(1, t)));
-}
-function logTickToReal(tick: number, min: number, max: number): number {
-  const t = tick / LOG_SLIDER_TICKS;
-  return Math.exp(Math.log(min) + t * (Math.log(max) - Math.log(min)));
 }
 
 function applyPreset(mode: SimMode, presetName: string) {
   getControlsApi().applyPreset(mode, presetName);
 }
-
-function findParamDef(mode: SimMode, key: string): ParamDef | null {
-  for (const section of PARAM_DEFS[mode]) {
-    for (const param of section.params) {
-      if (param.key === key) return param;
-    }
-  }
-  return null;
-}
-
-// [LAW:one-source-of-truth] Single entry point for switching simulation modes —
-// used by both DOM tab clicks and the XR UI prev/next buttons so both paths
-// keep state.mode, the DOM active classes, the simulation registry, and the
-// on-screen slider values in sync.
-const MODE_TAB_LABELS: Record<SimMode, string> = {
-  boids: 'Boids', physics: 'N-Body', physics_classic: 'N-Body Classic',
-  fluid: 'Fluid', parametric: 'Shapes', reaction: 'Reaction',
-};
 
 function selectMode(mode: SimMode): void {
   getControlsApi().selectMode(mode);
@@ -1198,283 +681,26 @@ function setupTimeReverseControls() {
 // manual step (discrete advance), skip-to-step (bounded seek), and breakpoint (auto-pause at step).
 // All three funnel through runDebugCompute() in the frame loop so the frame-level gating stays uniform.
 
-interface DebugState {
-  skipTarget: number | null;          // step we're seeking toward (null = not skipping)
-  targetStepsPerSec: number;          // "Target speed" selector: desired sim steps per wall-second (nominal)
-  adaptiveChunk: number;              // current budget-adapted per-frame chunk, updated from rAF-delta feedback
-  breakAtStep: number | null;         // auto-pause when simStep reaches this (null = no breakpoint)
-  manualStepsRemaining: number;       // discrete-step requests pending (from ±1 / ±10 / ±60 buttons)
-  manualDirection: number;            // +1 or -1 for the manual-step queue
-  lastSkipDispatches: number;         // dispatches run in the most recent skip frame (for the feedback loop)
-}
+let debugPanel!: DebugPanel;
 
-// Base dt nominal = 0.016s (matches nbody compute). At timeScale=1 → 60 sim-steps per second of live play.
-// targetStepsPerSec labels in UI: 60=1x, 600=10x, 6000=100x, 60000=1000x, 1e9=Max (GPU-capped).
-const debugState: DebugState = {
-  skipTarget: null,
-  targetStepsPerSec: 6000,            // default 100x — visible time-lapse, smooth on typical hardware
-  adaptiveChunk: 8,                   // conservative start; rAF-delta feedback grows it quickly
-  breakAtStep: null,
-  manualStepsRemaining: 0,
-  manualDirection: 1,
-  lastSkipDispatches: 0,
-};
-
-// rAF-delta thresholds for the adaptive-chunk feedback loop. 60fps target = 16.7ms/frame;
-// we grow the chunk below 14ms (genuine headroom) and shrink above 20ms (missed a frame).
-const DEBUG_FRAME_OVER_MS = 20.0;
-const DEBUG_FRAME_UNDER_MS = 14.0;
-const DEBUG_ADAPTIVE_GROW = 1.3;
-const DEBUG_ADAPTIVE_SHRINK = 0.7;
-const DEBUG_ADAPTIVE_MIN = 1;
-const DEBUG_ADAPTIVE_MAX = 5000;      // hard ceiling so runaway growth can't starve render
-
-// [LAW:single-enforcer] Adaptive chunk feedback is updated in exactly one place per frame so the
-// "what chunk should I use next" decision is authoritative. Call after each frame with rAF delta.
 function updateAdaptiveChunk(frameDeltaMs: number): void {
-  if (debugState.lastSkipDispatches <= 0) return; // only adapt during actual skip activity
-  const targetPerFrame = Math.max(1, Math.ceil(debugState.targetStepsPerSec / 60));
-  if (frameDeltaMs > DEBUG_FRAME_OVER_MS) {
-    debugState.adaptiveChunk = Math.max(DEBUG_ADAPTIVE_MIN, Math.floor(debugState.adaptiveChunk * DEBUG_ADAPTIVE_SHRINK));
-  } else if (frameDeltaMs < DEBUG_FRAME_UNDER_MS && debugState.adaptiveChunk < targetPerFrame) {
-    debugState.adaptiveChunk = Math.min(DEBUG_ADAPTIVE_MAX, Math.ceil(debugState.adaptiveChunk * DEBUG_ADAPTIVE_GROW));
-  }
+  debugPanel.updateAdaptiveChunk(frameDeltaMs);
 }
 
-// [LAW:single-enforcer] Clearing pending movement happens in exactly one place so "user pressed pause"
-// and "user pressed anything else that cancels" produce identical internal state.
-function cancelDebugMovement() {
-  debugState.skipTarget = null;
-  debugState.manualStepsRemaining = 0;
-  debugState.lastSkipDispatches = 0;
+function cancelDebugMovement(): void {
+  debugPanel.cancelMovement();
 }
 
-// [LAW:dataflow-not-control-flow] Same dispatch every frame — runDebugCompute always runs on physics mode.
-// What varies is (a) how many steps, (b) which direction, (c) whether motion blur is engaged — all pure
-// functions of debugState + pause state. Non-physics modes fall through to simple "compute iff not paused".
 function runDebugCompute(sim: Simulation, encoder: GPUCommandEncoder): void {
-  if (state.mode !== 'physics' || !isPhysicsSimulation(sim)) {
-    // Non-physics modes: no skip/step state applies; keep the adaptive-chunk feedback quiet so
-    // mode-switch-during-skip doesn't leave a stale lastSkipDispatches value driving adjustments.
-    debugState.lastSkipDispatches = 0;
-    if (!state.paused) sim.compute(encoder);
-    return;
-  }
-  const pSim: PhysicsSimulation = sim;
-
-  let stepCount = 0;
-  let overrideDir: number | null = null;
-  let skipActiveThisFrame = false;
-
-  if (debugState.skipTarget !== null) {
-    const delta = debugState.skipTarget - pSim.getSimStep();
-    if (delta === 0) {
-      debugState.skipTarget = null;
-      debugState.lastSkipDispatches = 0;
-      pSim.setBlurTime(0);  // clean frame at the target
-      state.paused = true;
-      syncPauseButtons();
-      return;
-    }
-    overrideDir = delta > 0 ? 1 : -1;
-    // Chunk capped by: user's target-rate ceiling, GPU-budget feedback, and remaining distance.
-    const targetPerFrame = Math.max(1, Math.ceil(debugState.targetStepsPerSec / 60));
-    stepCount = Math.min(targetPerFrame, debugState.adaptiveChunk, Math.abs(delta));
-    skipActiveThisFrame = true;
-  } else if (debugState.manualStepsRemaining > 0) {
-    overrideDir = debugState.manualDirection;
-    // Manual step buttons don't engage motion blur (plan: crisp frame-by-frame debugging).
-    // They still respect the adaptive chunk cap so clicking +60 doesn't stall the UI.
-    stepCount = Math.min(debugState.adaptiveChunk, debugState.manualStepsRemaining);
-    debugState.manualStepsRemaining -= stepCount;
-  } else if (!state.paused) {
-    stepCount = 1;
-  }
-
-  if (stepCount === 0) {
-    // Not running compute this frame — ensure blurTime is 0 so a leftover skip value doesn't linger.
-    pSim.setBlurTime(0);
-    debugState.lastSkipDispatches = 0;
-    return;
-  }
-
-  const savedDir = pSim.getTimeDirection();
-  const needRestore = overrideDir !== null && overrideDir !== savedDir;
-  if (needRestore) pSim.setTimeDirection(overrideDir!);
-
-  // Motion-blur time = world-time span of this frame's worth of steps, signed by direction.
-  // Reverse (overrideDir=-1 or savedDir=-1) produces negative blurTime; the shader's
-  // tail = pos - vel*blurTime then places the trail on the correct side.
-  const dirForBlur = overrideDir !== null ? overrideDir : savedDir;
-  const baseDt = 0.016 * state.fx.timeScale;
-  const blurTime = skipActiveThisFrame ? (stepCount * baseDt * dirForBlur) : 0;
-  pSim.setBlurTime(blurTime);
-  debugState.lastSkipDispatches = skipActiveThisFrame ? stepCount : 0;
-
-  // NOTE: we do NOT check `state.paused` inside this loop. stepBy/initiateSkip deliberately
-  // set state.paused=true to freeze normal play while the chunk executes, so a `paused` check
-  // would abort after iteration 0. The sim's reverse-boundary guard inside compute() already
-  // early-returns as a no-op once simStep <= 0 with negative dir, so finishing the chunk is safe.
-  for (let i = 0; i < stepCount; i++) {
-    pSim.compute(encoder);
-    const curStep = pSim.getSimStep();
-    // Breakpoint: auto-pause on exact match, regardless of direction.
-    if (debugState.breakAtStep !== null && curStep === debugState.breakAtStep) {
-      debugState.breakAtStep = null;
-      cancelDebugMovement();
-      state.paused = true;
-      syncPauseButtons();
-      refreshBreakpointUI();
-      // Force clean final frame even if we hit the breakpoint mid-skip.
-      pSim.setBlurTime(0);
-      break;
-    }
-    // Skip target: finish when we hit it.
-    if (debugState.skipTarget !== null && curStep === debugState.skipTarget) {
-      debugState.skipTarget = null;
-      state.paused = true;
-      syncPauseButtons();
-      pSim.setBlurTime(0);
-      debugState.lastSkipDispatches = 0;
-      break;
-    }
-  }
-
-  if (needRestore) pSim.setTimeDirection(savedDir);
-}
-
-function refreshBreakpointUI(): void {
-  const status = document.getElementById('debug-break-status');
-  const val = document.getElementById('debug-break-val');
-  if (!status || !val) return;
-  if (debugState.breakAtStep !== null) {
-    val.textContent = String(debugState.breakAtStep);
-    status.style.display = '';
-  } else {
-    status.style.display = 'none';
-  }
+  debugPanel.runCompute(sim, encoder);
 }
 
 function setupDebugControls() {
-  const byId = <T extends HTMLElement>(id: string): T | null =>
-    document.getElementById(id) as T | null;
-
-  const stepBy = (n: number, dir: number) => {
-    cancelDebugMovement();
-    state.paused = true;
-    syncPauseButtons();
-    debugState.manualStepsRemaining = n;
-    debugState.manualDirection = dir;
-  };
-
-  byId('debug-rev60')?.addEventListener('click', () => stepBy(60, -1));
-  byId('debug-rev10')?.addEventListener('click', () => stepBy(10, -1));
-  byId('debug-rev1')?.addEventListener('click', () => stepBy(1, -1));
-  byId('debug-fwd1')?.addEventListener('click', () => stepBy(1, 1));
-  byId('debug-fwd10')?.addEventListener('click', () => stepBy(10, 1));
-  byId('debug-fwd60')?.addEventListener('click', () => stepBy(60, 1));
-
-  const chunkSelect = byId<HTMLSelectElement>('debug-skip-chunk');
-  if (chunkSelect) {
-    // Initialize debugState from the rendered <select>'s selected option (keeps HTML + JS synced).
-    const initial = parseInt(chunkSelect.value, 10);
-    if (Number.isFinite(initial) && initial > 0) debugState.targetStepsPerSec = initial;
-    chunkSelect.addEventListener('change', () => {
-      const n = parseInt(chunkSelect.value, 10);
-      if (Number.isFinite(n) && n > 0) debugState.targetStepsPerSec = n;
-    });
-  }
-
-  const initiateSkip = (target: number) => {
-    if (target < 0) return;
-    cancelDebugMovement();
-    state.paused = true;
-    syncPauseButtons();
-    debugState.skipTarget = target;
-  };
-
-  const skipInput = byId<HTMLInputElement>('debug-skip-target');
-  byId('debug-skip-btn')?.addEventListener('click', () => {
-    const v = parseInt(skipInput?.value ?? '', 10);
-    if (Number.isFinite(v)) initiateSkip(v);
-  });
-  skipInput?.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') {
-      const v = parseInt(skipInput.value, 10);
-      if (Number.isFinite(v)) initiateSkip(v);
-    }
-  });
-
-  const breakInput = byId<HTMLInputElement>('debug-break-step');
-  byId('debug-break-btn')?.addEventListener('click', () => {
-    const v = parseInt(breakInput?.value ?? '', 10);
-    if (Number.isFinite(v) && v >= 0) {
-      debugState.breakAtStep = v;
-      refreshBreakpointUI();
-    }
-  });
-  breakInput?.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') {
-      const v = parseInt(breakInput.value, 10);
-      if (Number.isFinite(v) && v >= 0) {
-        debugState.breakAtStep = v;
-        refreshBreakpointUI();
-      }
-    }
-  });
-  byId('debug-break-clear')?.addEventListener('click', () => {
-    debugState.breakAtStep = null;
-    refreshBreakpointUI();
-  });
-
-  const scrub = byId<HTMLInputElement>('debug-scrub');
-  // 'change' fires on release; drag is cheap since each "live" change would queue a skip.
-  // Use 'change' so we don't spam the sim with seek requests during the drag.
-  scrub?.addEventListener('change', () => {
-    const v = parseInt(scrub.value, 10);
-    if (Number.isFinite(v)) initiateSkip(v);
-  });
-
-  byId('debug-screenshot')?.addEventListener('click', () => {
-    const sim = simulations['physics'];
-    const step = isPhysicsSimulation(sim) ? sim.getSimStep() : 0;
-    canvas.toBlob((blob) => {
-      if (!blob) return;
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `shader-playground-step-${step}.png`;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      URL.revokeObjectURL(url);
-    }, 'image/png');
-  });
+  debugPanel.setupControls();
 }
 
-// Per-frame update for the big step display + scrubber position. Cheap — DOM text only.
 function updateDebugPanel(): void {
-  if (state.mode !== 'physics') return;
-  const sim = simulations['physics'];
-  if (!isPhysicsSimulation(sim)) return;
-  const step = sim.getSimStep();
-  const dir = sim.getTimeDirection();
-  const highWater = sim.getJournalHighWater();
-
-  const numEl = document.getElementById('debug-step-num');
-  if (numEl) numEl.textContent = String(step);
-  const dirEl = document.getElementById('debug-step-dir');
-  if (dirEl) dirEl.textContent = dir < 0 ? '\u25C0' : '\u25B6';
-
-  const scrub = document.getElementById('debug-scrub') as HTMLInputElement | null;
-  const scrubHigh = document.getElementById('debug-scrub-high');
-  if (scrub && scrubHigh) {
-    const max = Math.max(highWater, step);
-    if (scrub.max !== String(max)) scrub.max = String(max);
-    // Don't clobber the value while the user is dragging (matches :active on thumb).
-    if (document.activeElement !== scrub) scrub.value = String(step);
-    scrubHigh.textContent = String(max);
-  }
+  debugPanel.updatePanel();
 }
 
 function buildThemeSelector() {
@@ -1527,60 +753,11 @@ function applyMobileDefaults() {
 // SECTION 7: PROMPT GENERATOR
 // ═══════════════════════════════════════════════════════════════════════════════
 
-const MODE_LABELS = {
-  boids: 'boids/flocking',
-  physics: 'N-body gravitational',
-  physics_classic: 'classic N-body (vintage shader)',
-  fluid: 'fluid dynamics',
-  parametric: 'parametric shape',
-  reaction: 'Gray-Scott reaction-diffusion (3D)',
-};
-
 function updatePrompt() {
   renderPrompt(state, catalogDefaults, modeParams);
 }
 
-function describeParam(_mode: string, key: string, val: number | string | boolean): string | null {
-  const n = Number(val);
-  const descriptions: Record<string, () => string | null> = {
-    count: () => `${val} particles`,
-    separationRadius: () => n < 15 ? `tight separation (${val})` : n > 50 ? `wide separation (${val})` : `separation radius ${val}`,
-    alignmentRadius: () => `alignment range ${val}`,
-    cohesionRadius: () => n > 80 ? `strong cohesion (${val})` : `cohesion range ${val}`,
-    maxSpeed: () => n > 4 ? `high speed (${val})` : n < 1 ? `slow movement (${val})` : `speed ${val}`,
-    maxForce: () => n > 0.1 ? `strong steering (${val})` : `steering force ${val}`,
-    visualRange: () => `visual range ${val}`,
-    G: () => n > 5 ? `strong gravity (G=${val})` : n < 0.5 ? `weak gravity (G=${val})` : `G=${val}`,
-    softening: () => `softening ${val}`,
-    damping: () => n < 0.995 ? `high damping (${val})` : `damping ${val}`,  // classic physics only
-    haloMass: () => n > 8 ? `heavy halo (${val})` : n < 2 ? `light halo (${val})` : `halo mass ${val}`,
-    haloScale: () => `halo scale ${val}`,
-    diskMass: () => n < 0.1 ? `no disk potential` : `disk mass ${val}`,
-    diskScaleA: () => `disk scale A ${val}`,
-    diskScaleB: () => `disk scale B ${val}`,
-    gasMassFraction: () => n < 0.01 ? 'no gas reservoir' : `gas mass fraction ${val}`,
-    gasSoundSpeed: () => `gas sound speed ${val}`,
-    gasVisible: () => val ? null : 'gas hidden',
-    distribution: () => `${val} distribution`,
-    resolution: () => `${val}x${val} grid`,
-    viscosity: () => n > 0.5 ? `thick fluid (viscosity ${val})` : n < 0.05 ? `thin fluid (viscosity ${val})` : `viscosity ${val}`,
-    diffusionRate: () => `diffusion ${val}`,
-    forceStrength: () => n > 200 ? `strong forces (${val})` : `force strength ${val}`,
-    volumeScale: () => n > 2 ? `large volume (${val})` : n < 1 ? `compact volume (${val})` : `volume scale ${val}`,
-    dyeMode: () => `${val} dye`,
-    jacobiIterations: () => `${val} solver iterations`,
-    shape: () => `${val} shape`,
-    scale: () => n !== 1 ? `scale ${val}` : null,
-    p1Min: () => null, p1Max: () => null, p1Rate: () => null,
-    p2Min: () => null, p2Max: () => null, p2Rate: () => null,
-    p3Min: () => null, p3Max: () => null, p3Rate: () => null,
-    p4Min: () => null, p4Max: () => null, p4Rate: () => null,
-    twistMin: () => null, twistMax: () => null, twistRate: () => null,
-  };
-
-  const fn = descriptions[key] as (() => string | null) | undefined;
-  return fn ? fn() : `${key}: ${val}`;
-}
+let shaderPanel!: ShaderPanel;
 
 function updateAll() {
   updatePrompt();
@@ -1617,12 +794,6 @@ function getControlsApi(): ControlsApi {
   }
   return controlsApi;
 }
-
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// SECTION 7b: SHADER DEBUG PANEL
-// ═══════════════════════════════════════════════════════════════════════════════
-
 // Maps simulation mode → named shader sources
 function getShaderSources(mode: SimMode): Record<string, string> {
   if (mode === 'physics') {
@@ -1631,153 +802,18 @@ function getShaderSources(mode: SimMode): Record<string, string> {
   return getCatalogShaderSources(mode);
 }
 
-let shaderPanelOpen = false;
-let activeShaderTab: string | null = null;
-let currentShaderSources: Record<string, string> = {};
-let originalShaderSources: Record<string, string> = {};
-
 function setupShaderPanel() {
-  const toggle = document.getElementById('shader-toggle')!;
-  const panel = document.getElementById('shader-panel')!;
-
-  toggle.addEventListener('click', () => {
-    shaderPanelOpen = !shaderPanelOpen;
-    panel.classList.toggle('open', shaderPanelOpen);
-    toggle.classList.toggle('active', shaderPanelOpen);
-    if (shaderPanelOpen) refreshShaderTabs();
-  });
-
-  document.getElementById('shader-compile')!.addEventListener('click', compileEditedShader);
-  document.getElementById('shader-reset')!.addEventListener('click', resetEditedShader);
-
-  // Tab key inserts spaces in editor instead of moving focus
-  document.getElementById('shader-editor')!.addEventListener('keydown', (e) => {
-    if (e.key === 'Tab') {
-      e.preventDefault();
-      const ta = e.target as HTMLTextAreaElement;
-      const start = ta.selectionStart;
-      ta.value = ta.value.substring(0, start) + '  ' + ta.value.substring(ta.selectionEnd);
-      ta.selectionStart = ta.selectionEnd = start + 2;
-    }
-  });
-}
-
-function refreshShaderTabs() {
-  const sources = getShaderSources(state.mode);
-  originalShaderSources = { ...sources };
-  // Preserve edits if mode hasn't changed
-  if (!currentShaderSources._mode || currentShaderSources._mode !== state.mode) {
-    currentShaderSources = { ...sources, _mode: state.mode };
-  }
-
-  const tabsEl = document.getElementById('shader-tabs')!;
-  tabsEl.innerHTML = '';
-
-  const names = Object.keys(sources);
-  activeShaderTab = activeShaderTab && names.includes(activeShaderTab) ? activeShaderTab : names[0];
-
-  for (const name of names) {
-    const tab = document.createElement('button');
-    tab.className = 'shader-tab' + (name === activeShaderTab ? ' active' : '');
-    tab.textContent = name;
-    tab.addEventListener('click', () => {
-      // Save current editor content before switching
-      saveEditorContent();
-      activeShaderTab = name;
-      tabsEl.querySelectorAll('.shader-tab').forEach(t => t.classList.toggle('active', t.textContent === name));
-      loadEditorContent();
-    });
-    tabsEl.appendChild(tab);
-  }
-
-  loadEditorContent();
-}
-
-function saveEditorContent() {
-  if (activeShaderTab) {
-    currentShaderSources[activeShaderTab] = (document.getElementById('shader-editor') as HTMLTextAreaElement).value;
-  }
-}
-
-function loadEditorContent() {
-  const editor = document.getElementById('shader-editor') as HTMLTextAreaElement;
-  editor.value = currentShaderSources[activeShaderTab!] || '';
-  document.getElementById('shader-status')!.textContent = '';
-  document.getElementById('shader-status')!.className = 'shader-success';
+  shaderPanel.setup();
 }
 
 function updateShaderPanel() {
-  if (shaderPanelOpen) {
-    // Re-check if mode changed
-    if (currentShaderSources._mode !== state.mode) {
-      refreshShaderTabs();
-    }
-  }
-}
-
-function compileEditedShader() {
-  saveEditorContent();
-  const code = currentShaderSources[activeShaderTab!];
-  const statusEl = document.getElementById('shader-status')!;
-
-  // Attempt to create a shader module to validate
-  try {
-    const module = device.createShaderModule({ code });
-    // Check for compilation errors via getCompilationInfo
-    module.getCompilationInfo().then(info => {
-      const errors = info.messages.filter(m => m.type === 'error');
-      if (errors.length > 0) {
-        statusEl.className = 'shader-error';
-        statusEl.textContent = errors.map(e => `Line ${e.lineNum}: ${e.message}`).join('; ');
-        statusEl.title = errors.map(e => `Line ${e.lineNum}: ${e.message}`).join('\n');
-      } else {
-        statusEl.className = 'shader-success';
-        statusEl.textContent = 'Compiled OK — reset simulation to apply';
-        statusEl.title = '';
-
-        // Update the global shader source so next init uses it
-        applyShaderEdit(state.mode, activeShaderTab!, code);
-      }
-    });
-  } catch (e) {
-    statusEl.className = 'shader-error';
-    statusEl.textContent = (e as Error).message;
-    statusEl.title = (e as Error).message;
-  }
-}
-
-function resetEditedShader() {
-  if (activeShaderTab && originalShaderSources[activeShaderTab]) {
-    currentShaderSources[activeShaderTab] = resetCatalogShaderEdit(state.mode, activeShaderTab) ?? originalShaderSources[activeShaderTab];
-    loadEditorContent();
-    document.getElementById('shader-status')!.className = 'shader-success';
-    document.getElementById('shader-status')!.textContent = 'Shader reset to original';
-  }
+  shaderPanel.update();
 }
 
 // Apply edited shader code to the appropriate global variable
 function applyShaderEdit(mode: SimMode, tabName: string, code: string) {
   applyCatalogShaderEdit(mode, tabName, code);
 }
-
-// Editable shader overrides — when set, simulations use these instead of originals
-let SHADER_BOIDS_COMPUTE_EDIT: string | null = null;
-let SHADER_BOIDS_RENDER_EDIT: string | null = null;
-let SHADER_NBODY_COMPUTE_EDIT: string | null = null;
-let SHADER_NBODY_RENDER_EDIT: string | null = null;
-let SHADER_NBODY_CLASSIC_COMPUTE_EDIT: string | null = null;
-let SHADER_NBODY_CLASSIC_RENDER_EDIT: string | null = null;
-let SHADER_FLUID_FORCES_ADVECT_EDIT: string | null = null;
-let SHADER_FLUID_DIFFUSE_EDIT: string | null = null;
-let SHADER_FLUID_DIVERGENCE_EDIT: string | null = null;
-let SHADER_FLUID_PRESSURE_EDIT: string | null = null;
-let SHADER_FLUID_GRADIENT_EDIT: string | null = null;
-let SHADER_FLUID_RENDER_EDIT: string | null = null;
-let SHADER_PARAMETRIC_COMPUTE_EDIT: string | null = null;
-let SHADER_PARAMETRIC_RENDER_EDIT: string | null = null;
-let SHADER_REACTION_COMPUTE_EDIT: string | null = null;
-let SHADER_REACTION_RENDER_EDIT: string | null = null;
-
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // METRICS BUS
@@ -3060,57 +2096,6 @@ function initBindings(): void {
     themes: catalogColorThemes,
   });
 }
-
-// [LAW:locality-or-seam] This reintegration pass reassigns ownership without
-// deleting every legacy helper in the same change. Keep explicit references so
-// the build stays green while the next extraction pass removes the orphaned
-// implementations wholesale instead of mixing rewiring with risky mass deletion.
-const legacyRewireKeepalive = {
-  SHADER_BOIDS_COMPUTE,
-  SHADER_BOIDS_RENDER,
-  SHADER_NBODY_COMPUTE,
-  SHADER_NBODY_RENDER,
-  SHADER_NBODY_CLASSIC_COMPUTE,
-  SHADER_NBODY_CLASSIC_RENDER,
-  SHADER_FLUID_FORCES_ADVECT,
-  SHADER_FLUID_DIFFUSE,
-  SHADER_FLUID_PRESSURE,
-  SHADER_FLUID_DIVERGENCE,
-  SHADER_FLUID_GRADIENT,
-  SHADER_FLUID_RENDER,
-  SHADER_PARAMETRIC_COMPUTE,
-  SHADER_PARAMETRIC_RENDER,
-  SHADER_REACTION_COMPUTE,
-  SHADER_REACTION_RENDER,
-  PRESETS,
-  DEFAULT_CLEAR_COLOR,
-  currentThemeColors,
-  computeThemeColors,
-  startThemeTransition,
-  SHAPE_IDS,
-  buildFxSection,
-  findParamDef,
-  MODE_LABELS,
-  describeParam,
-  SHADER_BOIDS_COMPUTE_EDIT,
-  SHADER_BOIDS_RENDER_EDIT,
-  SHADER_NBODY_COMPUTE_EDIT,
-  SHADER_NBODY_RENDER_EDIT,
-  SHADER_NBODY_CLASSIC_COMPUTE_EDIT,
-  SHADER_NBODY_CLASSIC_RENDER_EDIT,
-  SHADER_FLUID_FORCES_ADVECT_EDIT,
-  SHADER_FLUID_DIFFUSE_EDIT,
-  SHADER_FLUID_DIVERGENCE_EDIT,
-  SHADER_FLUID_PRESSURE_EDIT,
-  SHADER_FLUID_GRADIENT_EDIT,
-  SHADER_FLUID_RENDER_EDIT,
-  SHADER_PARAMETRIC_COMPUTE_EDIT,
-  SHADER_PARAMETRIC_RENDER_EDIT,
-  SHADER_REACTION_COMPUTE_EDIT,
-  SHADER_REACTION_RENDER_EDIT,
-};
-void legacyRewireKeepalive;
-
 
 export async function startAppRuntimeImpl() {
   const ok = await initWebGPU();
