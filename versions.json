@@ -4,15 +4,190 @@
     {
       "version": "pr-14",
       "ref": "refs/pull/14/merge",
-      "sha": "9464345f75dcd8eb5462c021cfb964d6b321b28c",
-      "timestamp": "2026-04-24T04:52:07.356Z",
+      "sha": "c05415fc76bd970491bbaff9c60122c6be344ba7",
+      "timestamp": "2026-06-06T10:14:15.866Z",
       "commits": [
         {
-          "sha": "9464345f75dcd8eb5462c021cfb964d6b321b28c",
+          "sha": "c05415fc76bd970491bbaff9c60122c6be344ba7",
           "author_name": "Brandon Fryslie",
           "author_email": "530235+brandon-fryslie@users.noreply.github.com",
-          "timestamp": "2026-04-23T22:51:51-06:00",
-          "message": "Merge cf6350a5d4982e3cb08d9f1bc4df20e4c1b54f4e into 231677e6bfb6c6b36d98c2da0dd8b35df5cc2ef1\n"
+          "timestamp": "2026-06-06T10:14:00Z",
+          "message": "Merge d3d890196988adc3d861dfece795c0f9a1bb9031 into 231677e6bfb6c6b36d98c2da0dd8b35df5cc2ef1\n"
+        },
+        {
+          "sha": "d3d890196988adc3d861dfece795c0f9a1bb9031",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-26T01:04:51-06:00",
+          "message": "Create runtime variance epic\n"
+        },
+        {
+          "sha": "07ad302194fd47a53079ae5046a226283b4725f5",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-25T16:05:52-06:00",
+          "message": "Absorb simulation factory variance\n"
+        },
+        {
+          "sha": "87aca6ac257ab2dcc69dc2302b19b084bb946f1f",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-25T15:59:06-06:00",
+          "message": "Introduce app action boundary\n"
+        },
+        {
+          "sha": "ad47cb1ece3112a4246301ec05729d29b5c5e047",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-25T11:33:55-06:00",
+          "message": "Extract XR input pipeline\n"
+        },
+        {
+          "sha": "5e34992b8e8a770a515cb36809465d565d407790",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-25T02:39:18-06:00",
+          "message": "Extract desktop frame runtime\n"
+        },
+        {
+          "sha": "fe8ffdd90229fb47d0709d6fdd7eeac552dc9a51",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-25T02:30:07-06:00",
+          "message": "Extract UI panel systems\n"
+        },
+        {
+          "sha": "9e82e7f1db6b81ae01d57ce8449e85c9f4c25f2f",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-25T02:18:19-06:00",
+          "message": "Extract input systems\n"
+        },
+        {
+          "sha": "91499fbe88bf92112c79ae588d5ef217c826c861",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-25T02:04:02-06:00",
+          "message": "Extract XR session runtime\n"
+        },
+        {
+          "sha": "8a6ba484e8b959df34cf6c2c7c2983e50c5345e5",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-25T01:49:23-06:00",
+          "message": "Extract shared frame stats service\n"
+        },
+        {
+          "sha": "5aa9e9b81a4170c66e07b85b4ff51e0f18f7cbea",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-24T23:11:42-06:00",
+          "message": "Extract camera render service\n"
+        },
+        {
+          "sha": "fc244a3ae1752b80afbbf9ef98857e5d73c31ee2",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-24T22:48:44-06:00",
+          "message": "Extract post-fx render service\n"
+        },
+        {
+          "sha": "000e882936ee09c577838272e2893a04dd392ef2",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-24T22:38:41-06:00",
+          "message": "Extract GPU timing service\n"
+        },
+        {
+          "sha": "b82edc580c2190b0fda7dd848eb4d548831d80b5",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-24T22:34:07-06:00",
+          "message": "Extract shared grid renderer\n"
+        },
+        {
+          "sha": "a42047e0e2a1f8ea1caa0ffe08d3b096353f95a5",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-24T21:37:21-06:00",
+          "message": "Extract physics simulation assembly\n"
+        },
+        {
+          "sha": "ac786edda712dd1fb2fa177f59f740db6d4e6697",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-24T18:32:31-06:00",
+          "message": "Extract physics compute service\n"
+        },
+        {
+          "sha": "1a73326c0ff82ef1e15d7b0437d1ade24f7b489a",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-24T18:28:38-06:00",
+          "message": "Extract physics render service\n"
+        },
+        {
+          "sha": "31918876cb61dcb62c83b43863d5a426339c6c1d",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-24T18:15:47-06:00",
+          "message": "Extract physics step controller\n"
+        },
+        {
+          "sha": "f66d2b3a45bc4bf1ed95af5e0ef297b8bcea9b95",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-24T18:12:22-06:00",
+          "message": "Extract physics stats service\n"
+        },
+        {
+          "sha": "d2cecb2c4dacf00bb6d9498eb6cc85686bef095e",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-24T18:02:38-06:00",
+          "message": "Extract particle-mesh resource owner\n"
+        },
+        {
+          "sha": "1daa243e770c425e2ccad2f06968b5a89a05fd2e",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-24T17:26:07-06:00",
+          "message": "Add commit requirement to agents guide\n"
+        },
+        {
+          "sha": "45ab3b7f6a71393dfe83bb0905befd3a7f06f9fc",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-24T17:24:50-06:00",
+          "message": "Extract physics render overlays\n"
+        },
+        {
+          "sha": "f5de344f29a5c53e3f38f5523b2e4ecef3018b10",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-24T17:20:31-06:00",
+          "message": "Extract physics diagnostics\n"
+        },
+        {
+          "sha": "e2ef43598e9cd1c9c77bbfb1603376521db9a2c7",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-24T17:15:04-06:00",
+          "message": "Extract physics initial conditions\n"
+        },
+        {
+          "sha": "933c6da03b0ab55364c26436dd47635feadbef99",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-24T16:55:40-06:00",
+          "message": "Extract simulation modules and diagnostics\n"
+        },
+        {
+          "sha": "044ae8b252016e698d8c86e99b882aec89e5118b",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-04-23T23:54:17-06:00",
+          "message": "Cleaning up after Codex\n"
         },
         {
           "sha": "cf6350a5d4982e3cb08d9f1bc4df20e4c1b54f4e",
