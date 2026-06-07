@@ -1,8 +1,8 @@
 import type { AppState, Attractor, DepthRef } from '../../types';
 
-import SHADER_NBODY_RENDER from '../../shaders/nbody.render.wgsl?raw';
 import { createPhysicsRenderOverlays } from './markers';
 import type { GasReservoir } from '../../gasReservoir';
+import { shaderSource } from '../../gpu/shaders';
 
 type ShaderFactory = (label: string, source: string) => GPUShaderModule;
 
@@ -87,7 +87,7 @@ export function createPhysicsRenderService(
     trailBlurBuffer,
   } = args;
 
-  const renderModule = createShaderModuleChecked('nbody.render', SHADER_NBODY_RENDER);
+  const renderModule = createShaderModuleChecked('nbody.render', shaderSource('nbody.render'));
   const renderBGL = device.createBindGroupLayout({
     entries: [
       { binding: 0, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: 'read-only-storage' } },
