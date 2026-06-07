@@ -2,6 +2,28 @@
   "schema": 2,
   "versions": [
     {
+      "version": "pr-15",
+      "ref": "refs/pull/15/merge",
+      "sha": "e51e8e3ed7745c5c17a7358df7a324b18cc71e8f",
+      "timestamp": "2026-06-07T05:53:57.232Z",
+      "commits": [
+        {
+          "sha": "e51e8e3ed7745c5c17a7358df7a324b18cc71e8f",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-06-06T23:53:26-06:00",
+          "message": "Merge 3038bcfdf6eef15f50ec16694bc0486aa2a590e3 into 231677e6bfb6c6b36d98c2da0dd8b35df5cc2ef1\n"
+        },
+        {
+          "sha": "3038bcfdf6eef15f50ec16694bc0486aa2a590e3",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-06-06T23:48:52-06:00",
+          "message": "Refactor runtime seams and reintegrate extracted modules (#14)\n\n* Structural refactor\n\n* Rewire extracted runtime seams\n\n* Cleaning up after Codex\n\n* Extract simulation modules and diagnostics\n\n* Extract physics initial conditions\n\n* Extract physics diagnostics\n\n* Extract physics render overlays\n\n* Add commit requirement to agents guide\n\n* Extract particle-mesh resource owner\n\n* Extract physics stats service\n\n* Extract physics step controller\n\n* Extract physics render service\n\n* Extract physics compute service\n\n* Extract physics simulation assembly\n\n* Extract shared grid renderer\n\n* Extract GPU timing service\n\n* Extract post-fx render service\n\n* Extract camera render service\n\n* Extract shared frame stats service\n\n* Extract XR session runtime\n\n* Extract input systems\n\n* Extract UI panel systems\n\n* Extract desktop frame runtime\n\n* Extract XR input pipeline\n\n* Introduce app action boundary\n\n* Absorb simulation factory variance\n\n* Create runtime variance epic"
+        }
+      ]
+    },
+    {
       "version": "r91-231677e",
       "ref": "refs/heads/master",
       "sha": "231677e6bfb6c6b36d98c2da0dd8b35df5cc2ef1",
