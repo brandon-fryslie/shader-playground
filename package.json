@@ -6,6 +6,8 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
+    "check:architecture": "node scripts/check-architecture.mjs && node scripts/check-main-size.mjs",
+    "check": "npm run check:architecture && npm run build",
     "preview": "vite preview"
   },
   "devDependencies": {
