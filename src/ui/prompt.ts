@@ -12,7 +12,12 @@ const MODE_LABELS: Record<SimMode, string> = {
 type ModeParamsReader = (mode: SimMode) => Record<string, number | string | boolean>;
 
 // [LAW:dataflow-not-control-flow] Prompt text is derived from state/default deltas; callers always run this renderer with current data.
-export function updatePrompt(state: AppState, defaults: ModeParamsMap, modeParams: ModeParamsReader): void {
+export function updatePrompt(
+  state: AppState,
+  defaults: ModeParamsMap,
+  modeParams: ModeParamsReader,
+  defaultTheme: string,
+): void {
   const mode = state.mode;
   const params = modeParams(mode);
   const defaultParams = defaults[mode] as unknown as Record<string, number | string | boolean>;
@@ -25,7 +30,7 @@ export function updatePrompt(state: AppState, defaults: ModeParamsMap, modeParam
   }
 
   let prompt = `WebGPU ${MODE_LABELS[mode]} simulation`;
-  if (state.colorTheme !== 'Dracula') {
+  if (state.colorTheme !== defaultTheme) {
     prompt += ` (${state.colorTheme} theme)`;
   }
   if (parts.length > 0) {

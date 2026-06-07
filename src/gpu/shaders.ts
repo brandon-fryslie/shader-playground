@@ -118,9 +118,11 @@ export function getShaderSources(mode: SimMode): Record<string, string> {
   return Object.fromEntries(Object.entries(tabs).map(([label, id]) => [label, shaderSource(id)]));
 }
 
-export function applyShaderEdit(mode: SimMode, tabName: string, code: string): void {
+export function applyShaderEdit(mode: SimMode, tabName: string, code: string): boolean {
   const id = modeTabs[mode][tabName];
-  if (id) edits.set(id, code);
+  if (!id) return false;
+  edits.set(id, code);
+  return true;
 }
 
 export function resetShaderEdit(mode: SimMode, tabName: string): string | null {

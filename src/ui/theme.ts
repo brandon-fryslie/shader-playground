@@ -63,7 +63,9 @@ export function createThemeSystem(deps: ThemeSystemDependencies): ThemeSystem {
   let currentThemeColors = getThemeColorsForName(deps.defaultTheme);
 
   function computeThemeColors(now: number): RGBThemeColors {
-    const progress = Math.max(0, Math.min(1, (now - themeTransition.startedAtMs) / deps.fadeMs));
+    const progress = deps.fadeMs <= 0
+      ? 1
+      : Math.max(0, Math.min(1, (now - themeTransition.startedAtMs) / deps.fadeMs));
     return mixThemeColors(themeTransition.from, themeTransition.to, progress);
   }
 

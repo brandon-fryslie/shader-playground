@@ -649,7 +649,7 @@ function applyMobileDefaults() {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 function updatePrompt() {
-  renderPrompt(state, catalogDefaults, modeParams);
+  renderPrompt(state, catalogDefaults, modeParams, catalogDefaultTheme);
 }
 
 let shaderPanel!: ShaderPanel;
@@ -693,8 +693,8 @@ function updateShaderPanel() {
 }
 
 // Apply edited shader code to the appropriate global variable
-function applyShaderEdit(mode: SimMode, tabName: string, code: string) {
-  applyCatalogShaderEdit(mode, tabName, code);
+function applyShaderEdit(mode: SimMode, tabName: string, code: string): boolean {
+  return applyCatalogShaderEdit(mode, tabName, code);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════

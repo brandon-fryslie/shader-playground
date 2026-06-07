@@ -6,7 +6,7 @@ export interface ShaderPanel {
 }
 
 interface ShaderPanelDeps {
-  applyShaderEdit(mode: SimMode, tabName: string, code: string): void;
+  applyShaderEdit(mode: SimMode, tabName: string, code: string): boolean;
   createShaderModule(code: string): GPUShaderModule;
   getShaderSources(mode: SimMode): Record<string, string>;
   resetShaderEdit(mode: SimMode, tabName: string): string | null;
@@ -81,10 +81,16 @@ export function createShaderPanel(deps: ShaderPanelDeps): ShaderPanel {
           status.title = errors.map((error) => `Line ${error.lineNum}: ${error.message}`).join('\n');
           return;
         }
+        const applied = deps.applyShaderEdit(deps.state.mode, tabName, code);
+        if (!applied) {
+          status.className = 'shader-error';
+          status.textContent = `Shader tab "${tabName}" is not editable from this panel`;
+          status.title = status.textContent;
+          return;
+        }
         status.className = 'shader-success';
-        status.textContent = 'Compiled OK — reset simulation to apply';
+        status.textContent = 'Compiled OK - reset simulation to apply';
         status.title = '';
-        deps.applyShaderEdit(deps.state.mode, tabName, code);
       });
     } catch (error) {
       status.className = 'shader-error';
@@ -95,7 +101,15 @@ export function createShaderPanel(deps: ShaderPanelDeps): ShaderPanel {
 
   function resetEditedShader(): void {
     if (!activeTab || !originalSources[activeTab]) return;
-    currentSources[activeTab] = deps.resetShaderEdit(deps.state.mode, activeTab) ?? originalSources[activeTab];
+    const resetSource = deps.resetShaderEdit(deps.state.mode, activeTab);
+    if (resetSource === null) {
+      const status = document.getElementById('shader-status')!;
+      status.className = 'shader-error';
+      status.textContent = `Shader tab "${activeTab}" is not editable from this panel`;
+      status.title = status.textContent;
+      return;
+    }
+    currentSources[activeTab] = resetSource;
     loadEditorContent();
     const status = document.getElementById('shader-status')!;
     status.className = 'shader-success';

@@ -4,6 +4,10 @@ export const STORAGE_KEY = 'shader-playground-state';
 
 type ModeParamsReader = (mode: SimMode) => Record<string, number | string | boolean>;
 
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === 'object' && !Array.isArray(value);
+}
+
 // [LAW:single-enforcer] localStorage serialization is centralized here; callers provide canonical state and readers.
 export function saveState(state: AppState, defaults: ModeParamsMap, modeParams: ModeParamsReader): void {
   try {
@@ -40,13 +44,13 @@ export function loadState(
     if (typeof parsed.mode === 'string' && parsed.mode in defaults) state.mode = parsed.mode as SimMode;
     if (typeof parsed.colorTheme === 'string' && colorThemes[parsed.colorTheme]) state.colorTheme = parsed.colorTheme;
     for (const mode of Object.keys(defaults) as SimMode[]) {
-      if (parsed[mode] && typeof parsed[mode] === 'object') {
+      if (isPlainRecord(parsed[mode])) {
         Object.assign(modeParams(mode), parsed[mode]);
       }
     }
-    if (parsed.camera && typeof parsed.camera === 'object') Object.assign(state.camera, parsed.camera);
-    if (parsed.fx && typeof parsed.fx === 'object') Object.assign(state.fx, parsed.fx);
-    if (parsed.debug && typeof parsed.debug === 'object') Object.assign(state.debug, parsed.debug);
+    if (isPlainRecord(parsed.camera)) Object.assign(state.camera, parsed.camera);
+    if (isPlainRecord(parsed.fx)) Object.assign(state.fx, parsed.fx);
+    if (isPlainRecord(parsed.debug)) Object.assign(state.debug, parsed.debug);
     syncThemeTransition(state.colorTheme);
   } catch {
     // Invalid persisted state falls back to fresh defaults.

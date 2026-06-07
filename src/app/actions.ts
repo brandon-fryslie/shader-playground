@@ -4,6 +4,7 @@ type ModeParamsAccess = (mode: SimMode) => Record<string, number | string | bool
 
 export interface AppActions {
   applyPreset(mode: SimMode, presetName: string): void;
+  flushSaveState(): void;
   resetCurrentSimulation(): void;
   saveState(): void;
   selectMode(mode: SimMode): void;
@@ -29,6 +30,16 @@ interface AppActionsDeps {
 }
 
 export function createAppActions(deps: AppActionsDeps): AppActions {
+  let saveTimer: ReturnType<typeof setTimeout> | null = null;
+
+  function saveSoon(): void {
+    if (saveTimer) clearTimeout(saveTimer);
+    saveTimer = setTimeout(() => {
+      saveTimer = null;
+      deps.saveStateInternal();
+    }, 150);
+  }
+
   // [LAW:single-enforcer] App-level mutations flow through one action surface
   // so mode, pause, preset, theme, and persistence side effects cannot drift.
   const actions: AppActions = {
@@ -38,11 +49,18 @@ export function createAppActions(deps: AppActionsDeps): AppActions {
       deps.syncUi();
       actions.updateAll();
     },
+    flushSaveState() {
+      if (saveTimer) {
+        clearTimeout(saveTimer);
+        saveTimer = null;
+      }
+      deps.saveStateInternal();
+    },
     resetCurrentSimulation() {
       deps.resetCurrentSimulationInternal();
     },
     saveState() {
-      deps.saveStateInternal();
+      saveSoon();
     },
     selectMode(mode) {
       deps.state.mode = mode;
@@ -64,7 +82,7 @@ export function createAppActions(deps: AppActionsDeps): AppActions {
       deps.updatePrompt();
       deps.updateStats();
       deps.updateShaderPanel();
-      deps.saveStateInternal();
+      saveSoon();
     },
   };
   return actions;

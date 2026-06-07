@@ -4,6 +4,7 @@ type ModeParamsAccess = (mode: SimMode) => Record<string, number | string | bool
 
 interface ControlsActions {
   applyPreset(mode: SimMode, presetName: string): void;
+  flushSaveState(): void;
   resetCurrentSimulation(): void;
   saveState(): void;
   selectMode(mode: SimMode): void;
@@ -128,6 +129,7 @@ export function createControls(deps: ControlsDependencies): ControlsApi {
         valueSpan.textContent = formatValue(val, def.step);
         deps.actions.saveState();
       });
+      input.addEventListener('change', () => deps.actions.flushSaveState());
       row.appendChild(input);
       row.appendChild(valueSpan);
       secDiv.appendChild(row);
@@ -164,6 +166,7 @@ export function createControls(deps: ControlsDependencies): ControlsApi {
           rebuildShapeParams();
         }
         deps.actions.updateAll();
+        deps.actions.flushSaveState();
       });
       row.appendChild(select);
     } else if (param.type === 'toggle') {
@@ -176,6 +179,7 @@ export function createControls(deps: ControlsDependencies): ControlsApi {
         deps.modeParams(mode)[param.key] = input.checked;
         if (param.requiresReset) deps.actions.resetCurrentSimulation();
         deps.actions.updateAll();
+        deps.actions.flushSaveState();
       });
       row.appendChild(input);
     } else {
@@ -216,6 +220,7 @@ export function createControls(deps: ControlsDependencies): ControlsApi {
           input.dataset.needsReset = '0';
           deps.actions.resetCurrentSimulation();
         }
+        deps.actions.flushSaveState();
       });
 
       row.appendChild(input);
@@ -291,32 +296,10 @@ export function createControls(deps: ControlsDependencies): ControlsApi {
   }
 
   function applyPreset(mode: SimMode, presetName: string) {
-    const preset = config.presets[mode][presetName];
+    // [LAW:one-source-of-truth] Presets mutate canonical state through
+    // AppActions; syncUiFromState derives every control type from that state.
     deps.actions.applyPreset(mode, presetName);
-
-    const container = document.getElementById(`params-${mode}`)!;
-    container.querySelectorAll<HTMLInputElement>('input[type="range"]').forEach((input) => {
-      const key = input.dataset.key!;
-      if (key in preset) {
-        const paramDef = findParamDef(mode, key);
-        const realVal = Number(preset[key]);
-        input.value = (paramDef?.logScale && paramDef.min !== undefined && paramDef.max !== undefined)
-          ? String(realToLogTick(realVal, paramDef.min, paramDef.max))
-          : String(preset[key]);
-        const valueSpan = input.parentElement?.querySelector('.control-value');
-        if (valueSpan) valueSpan.textContent = formatValueWithMax(realVal, paramDef);
-      }
-    });
-    container.querySelectorAll<HTMLSelectElement>('select').forEach((sel) => {
-      const key = sel.dataset.key!;
-      if (key in preset) sel.value = String(preset[key]);
-    });
-
-    syncPresetButtons(mode);
-
-    if (mode === 'parametric') {
-      rebuildShapeParams();
-    }
+    deps.actions.flushSaveState();
   }
 
   function buildControls() {
@@ -407,7 +390,7 @@ export function createControls(deps: ControlsDependencies): ControlsApi {
     xrLogToggle.addEventListener('change', () => {
       state.debug.xrLog = xrLogToggle.checked;
       deps.setXrDebugLogging(state.debug.xrLog);
-      deps.actions.saveState();
+      deps.actions.flushSaveState();
     });
 
     deps.setupXRButton();
