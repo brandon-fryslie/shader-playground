@@ -2,6 +2,28 @@
   "schema": 2,
   "versions": [
     {
+      "version": "pr-16",
+      "ref": "refs/pull/16/merge",
+      "sha": "71a4eee7fed82215101fb8e6132d66660f8b5372",
+      "timestamp": "2026-06-07T21:42:49.555Z",
+      "commits": [
+        {
+          "sha": "71a4eee7fed82215101fb8e6132d66660f8b5372",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-06-07T15:42:34-06:00",
+          "message": "Merge 6266392422aff3f330c53adffea9caaaf9ec8327 into 2a5f06d7a5c3dfe83979956b04b5f078e084b75e\n"
+        },
+        {
+          "sha": "6266392422aff3f330c53adffea9caaaf9ec8327",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-06-07T15:41:50-06:00",
+          "message": "Absorb WebGPU boot into GPU context\n"
+        }
+      ]
+    },
+    {
       "version": "r92-2a5f06d",
       "ref": "refs/heads/master",
       "sha": "2a5f06d7a5c3dfe83979956b04b5f078e084b75e",
