@@ -22,7 +22,7 @@ export interface GpuContext {
 }
 
 export interface GpuContextDeps {
-  createShaderModuleChecked(label: string, code: string): GPUShaderModule;
+  createShaderModuleChecked(device: GPUDevice, label: string, code: string): GPUShaderModule;
   currentSimStep(): number;
   currentTimeDirection(): number;
   dropSimulationIfCurrent(mode: AppState['mode'], expected: Simulation): void;
@@ -98,7 +98,7 @@ export async function createGpuContext(deps: GpuContextDeps): Promise<GpuContext
 
   const cameraSystem = createCameraSystem(deps.state.camera);
   const postFx = createPostFxService({
-    createShaderModuleChecked: deps.createShaderModuleChecked,
+    createShaderModuleChecked: (label, code) => deps.createShaderModuleChecked(device, label, code),
     device,
     renderSampleCount: RENDER_SAMPLE_COUNT,
   });

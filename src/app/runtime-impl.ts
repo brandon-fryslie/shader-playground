@@ -40,7 +40,13 @@ const diagnosticsLogger = createDiagnosticsLogger({
   getPhase: () => currentGpuPhase,
 });
 diagnosticsLogger.installGlobalHandlers();
-const { createShaderModuleChecked, logError, logInfo, showSimError } = diagnosticsLogger;
+const {
+  createShaderModuleChecked,
+  createShaderModuleCheckedForDevice,
+  logError,
+  logInfo,
+  showSimError,
+} = diagnosticsLogger;
 
 
 // [LAW:one-source-of-truth] AppState creation is centralized in app/state.ts so
@@ -183,7 +189,7 @@ function getCameraUniformData(aspect: number) {
 
 function createGpuContextDeps(): GpuContextDeps {
   return {
-    createShaderModuleChecked,
+    createShaderModuleChecked: createShaderModuleCheckedForDevice,
     currentSimStep,
     currentTimeDirection,
     dropSimulationIfCurrent,
