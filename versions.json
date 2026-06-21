@@ -2,6 +2,28 @@
   "schema": 2,
   "versions": [
     {
+      "version": "pr-36",
+      "ref": "refs/pull/36/merge",
+      "sha": "275bdac94721411950c0777d7a4e0e8c6be6236f",
+      "timestamp": "2026-06-21T06:18:04.720Z",
+      "commits": [
+        {
+          "sha": "275bdac94721411950c0777d7a4e0e8c6be6236f",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-06-21T00:17:49-06:00",
+          "message": "Merge 86c85111a59eb4d4802bb75c3130f3da5619c9df into cf00eda4c6fac3235ebf14d406c68d3bc2ad4b1b\n"
+        },
+        {
+          "sha": "86c85111a59eb4d4802bb75c3130f3da5619c9df",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-06-21T00:17:09-06:00",
+          "message": "fix(debug): clear stale debug targets on sim reset (#shader-debug-6oi.5)\n\nresetCurrentSim destroys and rebuilds the physics sim, snapping simStep\nback to 0. But skipTarget / breakAtStep / manualStepsRemaining live in\ndebug-panel.ts module scope and survive the rebuild — if a skip target\nor breakpoint was pending, the fresh sim immediately starts seeking it\nfrom step 0 against the user's intent.\n\ncancelMovement() can't be reused as-is: the pause-toggle path (.4)\ndeliberately preserves breakAtStep so a user can pause to inspect mid-\nskip without losing their breakpoint. Sim-reset has different semantics\n- every debug target is a coordinate in the old simStep space, so all\nthree must clear together.\n\nAdd DebugPanel.clearAll() (cancelMovement + breakAtStep=null + UI\nrefresh) and call it from resetCurrentSim before the sim is destroyed.\nEvery reset path - Reset button, applyPreset, requiresReset slider -\nflows through resetCurrentSim, so one call site enforces the lifetime\ninvariant. [LAW:single-enforcer] [LAW:one-source-of-truth]\n"
+        }
+      ]
+    },
+    {
       "version": "r112-cf00eda",
       "ref": "refs/heads/master",
       "sha": "cf00eda4c6fac3235ebf14d406c68d3bc2ad4b1b",
