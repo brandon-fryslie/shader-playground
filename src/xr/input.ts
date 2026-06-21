@@ -157,6 +157,8 @@ const XR_GRIP_THRESHOLD_M = 0.03;
 const XR_GRIP_THRESHOLD_SQ = XR_GRIP_THRESHOLD_M * XR_GRIP_THRESHOLD_M;
 const XR_SIMUL_WINDOW_MS = 150;
 const XR_ATTRACTOR_POINTER_ID: Record<XrHand, number> = { left: -1, right: -2 };
+// [LAW:single-enforcer] One knob, declared once. 10× slowdown when fine-modifier active.
+const XR_FINE_MODIFIER_GAIN = 0.1;
 
 function quatConj(q: number[]): number[] { return [-q[0], -q[1], -q[2], q[3]]; }
 function quatMul(a: number[], b: number[]): number[] {
@@ -485,6 +487,16 @@ export function createXrInputSystem(deps: XrInputSystemDeps): XrInputSystem {
     xrPrevPinch.left = leftActive;
     xrPrevPinch.right = rightActive;
 
+    // [LAW:one-source-of-truth] xrPrevGestureSnap[hand].fineModifier is the per-hand
+    // truth; the global gain is derived from it each frame rather than mutated by
+    // matched event edges. This makes the global resistant to event re-ordering
+    // (e.g. both hands toggling fine-mode in quick succession) — the global
+    // unambiguously reads "any hand currently fine-modifying" without bookkeeping.
+    // [LAW:dataflow-not-control-flow] no branch on the event stream; one assignment
+    // from the current snapshot.
+    const fineActive = xrPrevGestureSnap.left.fineModifier || xrPrevGestureSnap.right.fineModifier;
+    xrTuning.gainMultiplier = fineActive ? XR_FINE_MODIFIER_GAIN : 1.0;
+
     if (chanXrGesture.subscribers.size > 0) {
       for (const gesture of gestures) {
         deps.metrics.emit(chanXrGesture, { hand: 'hand' in gesture ? gesture.hand : null, gesture });
@@ -539,10 +551,9 @@ export function createXrInputSystem(deps: XrInputSystemDeps): XrInputSystem {
         case 'pinch-hold':
           break;
         case 'fine-modifier-on':
-          xrTuning.gainMultiplier = 0.1;
-          break;
         case 'fine-modifier-off':
-          xrTuning.gainMultiplier = 1.0;
+          // Events stay in the stream for metrics / logging; xrTuning.gainMultiplier
+          // is derived from the per-hand snapshot in xrDetectGestures(), not here.
           break;
         case 'palm-up':
         case 'palm-down':
