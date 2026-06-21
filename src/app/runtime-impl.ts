@@ -1,5 +1,5 @@
 import '../../styles/main.css';
-import type { SimMode, Simulation, AppState, RGBThemeColors, DepthRef } from '../types';
+import type { SimMode, Simulation, AppState, DepthRef } from '../types';
 import { bindingRegistry } from '../xr-ui/bindings';
 import { evaluateAnchor } from '../xr-ui/anchors';
 import { layout as xrUiLayout, hitTestWidgets } from '../xr-ui/layout';
@@ -12,12 +12,8 @@ import { createAppActions, type AppActions } from './actions';
 import { createGpuContext, type GpuContext, type GpuContextDeps } from './gpu-context';
 import { createInitialState } from './state';
 import { registerAppBindings } from './bindings';
+import { createUiOrchestrator, type UiOrchestrator } from './ui-orchestrator';
 import { saveState as persistState, loadState as hydrateState, STORAGE_KEY as storageKey } from '../persistence/local-storage';
-import { updatePrompt as renderPrompt } from '../ui/prompt';
-import { createThemeSystem } from '../ui/theme';
-import { createControls, type ControlsApi } from '../ui/controls';
-import { createDebugPanel, type DebugPanel } from '../ui/debug-panel';
-import { createShaderPanel, type ShaderPanel } from '../ui/shader-panel';
 import { createSimulationFactories } from '../simulations/factories';
 import { isPhysicsSimulation } from '../simulations/types';
 import { createSimulationRegistry, type SimulationRegistry } from '../simulations/registry';
@@ -30,7 +26,7 @@ import { createAttractorSystem, type AttractorSystem, ATTRACTOR_MAX, MARKERS_PER
 import { createPointerSystem, type PointerSystem } from '../input/pointer';
 import { createMobileInput, type MobileInput } from '../input/mobile';
 import { createGridRenderer, type GridRenderer } from '../render/grid';
-import { createXrInputSystem, type XrGestureEvent, type XrInputSystem, type XrStateEvent } from '../xr/input';
+import { createXrInputSystem, type XrInputSystem } from '../xr/input';
 import { createXrRuntime, type XrRuntime } from '../xr/runtime';
 
 let gpuContext!: GpuContext;
@@ -52,34 +48,8 @@ const {
 // [LAW:one-source-of-truth] AppState creation is centralized in app/state.ts so
 // boot and tests share one canonical initialization shape.
 const state: AppState = createInitialState(catalogDefaults);
-let controlsApi: ControlsApi | null = null;
 let appActions!: AppActions;
-
-const themeSystem = createThemeSystem({
-  // [LAW:one-source-of-truth] Theme metadata and transition ownership live in
-  // app/catalog.ts and ui/theme.ts; the runtime consumes that service.
-  defaultTheme: catalogDefaultTheme,
-  fadeMs: catalogThemeFadeMs,
-  onThemeSelected: () => appActions.updateAll(),
-  state,
-  themes: catalogColorThemes,
-});
-
-function getThemeColors(): RGBThemeColors {
-  return themeSystem.getThemeColors();
-}
-
-function refreshThemeColors(now: number): void {
-  themeSystem.refreshThemeColors(now);
-}
-
-function syncThemeTransition(themeName: string): void {
-  themeSystem.syncThemeTransition(themeName);
-}
-
-function syncThemeButtons(themeName: string): void {
-  themeSystem.syncThemeButtons(themeName);
-}
+let uiOrchestrator!: UiOrchestrator;
 
 function modeParams(mode: SimMode): Record<string, number | string | boolean> {
   return state[mode] as unknown as Record<string, number | string | boolean>;
@@ -119,19 +89,6 @@ function tickMarkers(dt: number): void {
   attractorSystem.tickMarkers(dt);
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// SECTION 2: WGSL SHADERS
-// ═══════════════════════════════════════════════════════════════════════════════
-
-
-
-
-
-
-
-
-
-
 const FLUID_GRID_RES = 96; // tessellation resolution for 3D fluid mesh
 // [LAW:one-source-of-truth] Fluid world size is declared once so rendering and interaction use identical bounds.
 const FLUID_WORLD_SIZE = 4; // full width/depth of the fluid volume in world units
@@ -142,10 +99,6 @@ const FLUID_WORLD_SIZE = 4; // full width/depth of the fluid volume in world uni
 // so neither overwrites the other before the command buffer executes.
 const CAMERA_SIZE = 208;   // sizeof(Camera) in WGSL — includes interaction state
 const CAMERA_STRIDE = 256; // >= CAMERA_SIZE, multiple of minUniformBufferOffsetAlignment
-// [LAW:one-source-of-truth] Desktop projection range is owned here so every pass sees the same far-plane budget.
-
-// All shape equations baked into one shader — shapeId uniform selects which runs.
-// p1–p4 are per-shape parameters passed as uniforms (no recompilation on change).
 
 let xrRuntime: XrRuntime | null = null;
 let xrInputSystem!: XrInputSystem;
@@ -179,7 +132,7 @@ function destroyDepthRef(_depthRef: DepthRef) {
 }
 
 function getCameraUniformData(aspect: number) {
-  return gpuContext.cameraSystem.getUniformData(aspect, getThemeColors(), state.mouse);
+  return gpuContext.cameraSystem.getUniformData(aspect, uiOrchestrator.getThemeColors(), state.mouse);
 }
 
 
@@ -196,17 +149,17 @@ function createGpuContextDeps(): GpuContextDeps {
     getCanvasContainer: () => document.getElementById('canvas-container')!,
     getCurrentSimulation: () => simulations[state.mode],
     getDefaultClearColor: () => catalogDefaultClearColor,
-    getThemeColors,
+    getThemeColors: () => uiOrchestrator.getThemeColors(),
     logError,
     pruneAttractors,
-    refreshThemeColors,
+    refreshThemeColors: (now) => uiOrchestrator.refreshThemeColors(now),
     restoreAfterDeviceLoss,
-    runDebugCompute,
+    runDebugCompute: (sim, encoder) => uiOrchestrator.runDebugCompute(sim, encoder),
     showSimError,
     state,
     tickMarkers,
-    updateAdaptiveChunk,
-    updateDebugPanel,
+    updateAdaptiveChunk: (deltaMs) => uiOrchestrator.updateAdaptiveChunk(deltaMs),
+    updateDebugPanel: () => uiOrchestrator.updateDebugPanel(),
   };
 }
 
@@ -219,17 +172,16 @@ async function restoreAfterDeviceLoss(): Promise<void> {
   gpuContext.frameRuntime.requestFrame();
 }
 
+function getActivePhysicsSimulation() {
+  const sim = simulations['physics'];
+  return isPhysicsSimulation(sim) ? sim : null;
+}
+
 function initializeRuntimeServices(): void {
   attractorSystem = createAttractorSystem({
-    getCurrentPhysicsStep: () => {
-      const sim = simulations['physics'];
-      return isPhysicsSimulation(sim) ? sim.getSimStep() : 0;
-    },
-    getCurrentTimeDirection: () => {
-      const sim = simulations['physics'];
-      return isPhysicsSimulation(sim) ? sim.getTimeDirection() : 1;
-    },
-    getThemeColors,
+    getCurrentPhysicsStep: () => getActivePhysicsSimulation()?.getSimStep() ?? 0,
+    getCurrentTimeDirection: () => getActivePhysicsSimulation()?.getTimeDirection() ?? 1,
+    getThemeColors: () => uiOrchestrator.getThemeColors(),
     state,
   });
   pointerSystem = createPointerSystem({
@@ -249,22 +201,6 @@ function initializeRuntimeServices(): void {
     setSimulationInteractionInactive,
     state,
     storageKey,
-  });
-  debugPanel = createDebugPanel({
-    canvas: gpuContext.canvas,
-    getPhysicsSimulation: () => {
-      const sim = simulations['physics'];
-      return isPhysicsSimulation(sim) ? sim : null;
-    },
-    state,
-    syncPauseButtons,
-  });
-  shaderPanel = createShaderPanel({
-    applyShaderEdit,
-    createShaderModule: (code) => gpuContext.device.createShaderModule({ code }),
-    getShaderSources,
-    resetShaderEdit: resetCatalogShaderEdit,
-    state,
   });
   xrInputSystem = createXrInputSystem({
     bindings: bindingRegistry,
@@ -377,164 +313,11 @@ function initializeSimulationRegistry(): void {
 
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// SECTION 6: UI & CONTROLS
+// SECTION 6: INPUT POINTERS
 // ═══════════════════════════════════════════════════════════════════════════════
-
-function buildControls() {
-  getControlsApi().buildControls();
-}
-
-function setupTabs() {
-  getControlsApi().setupTabs();
-}
-
-// [LAW:single-enforcer] Pause-button text/active-state is reflected in exactly one place so the
-// desktop button, mobile FAB, and any programmatic pause (breakpoint, skip completion) all agree.
-function syncPauseButtons() {
-  getControlsApi().syncPauseButtons();
-}
-
-function setupGlobalControls() {
-  getControlsApi().setupGlobalControls();
-}
-
-// One-click XR record button: enter XR and begin an unbounded recording;
-// the recording terminates when the XR session ends (user exits). Samples
-// publish to console + window.__xrLastRecording on stop.
-function setupRecordButton(): void {
-  const btn = document.getElementById('btn-xr-record') as HTMLButtonElement | null;
-  if (!btn) return;
-  const idleLabel = 'Record XR Session';
-  const tick = () => {
-    const s = metrics.status();
-    const session = xrRuntime?.getSession() ?? null;
-    if (s.phase === 'idle') {
-      btn.textContent = idleLabel;
-      btn.disabled = !!session;  // also disabled while XR session alive
-      return;
-    }
-    btn.textContent = 'Recording — exit XR to stop';
-    btn.disabled = true;
-    requestAnimationFrame(tick);
-  };
-  btn.addEventListener('click', async () => {
-    if (metrics.status().phase !== 'idle' || xrRuntime?.getSession()) return;
-    // Start the recording before the session so we capture session-setup
-    // signals too. Producers are dormant until xrInputStep runs, so no
-    // samples actually arrive until the first XR frame — this just ensures
-    // subscribers are live when they do.
-    metrics.record({}).then((samples) => {
-      // Full sample array on window for programmatic inspection. Console only
-      // shows edge events (gestures + state transitions) to avoid 90 Hz × 2-hand
-      // snap spam. To walk snaps yourself: __xrLastRecording.filter(s => s.channel === 'xr.snap').
-      (window as unknown as { __xrLastRecording?: MetricSample[] }).__xrLastRecording = samples;
-      const counts: Record<string, number> = {};
-      for (const s of samples) counts[s.channel] = (counts[s.channel] ?? 0) + 1;
-      const summary = Object.entries(counts).map(([c, n]) => `${c}: ${n}`).join(', ');
-      // eslint-disable-next-line no-console
-      console.group(`[xr] recording — ${samples.length} samples (${summary})`);
-      for (const s of samples) {
-        if (s.channel === 'xr.snap') continue;  // bulk data; inspect via __xrLastRecording
-        // pinch-hold fires every frame during a pinch — also bulk; skip from console.
-        if (s.channel === 'xr.gesture'
-          && (s.payload as XrGestureEvent).gesture.kind === 'pinch-hold') continue;
-        // Inline kind/transition into the prefix so Safari doesn't collapse nested
-        // objects to "Object" — the string prefix always prints fully.
-        let label = s.channel;
-        if (s.channel === 'xr.gesture') {
-          const p = s.payload as XrGestureEvent;
-          label = `xr.gesture:${p.gesture.kind}${p.hand ? `(${p.hand})` : ''}`;
-        } else if (s.channel === 'xr.state') {
-          const p = s.payload as XrStateEvent;
-          label = `xr.state:${p.hand} ${p.from}→${p.to}`;
-        }
-        // eslint-disable-next-line no-console
-        console.log(`[t=${s.t.toFixed(0).padStart(5)}ms] ${label}`, s.payload);
-      }
-      // eslint-disable-next-line no-console
-      console.groupEnd();
-    });
-    requestAnimationFrame(tick);
-    await toggleXR();
-    const session = xrRuntime?.getSession() ?? null;
-    if (!session) {
-      // Session failed to start — end the recording with whatever we have.
-      metrics.stop();
-      return;
-    }
-    // [LAW:single-enforcer] Our listener only calls metrics.stop(); the
-    // existing session-end handler in toggleXR owns the XR-side cleanup.
-    session.addEventListener('end', () => metrics.stop(), { once: true });
-  });
-}
-
-// [LAW:single-enforcer] Time-reverse input is owned here. Desktop: hold R. Mobile: hold rewind FAB.
-// The physics sim's setTimeDirection() is the single channel for changing direction.
-function setupTimeReverseControls() {
-  const setReverse = (active: boolean) => {
-    const sim = simulations[state.mode];
-    if (!isPhysicsSimulation(sim)) return;
-    sim.setTimeDirection(active ? -1 : 1);
-    // Unblock pause if we were auto-paused at the journal boundary.
-    if (!active && state.paused) state.paused = false;
-  };
-
-  // Desktop: hold R key to rewind.
-  document.addEventListener('keydown', (e) => {
-    if (e.key === 'r' || e.key === 'R') {
-      if (e.repeat) return;
-      // Don't capture R when typing in an input or the shader editor.
-      const tag = (e.target as HTMLElement)?.tagName;
-      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
-      setReverse(true);
-    }
-  });
-  document.addEventListener('keyup', (e) => {
-    if (e.key === 'r' || e.key === 'R') setReverse(false);
-  });
-
-  // Mobile: hold rewind FAB.
-  const fabRewind = document.getElementById('fab-rewind');
-  if (fabRewind) {
-    fabRewind.addEventListener('pointerdown', () => setReverse(true));
-    fabRewind.addEventListener('pointerup', () => setReverse(false));
-    fabRewind.addEventListener('pointercancel', () => setReverse(false));
-    fabRewind.addEventListener('pointerleave', () => setReverse(false));
-  }
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// DEBUG / TIME CONTROL
-// ═══════════════════════════════════════════════════════════════════════════════
-// [LAW:one-source-of-truth] Debug state drives three behaviors that would otherwise diverge:
-// manual step (discrete advance), skip-to-step (bounded seek), and breakpoint (auto-pause at step).
-// All three funnel through runDebugCompute() in the frame loop so the frame-level gating stays uniform.
-
-let debugPanel!: DebugPanel;
-
-function updateAdaptiveChunk(frameDeltaMs: number): void {
-  debugPanel.updateAdaptiveChunk(frameDeltaMs);
-}
-
-function cancelDebugMovement(): void {
-  debugPanel.cancelMovement();
-}
-
-function runDebugCompute(sim: Simulation, encoder: GPUCommandEncoder): void {
-  debugPanel.runCompute(sim, encoder);
-}
-
-function setupDebugControls() {
-  debugPanel.setupControls();
-}
-
-function updateDebugPanel(): void {
-  debugPanel.updatePanel();
-}
-
-function buildThemeSelector() {
-  themeSystem.buildThemeSelector();
-}
+// UI subsystems (controls, theme, prompt, shader panel, debug panel, XR record
+// button, XR enter button, time-reverse keybindings) all live behind
+// ui-orchestrator.ts; the runtime only routes per-frame hooks through it.
 
 let pointerSystem!: PointerSystem;
 let mobileInput!: MobileInput;
@@ -578,57 +361,12 @@ function applyMobileDefaults() {
   mobileInput.applyMobileDefaults();
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// SECTION 7: PROMPT GENERATOR
-// ═══════════════════════════════════════════════════════════════════════════════
-
-function updatePrompt() {
-  renderPrompt(state, catalogDefaults, modeParams, catalogDefaultTheme);
-}
-
-let shaderPanel!: ShaderPanel;
-
-function getControlsApi(): ControlsApi {
-  if (!controlsApi) {
-    controlsApi = createControls({
-      actions: appActions,
-      config: {
-        fxParamDefs: catalogFxParamDefs,
-        modeTabLabels: catalogModeTabLabels,
-        paramDefs: catalogParamDefs,
-        presets: catalogPresets,
-        shapeParams: catalogShapeParams,
-      },
-      modeParams,
-      setXrDebugLogging,
-      setupRecordButton,
-      setupXRButton,
-      state,
-      storageKey,
-      syncThemeButtons,
-    });
-  }
-  return controlsApi;
-}
 // Maps simulation mode → named shader sources
 function getShaderSources(mode: SimMode): Record<string, string> {
   if (mode === 'physics') {
     return { ...getCatalogShaderSources(mode), ...GAS_SHADER_SOURCES };
   }
   return getCatalogShaderSources(mode);
-}
-
-function setupShaderPanel() {
-  shaderPanel.setup();
-}
-
-function updateShaderPanel() {
-  shaderPanel.update();
-}
-
-// Apply edited shader code to the appropriate global variable
-function applyShaderEdit(mode: SimMode, tabName: string, code: string): boolean {
-  return applyCatalogShaderEdit(mode, tabName, code);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -770,31 +508,6 @@ const metrics = {
 };
 
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// SECTION 8: WEBXR INPUT PIPELINE
-// ═══════════════════════════════════════════════════════════════════════════════
-
-function setXrDebugLogging(on: boolean): void {
-  xrInputSystem.setDebugLogging(on);
-}
-function setupXRButton() {
-  const btn = document.getElementById('btn-xr') as HTMLButtonElement;
-
-  if (!navigator.xr) {
-    btn.textContent = 'VR Not Available';
-    return;
-  }
-
-  navigator.xr.isSessionSupported('immersive-vr').then((supported: boolean) => {
-    if (supported) {
-      btn.disabled = false;
-      btn.addEventListener('click', toggleXR);
-    } else {
-      btn.textContent = 'VR Not Supported';
-    }
-  }).catch(() => { btn.textContent = 'VR Check Failed'; });
-}
-
 async function toggleXR() {
   await xrRuntime?.toggle();
 }
@@ -853,30 +566,9 @@ function saveState() {
 }
 
 function loadState() {
-  hydrateState(state, catalogDefaults, catalogColorThemes, modeParams, syncThemeTransition);
+  hydrateState(state, catalogDefaults, catalogColorThemes, modeParams,
+    (themeName) => uiOrchestrator.syncThemeTransition(themeName));
 }
-
-function syncUIFromState() {
-  getControlsApi().syncUiFromState();
-}
-
-appActions = createAppActions({
-  cancelDebugMovement,
-  ensureSimulation,
-  modeParams,
-  presets: catalogPresets,
-  reflectPaused: syncPauseButtons,
-  resetCurrentSimulationInternal: resetCurrentSim,
-  saveStateInternal: saveState,
-  // [LAW:single-enforcer] Theme selection enters the runtime through one
-  // action path so persistence, prompt updates, and theme transitions stay coupled.
-  selectTheme: (themeName) => themeSystem.selectTheme(themeName),
-  state,
-  syncUi: syncUIFromState,
-  updatePrompt,
-  updateShaderPanel,
-  updateStats,
-});
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // BINDING REGISTRATION (parallel data source for the new XR widget system)
@@ -904,6 +596,57 @@ export async function startAppRuntimeImpl() {
   const bootedContext = await createGpuContext(createGpuContextDeps());
   if (!bootedContext) return;
   gpuContext = bootedContext;
+
+  // [LAW:single-enforcer] One UI orchestrator owns every DOM-facing subsystem;
+  // construct it after gpu boot so the debug panel can read the live canvas.
+  uiOrchestrator = createUiOrchestrator({
+    state,
+    storageKey,
+    modeParams,
+    catalog: {
+      defaults: catalogDefaults,
+      defaultTheme: catalogDefaultTheme,
+      themeFadeMs: catalogThemeFadeMs,
+      themes: catalogColorThemes,
+      fxParamDefs: catalogFxParamDefs,
+      modeTabLabels: catalogModeTabLabels,
+      paramDefs: catalogParamDefs,
+      presets: catalogPresets,
+      shapeParams: catalogShapeParams,
+    },
+    getActions: () => appActions,
+    getCanvas: () => gpuContext.canvas,
+    getPhysicsSimulation: getActivePhysicsSimulation,
+    getActiveSimulation: () => simulations[state.mode],
+    getXrSession: () => xrRuntime?.getSession() ?? null,
+    toggleXr: toggleXR,
+    setXrDebugLogging: (on) => xrInputSystem.setDebugLogging(on),
+    createShaderModule: (code) => gpuContext.device.createShaderModule({ code }),
+    applyShaderEdit: applyCatalogShaderEdit,
+    resetShaderEdit: resetCatalogShaderEdit,
+    getShaderSources,
+    metrics,
+  });
+
+  // [LAW:single-enforcer] App-level mutations flow through one action surface
+  // built around orchestrator hooks; theme/pause/prompt/shader/debug coordination
+  // all originate from this object.
+  appActions = createAppActions({
+    cancelDebugMovement: () => uiOrchestrator.cancelDebugMovement(),
+    ensureSimulation,
+    modeParams,
+    presets: catalogPresets,
+    reflectPaused: () => uiOrchestrator.syncPauseButtons(),
+    resetCurrentSimulationInternal: resetCurrentSim,
+    saveStateInternal: saveState,
+    selectTheme: (themeName) => uiOrchestrator.selectTheme(themeName),
+    state,
+    syncUi: () => uiOrchestrator.syncUiFromState(),
+    updatePrompt: () => uiOrchestrator.updatePrompt(),
+    updateShaderPanel: () => uiOrchestrator.updateShaderPanel(),
+    updateStats,
+  });
+
   initializeRuntimeServices();
   initializeSimulationRegistry();
   xrRuntime = createXrRuntime({
@@ -932,7 +675,7 @@ export async function startAppRuntimeImpl() {
     postFxRunComposite: runComposite,
     pruneAttractors,
     queuePendingSource: (source) => { xrInputSystem.queuePendingSource(source); },
-    refreshThemeColors,
+    refreshThemeColors: (now) => uiOrchestrator.refreshThemeColors(now),
     requestDesktopFrame: () => gpuContext.frameRuntime.requestFrame(),
     resetInputState: () => xrInputSystem.reset(),
     clearReferenceSpace: () => xrInputSystem.clearReferenceSpace(),
@@ -964,12 +707,9 @@ export async function startAppRuntimeImpl() {
   initGrid();
   loadState();
   if (isMobile) applyMobileDefaults();
-  syncThemeTransition(state.colorTheme);
+  uiOrchestrator.syncThemeTransition(state.colorTheme);
   initBindings();
-  buildControls();
-  buildThemeSelector();
-  setupTabs();
-  setupGlobalControls();
+  uiOrchestrator.init();
   if (isMobile) {
     setupMobileTouchControls();
     setupMobileFab();
@@ -977,10 +717,7 @@ export async function startAppRuntimeImpl() {
   } else {
     setupMouseControls();
   }
-  setupShaderPanel();
-  setupTimeReverseControls();
-  setupDebugControls();
-  syncUIFromState();
+  uiOrchestrator.syncUiFromState();
   resizeCanvas();
   ensureSimulation();
   appActions.updateAll();
