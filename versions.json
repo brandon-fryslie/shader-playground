@@ -2,6 +2,28 @@
   "schema": 2,
   "versions": [
     {
+      "version": "pr-26",
+      "ref": "refs/pull/26/merge",
+      "sha": "1e65fec639ddfb2c146f8c499e19b65029968b31",
+      "timestamp": "2026-06-21T04:15:37.226Z",
+      "commits": [
+        {
+          "sha": "1e65fec639ddfb2c146f8c499e19b65029968b31",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-06-20T22:15:19-06:00",
+          "message": "Merge a997f7fc09818f4c95ecbc509c0e8f9d7f8ee3e0 into 51c10cdb4feb62dd6bf8ea9ebccae08e3e60d03d\n"
+        },
+        {
+          "sha": "a997f7fc09818f4c95ecbc509c0e8f9d7f8ee3e0",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-06-20T22:14:37-06:00",
+          "message": "feat(xr-ui): category tabs + progressive disclosure\n\nReplaces the clipboard panel's single focus-view-of-sliders with a tabs\ncontainer: a root tab of category-tile widgets and one tab per category\n(physics, visuals, gas, presets) with that category's controls plus a\nback tile to root.\n\nWires the tab-switch side effect that was stubbed in applySideEffects.\nTab navigation is a single mechanism: a category-tile widget whose\ntargetTabId names the destination. Back navigation is the same mechanism\nwith targetTabId='root' — no second back-button kind, no action-binding\nside-channel into the layout. [LAW:single-enforcer]\n\nMoves bindingId out of pressing's outer shape into the commit variants\nthat need it (invoke/toggle/increment); the new tab-switch commit variant\ncarries layoutId+tabId instead. The discriminated union now makes\n\"tab-switch never reads bindingId\" a fact the compiler proves rather than\na convention. [LAW:types-are-the-program]\n\nRegisters fx (post-processing) bindings under group 'visuals' so the\nVisuals tab has real controls to drive. Adds fxParamDefs to the startup\ncatalog seam so the registration flows through one path.\n\nAcceptance:\n- tsc clean\n- check:architecture clean\n- vite build clean\n- In-headset verification deferred to PR preview reload.\n"
+        }
+      ]
+    },
+    {
       "version": "r102-51c10cd",
       "ref": "refs/heads/master",
       "sha": "51c10cdb4feb62dd6bf8ea9ebccae08e3e60d03d",
