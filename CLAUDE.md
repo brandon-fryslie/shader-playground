@@ -29,7 +29,7 @@ WebGPU compute shader playground with 6 simulation modes (boids, N-body physics,
 
 ### Current State: Thin Entrypoints With Internal Runtime Implementation
 
-`src/main.ts` is a bootstrap-only entrypoint. `src/app/bootstrap.ts` composes the app and calls `src/app/runtime.ts`, which is the active runtime entrypoint. `src/app/runtime.ts` and `src/app/legacy-runtime.ts` are thin seams only; the remaining monolithic runtime implementation currently lives in `src/app/runtime-impl.ts`. Extracted ownership exists for state creation, WGSL originals/edits, math, metrics, persistence, prompt generation, and DevTools globals. The codebase uses strict TypeScript.
+`src/main.ts` is a bootstrap-only entrypoint. `src/app/bootstrap.ts` composes the app and calls `src/app/runtime.ts`, which is the active runtime entrypoint and a thin seam over `src/app/runtime-impl.ts`, where the remaining runtime composition lives. Extracted ownership exists for state creation, WGSL originals/edits, math, metrics, persistence, prompt generation, and DevTools globals. The codebase uses strict TypeScript.
 
 ### Module Map
 
@@ -38,8 +38,7 @@ WebGPU compute shader playground with 6 simulation modes (boids, N-body physics,
 | `src/main.ts` | Thin entrypoint |
 | `src/app/bootstrap.ts` | Composition root |
 | `src/app/runtime.ts` | Thin active runtime entrypoint |
-| `src/app/runtime-impl.ts` | Current monolithic runtime implementation |
-| `src/app/legacy-runtime.ts` | Compatibility shim only |
+| `src/app/runtime-impl.ts` | Runtime composition (services + factories + boot order) |
 | `src/gpu/shaders.ts` | WGSL originals, edited sources, shader tab mapping |
 | `src/math/` | Matrix/vector helpers |
 | `src/metrics/bus.ts` | Typed metrics channels and burst recording |

@@ -33,7 +33,6 @@ const allowedUpward = new Set([
 
 const allowedRuntimeImporters = new Set([
   'app/bootstrap.ts',
-  'app/legacy-runtime.ts',
 ]);
 const allowedRuntimeImplImporters = new Set([
   'app/runtime.ts',
@@ -82,12 +81,11 @@ for (const file of walk(srcRoot).filter((f) => sourceExt.has(path.extname(f)))) 
     if (fromLayer !== undefined && toLayer !== undefined && toLayer < fromLayer && !allowedUpward.has(exceptionKey)) {
       violations.push(`${rel} imports upward ${toRel}`);
     }
-    // [LAW:one-way-deps] Nothing imports main/bootstrap, and legacy/runtime remain
+    // [LAW:one-way-deps] Nothing imports main/bootstrap; they remain
     // composition-root seams rather than general behavior dependency targets.
     if (
       toRel === 'main.ts'
       || (toRel === 'app/bootstrap.ts' && rel !== 'main.ts')
-      || toRel === 'app/legacy-runtime.ts'
     ) {
       violations.push(`${rel} imports composition root ${toRel}`);
     }

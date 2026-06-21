@@ -173,7 +173,7 @@ export function createParametricSimulation(deps: SimulationFactoryContext): Simu
         depthStencilAttachment: deps.getDepthAttachment(depthRef, viewport),
       });
 
-      const renderViewport = deps.getRenderViewport(viewport);
+      const renderViewport = viewport;
       if (renderViewport) {
         pass.setViewport(renderViewport[0], renderViewport[1], renderViewport[2], renderViewport[3], 0, 1);
       }
@@ -196,7 +196,6 @@ export function createParametricSimulation(deps: SimulationFactoryContext): Simu
       computeParamsBuffer.destroy();
       cameraBuffer.destroy();
       modelBuffer.destroy();
-      deps.destroyDepthRef(depthRef);
     },
   };
 }

@@ -7,7 +7,6 @@ const entrypoints = [
   { rel: path.join('src', 'main.ts'), maxLines: 50 },
   { rel: path.join('src', 'app', 'bootstrap.ts'), maxLines: 50 },
   { rel: path.join('src', 'app', 'runtime.ts'), maxLines: 50 },
-  { rel: path.join('src', 'app', 'legacy-runtime.ts'), maxLines: 50 },
 ];
 
 for (const entrypoint of entrypoints) {

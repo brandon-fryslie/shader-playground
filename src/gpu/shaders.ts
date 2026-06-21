@@ -30,6 +30,10 @@ import SHADER_POST_FADE from '../shaders/post.fade.wgsl?raw';
 import SHADER_POST_DOWNSAMPLE from '../shaders/post.downsample.wgsl?raw';
 import SHADER_POST_UPSAMPLE from '../shaders/post.upsample.wgsl?raw';
 import SHADER_POST_COMPOSITE from '../shaders/post.composite.wgsl?raw';
+import SHADER_GAS_CHI from '../shaders/gas.chi.wgsl?raw';
+import SHADER_GAS_PRESSURE_INTERPOLATE from '../shaders/gas.pressure_interpolate.wgsl?raw';
+import SHADER_GAS_COMPUTE from '../shaders/gas.compute.wgsl?raw';
+import SHADER_GAS_RENDER from '../shaders/gas.render.wgsl?raw';
 
 export type ShaderId =
   | 'boids.compute' | 'boids.render'
@@ -113,9 +117,23 @@ export function shaderSource(id: ShaderId): string {
   return edits.get(id) ?? originals[id];
 }
 
+// Display-only sources surface in the debug panel alongside editable shaders but
+// have no entry in modeTabs, so applyShaderEdit / resetShaderEdit reject them.
+// Gas shaders are consumed directly by gasReservoir from their `?raw` imports.
+const displayOnlySources: Partial<Record<SimMode, Record<string, string>>> = {
+  physics: {
+    'Gas χ': SHADER_GAS_CHI,
+    'Gas Pressure': SHADER_GAS_PRESSURE_INTERPOLATE,
+    'Gas Compute': SHADER_GAS_COMPUTE,
+    'Gas Render': SHADER_GAS_RENDER,
+  },
+};
+
 export function getShaderSources(mode: SimMode): Record<string, string> {
   const tabs = modeTabs[mode];
-  return Object.fromEntries(Object.entries(tabs).map(([label, id]) => [label, shaderSource(id)]));
+  const editable = Object.fromEntries(Object.entries(tabs).map(([label, id]) => [label, shaderSource(id)]));
+  const extras = displayOnlySources[mode];
+  return extras ? { ...editable, ...extras } : editable;
 }
 
 export function applyShaderEdit(mode: SimMode, tabName: string, code: string): boolean {
