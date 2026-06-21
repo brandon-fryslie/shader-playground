@@ -2,6 +2,28 @@
   "schema": 2,
   "versions": [
     {
+      "version": "pr-30",
+      "ref": "refs/pull/30/merge",
+      "sha": "4b09cdf5851cb3f25e4a4df72c96195a127bd8fc",
+      "timestamp": "2026-06-21T05:17:56.222Z",
+      "commits": [
+        {
+          "sha": "4b09cdf5851cb3f25e4a4df72c96195a127bd8fc",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-06-20T23:17:42-06:00",
+          "message": "Merge d714156e3ac0ab71bf30741f34c2289563a2ed14 into 36c52c52465395c6aa4e233e31ffbcff0fef6ff0\n"
+        },
+        {
+          "sha": "d714156e3ac0ab71bf30741f34c2289563a2ed14",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-06-20T23:17:12-06:00",
+          "message": "feat(xr-ui): pinch-twist drives ContinuousInteraction value\n\nWires the 'pinch-twist' branch in computeDragValue that was previously\nstubbed to delta=0. Dragging InteractionState captures wristQuatAtOrigin\nat pinch-start (alongside widgetOrientationAtOrigin and handOriginPos);\neach frame, conj(wristAtOrigin) * wristNow expresses the rotation in\nthe wrist-local frame at pinch-start, and a swing-twist decomposition\naround the requested canonical axis (pitch=X, yaw=Y, roll=Z) yields a\nsigned angle. PINCH_TWIST_RADIANS_PER_RANGE (pi/2) maps angle -> binding\nrange; gain multiplier and clamp ride the existing dragging path.\n\nGain-rebase (HOLD-branch fine-modifier transition) snapshots wrist\norientation alongside handOriginPos so post-rebase pinch-twist reads\nzero delta this frame, preventing a jump when fine mode toggles.\n\nTracking loss (wrist null at origin or now) collapses to delta=0 rather\nthan substituting identity, which would silently misattribute later\nmotion to the missing origin.\n\nCloses shader-xrpanel-blk.21\n"
+        }
+      ]
+    },
+    {
       "version": "r106-36c52c5",
       "ref": "refs/heads/master",
       "sha": "36c52c52465395c6aa4e233e31ffbcff0fef6ff0",
