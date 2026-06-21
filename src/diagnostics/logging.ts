@@ -10,6 +10,7 @@ interface ErrorLogEntry {
 
 export interface DiagnosticsLogger {
   createShaderModuleChecked(label: string, code: string): GPUShaderModule;
+  createShaderModuleCheckedForDevice(device: GPUDevice, label: string, code: string): GPUShaderModule;
   installGlobalHandlers(): void;
   logError(kind: string, err: unknown, extra?: string): void;
   logInfo(kind: string, msg: string, ...extra: unknown[]): void;
@@ -75,8 +76,10 @@ export function createDiagnosticsLogger(options: DiagnosticsLoggerOptions): Diag
     });
   };
 
-  const createShaderModuleChecked = (label: string, code: string): GPUShaderModule => {
-    const module = options.getDevice().createShaderModule({ label, code });
+  // [LAW:single-enforcer] Shader compilation diagnostics stay in one service;
+  // boot passes the fresh device explicitly before the runtime context exists.
+  const createShaderModuleCheckedForDevice = (device: GPUDevice, label: string, code: string): GPUShaderModule => {
+    const module = device.createShaderModule({ label, code });
     module.getCompilationInfo().then((info) => {
       if (info.messages.length === 0) return;
       const lines = code.split('\n');
@@ -99,6 +102,10 @@ export function createDiagnosticsLogger(options: DiagnosticsLoggerOptions): Diag
     return module;
   };
 
+  const createShaderModuleChecked = (label: string, code: string): GPUShaderModule => (
+    createShaderModuleCheckedForDevice(options.getDevice(), label, code)
+  );
+
   const showSimError = (mode: SimMode, msg: string): void => {
     console.error(`[sim:${mode}]`, msg);
     showErrorOverlay(`[sim:${mode}] ${msg}`);
@@ -106,6 +113,7 @@ export function createDiagnosticsLogger(options: DiagnosticsLoggerOptions): Diag
 
   return {
     createShaderModuleChecked,
+    createShaderModuleCheckedForDevice,
     installGlobalHandlers,
     logError,
     logInfo,
