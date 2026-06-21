@@ -2,6 +2,28 @@
   "schema": 2,
   "versions": [
     {
+      "version": "pr-27",
+      "ref": "refs/pull/27/merge",
+      "sha": "a6b0310be3b06798b11ef45c54c7f13b86af1e87",
+      "timestamp": "2026-06-21T04:26:41.634Z",
+      "commits": [
+        {
+          "sha": "a6b0310be3b06798b11ef45c54c7f13b86af1e87",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-06-20T22:26:27-06:00",
+          "message": "Merge cf6bf20ba5e84477021f01d87f57c19af88c7249 into f306437b85f2d941bd71417cbdf9a84ec2cdfffb\n"
+        },
+        {
+          "sha": "cf6bf20ba5e84477021f01d87f57c19af88c7249",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-06-20T22:25:57-06:00",
+          "message": "feat(xr-ui): persistent preset strip\n\nAdd a sibling `group kind: 'row'` of preset-tile widgets next to the\ntabs container in the clipboard panel. The panel's implicit column\nstacking places the strip below the active tab body, so the three top\nphysics presets stay one pinch away across every category tab.\n\nGeneralize `presetTile` to take a prefix string (instead of a Category)\nso the strip and the Presets tab share one factory without id\ncollisions. The `preset.physics.*` ActionBindings are already registered\nin app/bindings.ts; this is purely a layout extension.\n"
+        }
+      ]
+    },
+    {
       "version": "r103-f306437",
       "ref": "refs/heads/master",
       "sha": "f306437b85f2d941bd71417cbdf9a84ec2cdfffb",
