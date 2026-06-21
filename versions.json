@@ -2,6 +2,28 @@
   "schema": 2,
   "versions": [
     {
+      "version": "pr-28",
+      "ref": "refs/pull/28/merge",
+      "sha": "a642ef4a23962bf3c12562cabf8a1b93e184419d",
+      "timestamp": "2026-06-21T04:40:08.321Z",
+      "commits": [
+        {
+          "sha": "a642ef4a23962bf3c12562cabf8a1b93e184419d",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-06-20T22:39:54-06:00",
+          "message": "Merge f819c5541a1b4b5182776b796aaf1aa053759807 into 6f20db91a0b75352969a370b4a88249d7dd07ce1\n"
+        },
+        {
+          "sha": "f819c5541a1b4b5182776b796aaf1aa053759807",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-06-20T22:38:51-06:00",
+          "message": "feat(xr-ui): palm-facing-user visibility gate for clipboard panel\n\nPanel fades in within ~200ms when the user rotates their palm toward\ntheir head, and fades out within ~200ms when it rotates away. Hysteresis\n(enter > 0.7, exit < 0.4 on palm normal · wrist→head) prevents flicker\nat the threshold. A drag or press in progress pins the panel visible\nuntil release, so a rotating wrist mid-interaction never strands the\nuser. Hit-test is gated on the same alpha so widgets faded below 0.5\ncan't be selected; layout always runs and the alpha flows uniformly\nthrough RenderCommand to the shader's output multiply.\n\nshader-xrpanel-blk.18\n"
+        }
+      ]
+    },
+    {
       "version": "r104-6f20db9",
       "ref": "refs/heads/master",
       "sha": "6f20db91a0b75352969a370b4a88249d7dd07ce1",
