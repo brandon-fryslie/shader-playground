@@ -2,6 +2,28 @@
   "schema": 2,
   "versions": [
     {
+      "version": "pr-24",
+      "ref": "refs/pull/24/merge",
+      "sha": "2c5336baeaa056610bf2cf877a6934cfddf0ddf9",
+      "timestamp": "2026-06-21T03:46:47.955Z",
+      "commits": [
+        {
+          "sha": "2c5336baeaa056610bf2cf877a6934cfddf0ddf9",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-06-20T21:46:31-06:00",
+          "message": "Merge 9dc21944c8e383022230346a9f0da8248a639f41 into ea70baf5e9f1e0fdfbadc22035641f6944d88198\n"
+        },
+        {
+          "sha": "9dc21944c8e383022230346a9f0da8248a639f41",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-06-20T21:45:49-06:00",
+          "message": "feat(xr-ui): expand-to-focus slider mechanic\n\nPinching a slider whose ancestor is a focus-view container drives that\ncontainer's `focused` field to the slider's id; subsequent frames tween\nthe slider's visual and hit half-extents from natural to halve(expandedSize)\nover 150ms. Release clears `focused` and the tween collapses on the same\ncurve. The clipboard layout wraps its 4 sliders in a focus-view with\nexpandedSize tuned to ~90% of panel width, so the focused slider grows to\nfill the panel for a long, precise drag throw.\n\nPer the ticket spec: interaction delta is NOT re-scaled in the expanded\nstate — the wider visual track is the precision gain.\n\n[LAW:one-source-of-truth] split: focus-view.focused holds the semantic\n\"which is expanded\", XrUiPrev.focusTransitions holds the in-flight tween\namplitude. The two have different lifecycles (focused clears on release;\nt survives through the collapse tail) so combining them would conflate\ntwo update rules.\n\n[LAW:dataflow-not-control-flow]: layout reads mixed half-extents from the\nfocus tween and emits them through the same RenderCommand path as any\nother widget — no renderer branch, no per-frame conditional. Tween\nadvancement is unconditional (empty map / t=0 / no focus all flow through\nthe same arithmetic).\n\n- src/xr-ui/widgets.ts: add `expandedSize: Vec2` to focus-view kind.\n- src/xr-ui/layout.ts: focus-view now lays out as an implicit column when\n  collapsed and as a single centered child with mixed half-extents when\n  expanded. `measure` returns the column footprint always; the expanded\n  child overflows by design. Plumb `focusStates` through placeNode /\n  placeAsColumn / placeGroup / measure.\n- src/xr-ui/step.ts: add focusTransitions Map to XrUiPrev; advance every\n  focus-view's tween per frame before layout; mutate focus-view.focused\n  on slider drag-start (innermost containing focus-view wins) and clear\n  on drag-end; stash focusViewId in the dragging state so we clear the\n  same one we set. Drop the placeholder expand-to-focus delta path\n  comment that referenced this ticket.\n- src/xr-ui/layouts/clipboard.ts: replace the inner column group with a\n  focus-view wrapping the 4 sliders; declare expandedSize for the\n  full-panel focused footprint.\n"
+        }
+      ]
+    },
+    {
       "version": "r100-ea70baf",
       "ref": "refs/heads/master",
       "sha": "ea70baf5e9f1e0fdfbadc22035641f6944d88198",
