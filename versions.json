@@ -2,6 +2,28 @@
   "schema": 2,
   "versions": [
     {
+      "version": "pr-42",
+      "ref": "refs/pull/42/merge",
+      "sha": "9d54a45dc72a0cad2ca504ac09214dbf2a33d498",
+      "timestamp": "2026-06-21T07:03:45.059Z",
+      "commits": [
+        {
+          "sha": "9d54a45dc72a0cad2ca504ac09214dbf2a33d498",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-06-21T01:03:27-06:00",
+          "message": "Merge 183de6f0e0232c4fd223307e9bd3bd46bf87a156 into 8d9232a79c61d879487a0b9a746f001c18961c1e\n"
+        },
+        {
+          "sha": "183de6f0e0232c4fd223307e9bd3bd46bf87a156",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-06-21T01:02:44-06:00",
+          "message": "fix(debug): make journal bidirectional — replay forward through journaled steps (#shader-debug-6oi.11)\n\nPreviously forward play unconditionally captured live attractor state and overwrote\njournal[simStep]. Scrubbing forward past the current step (legal: scrub.max =\nmax(highWater, step)) silently rewrote every intervening journal entry with the\ncurrent — usually empty — attractor state, making prior history irreversible.\n\nLift replay-vs-capture into a single value at the lowest seam: a step replays\nfrom journal when simStep < journalHighWater (already-recorded territory) or\ntimeDirection < 0; otherwise it captures live and bumps the high-water mark.\nLive play, forward skip, manual fwd-step, and reverse all go through the same\ndecision — no per-UI-path branch.\n\njournalHighWater semantics flip to \"count of journaled steps\" / equivalently\n\"first unwritten step index\". Replay covers [0, highWater); capture covers\n≥ highWater. The single existing consumer (scrub UI's max(highWater, step))\nkeeps working and now correctly tracks the highest reachable simStep\nwithout an off-by-one.\n\n[LAW:dataflow-not-control-flow] [FRAMING:representation] [LAW:single-enforcer]\n"
+        }
+      ]
+    },
+    {
       "version": "r118-8d9232a",
       "ref": "refs/heads/master",
       "sha": "8d9232a79c61d879487a0b9a746f001c18961c1e",
