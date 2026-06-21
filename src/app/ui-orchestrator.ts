@@ -5,26 +5,11 @@ import { createDebugPanel, type DebugPanel } from '../ui/debug-panel';
 import { createShaderPanel, type ShaderPanel } from '../ui/shader-panel';
 import { createThemeSystem, type ThemeSystem } from '../ui/theme';
 import { updatePrompt as renderPrompt } from '../ui/prompt';
+import type { Metrics, MetricSample } from '../metrics/bus';
 import type { XrGestureEvent, XrStateEvent } from '../xr/input';
 import type { AppActions } from './actions';
 
 type ModeParamsAccess = (mode: SimMode) => Record<string, number | string | boolean>;
-
-// [LAW:one-source-of-truth] The runtime owns the metrics bus today; the
-// orchestrator only needs the surface its record button drives. Once the
-// metrics bus moves out of runtime-impl (5ui.3), this interface flows through
-// the same seam unchanged.
-export interface MetricSample {
-  t: number;
-  channel: string;
-  payload: unknown;
-}
-export interface MetricsRecordStatus { phase: 'idle' | 'pre-delay' | 'recording'; remainingMs: number; bounded: boolean }
-export interface MetricsApi {
-  status(): MetricsRecordStatus;
-  record(opts: { preDelayMs?: number; durationMs?: number }): Promise<MetricSample[]>;
-  stop(): void;
-}
 
 export interface UiCatalog {
   defaults: ModeParamsMap;
@@ -63,7 +48,7 @@ export interface UiOrchestratorDeps {
   resetShaderEdit(mode: SimMode, tabName: string): string | null;
   getShaderSources(mode: SimMode): Record<string, string>;
 
-  metrics: MetricsApi;
+  metrics: Metrics;
 }
 
 export interface UiOrchestrator {

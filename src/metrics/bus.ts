@@ -9,18 +9,30 @@ export interface MetricSample {
   payload: unknown;
 }
 
-type RecordPhase = 'idle' | 'pre-delay' | 'recording';
+export type RecordPhase = 'idle' | 'pre-delay' | 'recording';
 
-interface RecordOptions {
+export interface RecordOptions {
   preDelayMs?: number;
   durationMs?: number;
   channels?: MetricChannel<unknown>[];
 }
 
-interface RecordStatus {
+export interface RecordStatus {
   phase: RecordPhase;
   remainingMs: number;
   bounded: boolean;
+}
+
+// [LAW:one-type-per-behavior] One bus, one type. Consumers depend on Metrics
+// directly; structural-typed subset interfaces at consumer sites would just be
+// view-ports onto this same object.
+export interface Metrics {
+  channel<T>(name: string): MetricChannel<T>;
+  subscribe<T>(chan: MetricChannel<T>, fn: (p: T) => void): () => void;
+  emit<T>(chan: MetricChannel<T>, payload: T): void;
+  record(opts: RecordOptions): Promise<MetricSample[]>;
+  stop(): void;
+  status(): RecordStatus;
 }
 
 const metricsChannels = new Map<string, MetricChannel<unknown>>();
@@ -37,7 +49,7 @@ const metricsRecord = {
 };
 
 // [LAW:one-source-of-truth] Metrics channels and burst recording have one owner; producers only receive channel handles.
-export const metrics = {
+export const metrics: Metrics = {
   channel<T>(name: string): MetricChannel<T> {
     const existing = metricsChannels.get(name);
     if (existing) return existing as MetricChannel<T>;

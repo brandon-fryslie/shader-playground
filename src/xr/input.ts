@@ -1,5 +1,6 @@
 import type { AppState } from '../types';
 import { cross3, dot3, normalize3, sub3 } from '../math/vec3';
+import type { Metrics } from '../metrics/bus';
 import type { BindingRegistry } from '../xr-ui/bindings';
 import {
   xrUiStep,
@@ -105,17 +106,6 @@ function makeGestureSnapshot(): XrGestureSnapshot {
   return { fineModifier: false, palmUp: false, wristOrient: null, wristTime: 0, flickArmed: false, lastFlickAt: 0 };
 }
 
-export interface MetricChannel<T> {
-  readonly name: string;
-  readonly subscribers: Set<(payload: T) => void>;
-}
-
-export interface MetricsApi {
-  channel<T>(name: string): MetricChannel<T>;
-  emit<T>(chan: MetricChannel<T>, payload: T): void;
-  subscribe<T>(chan: MetricChannel<T>, fn: (payload: T) => void): () => void;
-}
-
 export interface XrGestureEvent { hand: XrHand | null; gesture: XrGesture }
 export interface XrStateEvent { hand: XrHand; from: XrInteraction['kind']; to: XrInteraction['kind'] }
 export interface XrSnapEvent {
@@ -150,7 +140,7 @@ interface XrInputSystemDeps {
   closestPointOnRayToOrigin(origin: number[], dir: number[]): number[];
   createAttractor(pointerId: number, pos: number[]): void;
   intersectRayWithPlane(origin: number[], dir: number[], planeY: number): number[] | null;
-  metrics: MetricsApi;
+  metrics: Metrics;
   moveAttractor(pointerId: number, pos: number[]): void;
   releaseAttractor(pointerId: number): void;
   setSimulationInteractionInactive(): void;
