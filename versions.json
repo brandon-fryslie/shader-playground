@@ -2,6 +2,28 @@
   "schema": 2,
   "versions": [
     {
+      "version": "pr-29",
+      "ref": "refs/pull/29/merge",
+      "sha": "faa5b37b5c52b94cb3c3ae322de8e634cfae3e6a",
+      "timestamp": "2026-06-21T05:06:37.018Z",
+      "commits": [
+        {
+          "sha": "faa5b37b5c52b94cb3c3ae322de8e634cfae3e6a",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-06-20T23:06:21-06:00",
+          "message": "Merge 6536c0771785c7f7f270f97b82a285111b011fd0 into e749c4d89966c91c9c3591a94094e414a963c953\n"
+        },
+        {
+          "sha": "6536c0771785c7f7f270f97b82a285111b011fd0",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-06-20T23:05:45-06:00",
+          "message": "feat(xr-ui): sub-zone hit regions for enum-chips + stepper\n\nenum-chips chips and stepper +/- chevrons become independently hittable\ninside one widget. Layout derives sub-zones from kind (stepper: left/right)\nor binding (enum-chips: one per option). Each sub-zone is its own LaidOut\nentry with parentId = widget; the parent widget's hit-rect collapses to\nzero so it doesn't compete in the same hit-test loop. The renderer keeps\none draw command per widget; per-zone hover/press/active flow as packed\nstate to the shader, which tints chevrons and chips individually.\n"
+        }
+      ]
+    },
+    {
       "version": "r105-e749c4d",
       "ref": "refs/heads/master",
       "sha": "e749c4d89966c91c9c3591a94094e414a963c953",
