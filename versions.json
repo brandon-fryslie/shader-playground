@@ -2,6 +2,28 @@
   "schema": 2,
   "versions": [
     {
+      "version": "pr-40",
+      "ref": "refs/pull/40/merge",
+      "sha": "ba1589fbc78ea4465cd0eac781f8229e89b4b382",
+      "timestamp": "2026-06-21T06:45:47.998Z",
+      "commits": [
+        {
+          "sha": "ba1589fbc78ea4465cd0eac781f8229e89b4b382",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-06-21T00:45:32-06:00",
+          "message": "Merge 1865c46f2f61a5650482af575367ad43c6aa4c05 into 086d74ffe38a48a78e985738320d899aeace86b5\n"
+        },
+        {
+          "sha": "1865c46f2f61a5650482af575367ad43c6aa4c05",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-06-21T00:44:51-06:00",
+          "message": "fix(debug): sticky breakpoint with re-fire guard (#shader-debug-6oi.9)\n\nBreakpoints now persist past a hit; only the debug-break-clear button\nnulls breakAtStep. A lastFiredAtStep field guards against immediate\nre-firing while the sim idles at the break, and self-clears the moment\ncurStep moves away — so re-entry (reverse over the step, step off and\nback, skip past and reverse) fires again with no per-handler re-arm.\n[LAW:dataflow-not-control-flow]\n\nBreakpoint input/clear handlers consolidated into setBreakAtStep() so\nlastFiredAtStep can't drift out of sync with breakAtStep across the\nthree sites. [LAW:single-enforcer]\n\ncancelMovement() still runs on break hit, preserving the .8 contract\nthat operation-end cleanup (adaptiveChunk reset included) lives in one\nseam.\n"
+        }
+      ]
+    },
+    {
       "version": "r116-086d74f",
       "ref": "refs/heads/master",
       "sha": "086d74ffe38a48a78e985738320d899aeace86b5",
