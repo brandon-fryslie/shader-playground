@@ -94,7 +94,29 @@ export function createPhysicsStepController(
     f32[22] = 0;
     f32[23] = physics.tidalStrength ?? 0.005;
 
-    if (timeDirection > 0) {
+    // [LAW:dataflow-not-control-flow] The journal is bidirectional: a step is
+    // either replayed from journal (already-recorded territory) or captured
+    // live (new territory past journalHighWater). Forward play, forward skip,
+    // manual fwd-step, and reverse all hit the same decision — replay vs
+    // capture is driven by the *value* (simStep vs journalHighWater), not by
+    // which UI path called us. Without this, scrub-forward over already-
+    // journaled steps silently overwrites the journal with live (usually
+    // empty) attractor state, making prior history irreversible.
+    // [FRAMING:representation] journalHighWater = count of journaled steps =
+    // first unwritten step index. Replay covers simStep ∈ [0, highWater);
+    // capture covers simStep ≥ highWater.
+    const journalBase = (simStep % journalCapacity) * journalEntryFloats;
+    const replay = timeDirection < 0 || simStep < journalHighWater;
+
+    if (replay) {
+      u32[8] = journal[journalBase];
+      u32[9] = 0;
+      u32[10] = 0;
+      u32[11] = 0;
+      for (let i = 0; i < attractorMax * 4; i++) {
+        f32[24 + i] = journal[journalBase + 1 + i];
+      }
+    } else {
       const ceiling = physics.interactionStrength ?? 1;
       const attractors = state.attractors;
       const attractorCount = Math.min(attractors.length, attractorMax);
@@ -118,23 +140,14 @@ export function createPhysicsStepController(
         f32[base + 3] = 0;
       }
 
-      const journalBase = (simStep % journalCapacity) * journalEntryFloats;
       journal[journalBase] = attractorCount;
       for (let i = 0; i < attractorMax * 4; i++) {
         journal[journalBase + 1 + i] = f32[24 + i];
       }
-      journalHighWater = Math.max(journalHighWater, simStep);
-      simStep++;
-    } else {
-      const journalBase = (simStep % journalCapacity) * journalEntryFloats;
-      u32[8] = journal[journalBase];
-      u32[9] = 0;
-      u32[10] = 0;
-      u32[11] = 0;
-      for (let i = 0; i < attractorMax * 4; i++) {
-        f32[24 + i] = journal[journalBase + 1 + i];
-      }
+      journalHighWater = Math.max(journalHighWater, simStep + 1);
     }
+
+    if (timeDirection > 0) simStep++;
 
     device.queue.writeBuffer(paramsBuffer, 0, paramsBytes);
     return { dt, physics };

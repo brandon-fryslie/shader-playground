@@ -218,14 +218,17 @@ Circular buffer storing the packed attractor uniform data at each simulation ste
 - **Capacity**: 18000 steps (5 minutes at 60fps)
 - **Entry size**: 129 floats (1 count + 32 × 4 floats) = 516 bytes
 - **Total memory**: ~9.3 MB
-- **Forward**: compute strengths normally, write to `journal[simStep]`, then `simStep++`
-- **Reverse**: `simStep--` first (at top of `compute()`), then read from `journal[simStep]` — the same entry that was written during the forward step that produced the current state
+- **Forward (new territory, `simStep ≥ journalHighWater`)**: compute strengths from live attractors, write to `journal[simStep]`, bump `journalHighWater = max(highWater, simStep+1)`, then `simStep++`
+- **Forward (replay, `simStep < journalHighWater`)**: read from `journal[simStep]` (do not capture live, do not advance highWater), then `simStep++`
+- **Reverse**: `simStep--` first (at top of `compute()`), then read from `journal[simStep]`
+
+`journalHighWater` counts journaled steps (== first unwritten step index). The journal is bidirectional: scrub-forward over `[0, highWater)` is a *replay*, not a destructive rewrite — the simulation stays exactly reversible across any prior history. Only steps past `highWater` capture live attractor state.
 
 ### Boundary conditions
 
 - Can't reverse past step 0 → auto-pauses
 - New interactions blocked during reverse (`createAttractor` checks `timeDirection`)
-- Resuming forward overwrites journal entries from current step onward
+- Forward play through already-journaled steps replays the original attractor state; only steps past `journalHighWater` capture new attractor input
 
 ### Step counter
 
