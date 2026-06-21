@@ -2,6 +2,28 @@
   "schema": 2,
   "versions": [
     {
+      "version": "pr-23",
+      "ref": "refs/pull/23/merge",
+      "sha": "061f3994ced75d262a52cd875c26c788abf3b748",
+      "timestamp": "2026-06-21T03:22:04.606Z",
+      "commits": [
+        {
+          "sha": "061f3994ced75d262a52cd875c26c788abf3b748",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-06-20T21:21:46-06:00",
+          "message": "Merge 336cd3b67ccfdf865b4dc57e8e38e37158f88720 into 0237628eae729bfb12b37a146d772951b374aa4c\n"
+        },
+        {
+          "sha": "336cd3b67ccfdf865b4dc57e8e38e37158f88720",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-06-20T21:20:52-06:00",
+          "message": "feat(xr-ui): first panel — clipboard with 4 physics sliders\n\nCloses the integration gate for the XR-panel rewrite epic by promoting the\nclipboard layout into a proper module and removing the renderer-test\nfixture that was lingering alongside it.\n\n- Extract the clipboard layout from src/xr/runtime.ts into\n  src/xr-ui/layouts/clipboard.ts as createClipboardLayout(hand). Downstream\n  panel iterations (.16 tabs, .17 preset strip, .18 palm-visibility) now\n  edit panel structure in one place instead of the session bootstrap.\n  [LAW:decomposition] separates \"drive XR session\" from \"describe panel\".\n- Drop the dead `debug` fixture layout. It was renderer-test scaffolding\n  from .12 that was registered but never made active and never read —\n  pure carrying cost.\n- Drop the placeholder readout that bound the title slot to physics.G\n  (it duplicated the G slider's value display below it). Use a 4-slider\n  layout instead — G, softening, interactionStrength, tidalStrength —\n  all real, continuous, deterministic physics bindings registered by\n  src/app/bindings.ts. Each one visibly drives the simulation:\n  G/softening rescale gravity, interactionStrength shapes the wand,\n  tidalStrength visibly twists the spiral arms.\n\nVerified: tsc clean, vite build clean, scripts/check-architecture.mjs\nclean. In-headset acceptance (panel-on-left-hand, right-hand drags\nslider, slide-off-to-cancel, two-hand zoom, attractor-wand-in-empty-\nspace, no desktop regression) cannot be checked from this environment\nand is deferred to PR-preview testing on Vision Pro.\n"
+        }
+      ]
+    },
+    {
       "version": "r99-0237628",
       "ref": "refs/heads/master",
       "sha": "0237628eae729bfb12b37a146d772951b374aa4c",
