@@ -2,6 +2,28 @@
   "schema": 2,
   "versions": [
     {
+      "version": "pr-43",
+      "ref": "refs/pull/43/merge",
+      "sha": "a007696f31915e7ca3ee939ce6af1b81bef9ccbc",
+      "timestamp": "2026-06-21T07:17:20.583Z",
+      "commits": [
+        {
+          "sha": "a007696f31915e7ca3ee939ce6af1b81bef9ccbc",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-06-21T01:17:03-06:00",
+          "message": "Merge 2ce7d059e494a6d8abdeeac500b78b0a82861f8d into 7b154d3904f31d488c3c34e5bfb18ffc3b204ee2\n"
+        },
+        {
+          "sha": "2ce7d059e494a6d8abdeeac500b78b0a82861f8d",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-06-21T01:14:46-06:00",
+          "message": "feat(debug): relabel pause as Cancel during pending debug movement (#shader-debug-6oi.4.1)\n\nButton label becomes a derived view of (state.paused, hasPendingDebugMovement()):\n\"Pause\" when playing, \"Cancel\" when paused with a pending skip/manual-step\nqueue, \"Resume\" when paused with nothing pending. The desktop button and the\nmobile FAB route through a new togglePauseOrCancel action so the click intent\n(\"cancel + stay paused\" when pending, toggle otherwise) lives in one place.\n\n[LAW:dataflow-not-control-flow] The label refreshes on the existing\nsyncPauseButtons calls debug-panel already issues at every pending-state edge\n— no per-handler push, no fourth piece of UI state.\n[LAW:single-enforcer] togglePauseOrCancel is the one place the click semantic\nlives; both UI surfaces consume it.\n"
+        }
+      ]
+    },
+    {
       "version": "r119-7b154d3",
       "ref": "refs/heads/master",
       "sha": "7b154d3904f31d488c3c34e5bfb18ffc3b204ee2",
