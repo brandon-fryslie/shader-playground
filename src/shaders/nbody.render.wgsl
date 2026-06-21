@@ -187,12 +187,11 @@ fn fs_main(
   @location(4) headU: f32,
 ) -> @location(0) vec4f {
   // Distance from the current particle "head" along the streak axis. For static particles (headU=0)
-  // this is just |uv.x|, so combined with |uv.y| it recovers the original radial distance and the
-  // original exp(-dist*22) core + exp(-dist*5) halo fall naturally out of the formulas below.
+  // the tail-compression must NOT trigger — `dAlong` collapses to `|uv.x|`, dist becomes the original
+  // radial distance, and the particle renders as a symmetric disc. [LAW:types-are-the-program]: the
+  // "headU=0 ⇒ original circle" invariant is encoded as a gate on headU, not assumed by comment.
   let dx = uv.x - headU;
-  // Along-axis distance: same magnitude past the head (stretch-direction) as away from it on the tail side.
-  // On the tail side, dx is negative; we compress by 0.5 so the trail extends visibly.
-  let dAlong = select(abs(dx), -dx * 0.5, dx < 0.0);
+  let dAlong = select(abs(dx), -dx * 0.5, dx < 0.0 && headU > 0.0);
   let dist = sqrt(dAlong * dAlong + uv.y * uv.y);
 
   if (dist > 1.0) { discard; }
