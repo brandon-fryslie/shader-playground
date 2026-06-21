@@ -8,7 +8,7 @@ interface ControlsActions {
   resetCurrentSimulation(): void;
   saveState(): void;
   selectMode(mode: SimMode): void;
-  setPaused(paused: boolean): void;
+  togglePauseOrCancel(): void;
   updateAll(): void;
 }
 
@@ -31,6 +31,7 @@ export interface ControlsConfig {
 export interface ControlsDependencies {
   actions: ControlsActions;
   config: ControlsConfig;
+  hasPendingDebugMovement(): boolean;
   modeParams: ModeParamsAccess;
   setXrDebugLogging(enabled: boolean): void;
   setupRecordButton(): void;
@@ -261,21 +262,23 @@ export function createControls(deps: ControlsDependencies): ControlsApi {
     if (stepperLabel) stepperLabel.textContent = config.modeTabLabels[mode];
   }
 
+  // [LAW:dataflow-not-control-flow] Button label is a derived view of two
+  // canonical state values; debug-panel calls this at every pending-movement
+  // transition so the tri-state label refreshes without per-handler push.
   function syncPauseButtons() {
+    const pending = deps.hasPendingDebugMovement();
+    const label = !state.paused ? 'Pause' : pending ? 'Cancel' : 'Resume';
+    const fabIcon = !state.paused ? '\u23F8' : pending ? '\u23F9' : '\u25B6';
     const btn = document.getElementById('btn-pause');
     if (btn) {
-      btn.textContent = state.paused ? 'Resume' : 'Pause';
+      btn.textContent = label;
       btn.classList.toggle('active', state.paused);
     }
     const fab = document.getElementById('fab-pause');
     if (fab) {
-      fab.textContent = state.paused ? '\u25B6' : '\u23F8';
+      fab.textContent = fabIcon;
       fab.classList.toggle('active', state.paused);
     }
-  }
-
-  function setPaused(paused: boolean) {
-    deps.actions.setPaused(paused);
   }
 
   function matchesPreset(mode: SimMode, presetName: string): boolean {
@@ -363,7 +366,7 @@ export function createControls(deps: ControlsDependencies): ControlsApi {
 
   function setupGlobalControls() {
     document.getElementById('btn-pause')!.addEventListener('click', () => {
-      setPaused(!state.paused);
+      deps.actions.togglePauseOrCancel();
     });
 
     document.getElementById('btn-reset')!.addEventListener('click', () => {

@@ -122,6 +122,7 @@ export function createUiOrchestrator(deps: UiOrchestratorDeps): UiOrchestrator {
         presets: catalog.presets,
         shapeParams: catalog.shapeParams,
       } satisfies ControlsConfig,
+      hasPendingDebugMovement: () => debugPanel.hasPendingMovement(),
       modeParams,
       setXrDebugLogging: deps.setXrDebugLogging,
       setupRecordButton,

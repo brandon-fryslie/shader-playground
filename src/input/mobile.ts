@@ -10,7 +10,7 @@ export interface MobileInput {
 interface MobileActions {
   resetCurrentSimulation(): void;
   selectMode(mode: SimMode): void;
-  setPaused(paused: boolean): void;
+  togglePauseOrCancel(): void;
 }
 
 interface MobileInputDeps {
@@ -126,7 +126,7 @@ export function createMobileInput(deps: MobileInputDeps): MobileInput {
     },
     setupFab() {
       document.getElementById('fab-pause')!.addEventListener('click', () => {
-        deps.actions.setPaused(!deps.state.paused);
+        deps.actions.togglePauseOrCancel();
       });
 
       document.getElementById('fab-reset')!.addEventListener('click', () => {

@@ -10,6 +10,7 @@ export interface AppActions {
   selectMode(mode: SimMode): void;
   setPaused(paused: boolean): void;
   setTheme(themeName: string): void;
+  togglePauseOrCancel(): void;
   updateAll(): void;
 }
 
@@ -17,6 +18,7 @@ interface AppActionsDeps {
   cancelDebugMovement(): void;
   clearDebugState(): void;
   ensureSimulation(): void;
+  hasPendingDebugMovement(): boolean;
   modeParams: ModeParamsAccess;
   presets: Record<SimMode, Record<string, Record<string, number | string | boolean>>>;
   reflectPaused(): void;
@@ -84,6 +86,15 @@ export function createAppActions(deps: AppActionsDeps): AppActions {
     },
     setTheme(themeName) {
       deps.selectTheme(themeName);
+    },
+    togglePauseOrCancel() {
+      // [LAW:single-enforcer] The pause-button click intent lives here so
+      // desktop button and mobile FAB cannot drift. While a debug skip or
+      // manual-step queue is pending, the click means "cancel + stay paused";
+      // otherwise it toggles pause as before. setPaused's unconditional
+      // cancelDebugMovement drains the queue in both branches.
+      const stayPaused = deps.state.paused && deps.hasPendingDebugMovement();
+      actions.setPaused(stayPaused ? true : !deps.state.paused);
     },
     updateAll() {
       // [LAW:single-enforcer] App-wide UI-facing state recomputation runs
