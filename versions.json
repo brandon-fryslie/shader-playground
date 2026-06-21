@@ -4,15 +4,22 @@
     {
       "version": "pr-28",
       "ref": "refs/pull/28/merge",
-      "sha": "a642ef4a23962bf3c12562cabf8a1b93e184419d",
-      "timestamp": "2026-06-21T04:40:08.321Z",
+      "sha": "806919faeca1e938cfab7dab3229e03428d3185d",
+      "timestamp": "2026-06-21T04:44:06.506Z",
       "commits": [
         {
-          "sha": "a642ef4a23962bf3c12562cabf8a1b93e184419d",
+          "sha": "806919faeca1e938cfab7dab3229e03428d3185d",
           "author_name": "Brandon Fryslie",
           "author_email": "530235+brandon-fryslie@users.noreply.github.com",
-          "timestamp": "2026-06-20T22:39:54-06:00",
-          "message": "Merge f819c5541a1b4b5182776b796aaf1aa053759807 into 6f20db91a0b75352969a370b4a88249d7dd07ce1\n"
+          "timestamp": "2026-06-21T04:43:49Z",
+          "message": "Merge 0814e6a48399578b11096924363b286c2e2a6649 into 6f20db91a0b75352969a370b4a88249d7dd07ce1\n"
+        },
+        {
+          "sha": "0814e6a48399578b11096924363b286c2e2a6649",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-06-20T22:43:34-06:00",
+          "message": "refactor(xr-ui): split hit-test compute from visibility filter\n\nThe combined `panelHittable && hf.gazeRay ? hitTestWidgets(...) : null`\nexpression collapsed two distinct gates into one ternary: the ray\nnull-check is a structural prerequisite for the hit-test call, while\nthe visibility check is a behavioral filter on its result. Splitting\nthem so the compute runs whenever a ray is available, then filtering\nthe result as data, is the cleaner expression of\n[LAW:dataflow-not-control-flow].\n\nSame split applied to the hover branch.\n"
         },
         {
           "sha": "f819c5541a1b4b5182776b796aaf1aa053759807",
