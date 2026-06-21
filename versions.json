@@ -2,6 +2,28 @@
   "schema": 2,
   "versions": [
     {
+      "version": "pr-34",
+      "ref": "refs/pull/34/merge",
+      "sha": "86085b008b2892c42afdd9768c4753389a55f786",
+      "timestamp": "2026-06-21T06:01:21.639Z",
+      "commits": [
+        {
+          "sha": "86085b008b2892c42afdd9768c4753389a55f786",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-06-21T00:01:08-06:00",
+          "message": "Merge 9809fba0095ffc332cb9daff3cbae75873c8c566 into 7a06b4df246150a2957ecdde5b33ba16c555970b\n"
+        },
+        {
+          "sha": "9809fba0095ffc332cb9daff3cbae75873c8c566",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-06-21T00:00:33-06:00",
+          "message": "fix(render): anisotropic motion-blur trail visible across full capsule (#shader-debug-6oi.3)\n\nReplace the radial exp(-dist * 22) falloff with a head bead + anisotropic\ntrail formulation. The old form decayed to ~3e-9 within ~30% of the quad\nat high blur (headU ≈ 0.9), making the comet tail invisible. The new\nformulation:\n\n  * Head bead: original radial exp(-headDist * 22) anchored at the head\n    position (uv.x = headU). At headU = 0 this is identical to the\n    pre-anisotropic original.\n  * Trail: exp(-(dBehind * 1.5 + uv.y² * 100)) where dBehind = max(0,\n    -headDx). K_along = 1.5 keeps the trail visible across the full\n    capsule length; K_across = 100 keeps it the bead's lateral width.\n  * Combined with max() per band — head dominates where it's bright,\n    trail dominates everywhere else, no double-bright at the head.\n\nTrail visibility is gated by blurNorm = smoothstep(0.3, 0.7, headU)\nso live play (headU ≈ 0) renders the original symmetric disc. The\nshader-debug-6oi.2 `headU > 0` select gate is removed: variability now\nlives in the smoothstep value, not a branch predicate\n([LAW:dataflow-not-control-flow]).\n\nCapsule clip also rewritten to (capDx/capR)² + uv.y² > 1 — geometrically\ncorrect rectangular body with rounded end caps. Degenerates to\nuv.x² + uv.y² > 1 at headU = 0, preserving original clip behavior\n([FRAMING:representation]).\n\nCloses shader-debug-6oi.3. Closes the deferred \"long-term fix\" noted in\nshader-debug-6oi.2's closing comment.\n"
+        }
+      ]
+    },
+    {
       "version": "r110-7a06b4d",
       "ref": "refs/heads/master",
       "sha": "7a06b4df246150a2957ecdde5b33ba16c555970b",
