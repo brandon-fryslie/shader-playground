@@ -273,5 +273,11 @@ export function createClipboardLayout(hand: Hand): Container & { kind: 'panel' }
     },
     size: PANEL_SIZE,
     children: [tabs, buildPresetStrip()],
+    // [LAW:single-enforcer] Panel-level gate; the renderer fades widgets
+    // uniformly via RenderCommand.alpha — no per-widget visibility flag and
+    // no separate "hidden" rendering path.
+    // Hand matches the anchor hand: the panel is held in this wrist and
+    // fades in when the user rotates that same palm toward their face.
+    visibility: { kind: 'palm-facing-user', hand },
   };
 }

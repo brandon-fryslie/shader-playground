@@ -24,15 +24,26 @@
 
 import type { AnchorContext, Pose } from './anchors';
 import { quatConj, quatRotateVec } from './anchors';
-import type { Container, Node, Widget, Vec2, ContinuousInteraction } from './widgets';
+import type { Container, Node, Widget, Vec2, ContinuousInteraction, VisibilityGate } from './widgets';
 import { isWidget } from './widgets';
 import type { Binding, BindingRegistry } from './bindings';
-import type { FocusViewVisualState } from './layout';
+import type { FocusViewVisualState, LaidOut } from './layout';
 import { layout, hitTestWidgets } from './layout';
 
 // 150ms tween between collapsed (t=0) and fully expanded (t=1) — matches the
 // ticket spec. Tuned by feel; if it lands wrong in headset, tweak here only.
 const FOCUS_TRANSITION_MS = 150;
+
+// Visibility gate (.18). Smooth fade across ~200ms. Hysteresis thresholds for
+// palm-facing-user keep the gate from flip-flopping at the boundary. Hit-test
+// only fires on widgets whose owning panel is visible enough to read; below
+// the hittable threshold the panel is still painted (at low alpha) but inert.
+const VISIBILITY_TRANSITION_MS = 200;
+const VISIBILITY_HITTABLE_THRESHOLD = 0.5;
+const PALM_FACING_ENTER_DEFAULT = 0.7;
+const PALM_FACING_EXIT = 0.4;
+const HAND_RAISED_ENTER_Y_DEFAULT = 1.0;
+const HAND_RAISED_EXIT_Y_BAND = 0.1;
 
 export type Hand = 'left' | 'right';
 
@@ -112,7 +123,21 @@ export interface RenderCommand {
   // wide property, not per-widget — keeps RenderCommand the single seam
   // the renderer reads. [LAW:one-source-of-truth]
   fineMode: boolean;
+  // Visibility opacity in [0, 1] driven by the owning panel's gate (.18).
+  // Layout always runs; this is the data that lets the renderer fade the
+  // panel uniformly. [LAW:dataflow-not-control-flow] no CPU-side "is this
+  // visible?" branch — the value flows to the shader and modulates output
+  // alpha; when 0 the shader still runs but writes transparent pixels.
+  alpha: number;
 }
+
+// Per-panel visibility tween. `satisfied` is the gate's binary state with
+// hysteresis applied — used as the prev-frame input so the gate doesn't
+// flip-flop at the threshold. `alpha` is the smoothed [0,1] opacity that
+// flows to render commands. Decoupling the two is the only way hysteresis
+// can work; collapsing to a single number would let the in-flight tween
+// flip the gate underneath itself. [LAW:types-are-the-program]
+export interface PanelVisibilityState { satisfied: boolean; alpha: number }
 
 export interface XrUiPrev {
   states:  Record<Hand, InteractionState>;
@@ -123,6 +148,10 @@ export interface XrUiPrev {
   // pinned `rendered` widget that the collapse tween keeps showing while
   // it falls from 1 → 0. [LAW:one-source-of-truth]
   focusTransitions: Map<string, FocusViewVisualState>;
+  // Per-panel visibility tween, keyed by panel container id. Same lifecycle
+  // pattern as focusTransitions: mutated in place each frame, pruned when
+  // the panel leaves the active layout.
+  visibilityTransitions: Map<string, PanelVisibilityState>;
 }
 
 export interface XrUiRegistry {
@@ -144,6 +173,7 @@ export function makeIdlePrev(): XrUiPrev {
     states:  { left: { kind: 'idle' }, right: { kind: 'idle' } },
     pinches: { left: false, right: false },
     focusTransitions: new Map(),
+    visibilityTransitions: new Map(),
   };
 }
 
@@ -163,6 +193,7 @@ export function xrUiStep(
     states:  { left: prev.states.left,  right: prev.states.right  },
     pinches: { left: hands.left.pinch.active, right: hands.right.pinch.active },
     focusTransitions: prev.focusTransitions, // mutated in place below
+    visibilityTransitions: prev.visibilityTransitions, // mutated in place below
   };
 
   const activeLayoutId = registry.activeLayoutId;
@@ -170,6 +201,7 @@ export function xrUiStep(
   if (!root || activeLayoutId == null) {
     next.states.left = { kind: 'idle' }; next.states.right = { kind: 'idle' };
     next.focusTransitions = new Map(); // no active panel → no transitions in flight
+    next.visibilityTransitions = new Map();
     return { next, sideEffects, renderList };
   }
   // Advance the focus tween for every focus-view in the active panel, BEFORE
@@ -184,6 +216,17 @@ export function xrUiStep(
     return { next, sideEffects, renderList };
   }
 
+  // Visibility (.18). Gate evaluates to a binary `satisfied` per panel with
+  // hysteresis; alpha tweens toward 1 when satisfied OR when any hand has
+  // claimed a widget owned by this panel (drag/press pins the panel visible
+  // until release so a rotating wrist mid-drag never strands the user).
+  // [LAW:one-source-of-truth] the gate's truth is computed once per frame
+  // per panel; the smoothed alpha flows to layout (hit-test gating) and to
+  // render commands (uniform fade). No second visibility flag elsewhere.
+  advancePanelVisibility(root, next.visibilityTransitions, prev.states, laid, ctx, dtMs);
+  const panelAlpha = next.visibilityTransitions.get(root.id)?.alpha ?? 0;
+  const panelHittable = panelAlpha >= VISIBILITY_HITTABLE_THRESHOLD;
+
   for (const hand of HANDS) {
     const hf = hands[hand];
     const wasPinching = prev.pinches[hand];
@@ -194,7 +237,10 @@ export function xrUiStep(
     if (isPinching && !wasPinching) {
       // PINCH-START → SELECTION pipeline.
       // [LAW:one-source-of-truth] Selection ALWAYS reads gazeRay (frozen at pinch-start).
-      const id = hf.gazeRay ? hitTestWidgets(laid, hf.gazeRay) : null;
+      // Gated on the owning panel's hittable threshold so the user can't pinch
+      // widgets the panel has faded away — the panel is still in the laid map
+      // (layout is unconditional) but selection refuses the hit. [LAW:dataflow-not-control-flow]
+      const id = (panelHittable && hf.gazeRay) ? hitTestWidgets(laid, hf.gazeRay) : null;
       const laidEntry = id ? laid.get(id) ?? null : null;
       const widget = laidEntry?.widget ?? null;
       nextState = (widget && id && laidEntry) ? beginInteraction(widget, id, laidEntry.pose, registry.bindings, hf, root, activeLayoutId, tuning.gainMultiplier) : { kind: 'idle' };
@@ -266,7 +312,8 @@ export function xrUiStep(
     } else {
       // NO PINCH → HOVER pipeline.
       // [LAW:one-source-of-truth] Hover ALWAYS reads hf.ray (advisory laser).
-      const id = hf.ray ? hitTestWidgets(laid, hf.ray) : null;
+      // Gated on panel visibility for the same reason as selection above.
+      const id = (panelHittable && hf.ray) ? hitTestWidgets(laid, hf.ray) : null;
       nextState = id ? { kind: 'hovering', widgetId: id } : { kind: 'idle' };
     }
 
@@ -282,6 +329,14 @@ export function xrUiStep(
     const hover = anyState(next.states, s => s.kind === 'hovering' && s.widgetId === id);
     const pressed  = anyState(next.states, s => s.kind === 'pressing' && s.widgetId === id);
     const dragging = anyState(next.states, s => s.kind === 'dragging' && s.widgetId === id);
+    // Per-widget alpha = its owning panel's smoothed visibility. Widgets
+    // chain to the panel root via parentId (group/tabs/focus-view containers
+    // don't appear in `laid`, so a leaf's parentId is always the panel id).
+    // [LAW:one-source-of-truth] one map, one lookup, no per-kind branch.
+    const ownerPanelId = entry.parentId;
+    const widgetAlpha = ownerPanelId != null
+      ? (next.visibilityTransitions.get(ownerPanelId)?.alpha ?? 1)
+      : 1;
     renderList.push({
       widgetId: id,
       pose: entry.pose,
@@ -290,6 +345,7 @@ export function xrUiStep(
       state: { hover, pressed, dragging, value: readWidgetValue(widget, registry.bindings) },
       label: readWidgetLabel(widget, registry.bindings),
       fineMode,
+      alpha: widgetAlpha,
     });
   }
 
@@ -441,6 +497,96 @@ function advanceFocusTransitions(
 }
 
 function clamp01(v: number): number { return v < 0 ? 0 : v > 1 ? 1 : v; }
+
+// Evaluate a panel's visibility gate against the current frame's anchor data,
+// using `prevSatisfied` to apply hysteresis. Tracking-loss (missing wrist /
+// palmNormal / head pose) holds the previous decision rather than flipping the
+// gate — the user's intent didn't change, the sensor did. [LAW:no-silent-failure]
+// resolved by treating absence as "no new evidence", not as "rejected".
+function evaluateVisibilityGate(
+  gate: VisibilityGate | undefined,
+  ctx: AnchorContext,
+  prevSatisfied: boolean,
+): boolean {
+  if (!gate || gate.kind === 'always') return true;
+  if (gate.kind === 'palm-facing-user') {
+    const hf = ctx.hands[gate.hand];
+    const wrist = hf.joints?.wrist;
+    const palm = hf.palmNormal;
+    const head = ctx.headPose;
+    if (!wrist || !palm || !head) return prevSatisfied;
+    // The palm faces the USER when the palm normal aligns with the wrist→head
+    // vector — NOT world-up. This is the whole point of the gate: tilting your
+    // head doesn't change what "facing me" means; rotating the wrist does.
+    const dx = head.position[0] - wrist.position[0];
+    const dy = head.position[1] - wrist.position[1];
+    const dz = head.position[2] - wrist.position[2];
+    const len = Math.sqrt(dx * dx + dy * dy + dz * dz);
+    if (len < 1e-6) return prevSatisfied;
+    const d = (palm[0] * dx + palm[1] * dy + palm[2] * dz) / len;
+    const enter = gate.threshold ?? PALM_FACING_ENTER_DEFAULT;
+    return prevSatisfied ? (d > PALM_FACING_EXIT) : (d > enter);
+  }
+  if (gate.kind === 'hand-raised') {
+    const wrist = ctx.hands[gate.hand].joints?.wrist;
+    if (!wrist) return prevSatisfied;
+    const minY = gate.minY ?? HAND_RAISED_ENTER_Y_DEFAULT;
+    const threshold = prevSatisfied ? minY - HAND_RAISED_EXIT_Y_BAND : minY;
+    return wrist.position[1] > threshold;
+  }
+  // Exhaustiveness: every VisibilityGate variant is handled above. A future
+  // variant must add its case here OR fall through to `true` (visible by
+  // default) — choosing the latter is intentional so a missing case at
+  // worst over-shows, never strands the user with a hidden panel.
+  return true;
+}
+
+// Whether any hand has currently claimed a widget that belongs to this panel.
+// Reads PREV states (this frame's loop hasn't run yet). A claim from last
+// frame trivially implies the panel was visible enough to be hit; pinning it
+// visible for this frame keeps the drag/press alive even if the user rotates
+// their palm away mid-interaction. [LAW:dataflow-not-control-flow] the pin
+// is just an extra OR into the visibility target — no second alpha channel.
+function anyHandClaimedWidgetInPanel(
+  states: Record<Hand, InteractionState>,
+  laid: Map<string, LaidOut>,
+  panelId: string,
+): boolean {
+  for (const hand of HANDS) {
+    const s = states[hand];
+    const widgetId =
+      s.kind === 'pressing' ? s.widgetId :
+      s.kind === 'dragging' ? s.widgetId : null;
+    if (widgetId == null) continue;
+    const entry = laid.get(widgetId);
+    if (entry?.parentId === panelId) return true;
+  }
+  return false;
+}
+
+// Step every panel's visibility tween toward its target (gate satisfied OR a
+// hand is currently dragging/pressing one of its widgets → 1; else → 0).
+// Drops map entries for panels that aren't in the active layout this frame.
+function advancePanelVisibility(
+  root: Container & { kind: 'panel' },
+  transitions: Map<string, PanelVisibilityState>,
+  prevStates: Record<Hand, InteractionState>,
+  laid: Map<string, LaidOut>,
+  ctx: AnchorContext,
+  dtMs: number,
+): void {
+  const stepAmt = Math.max(0, dtMs) / VISIBILITY_TRANSITION_MS;
+  const prev = transitions.get(root.id) ?? { satisfied: false, alpha: 0 };
+  const gateSatisfied = evaluateVisibilityGate(root.visibility, ctx, prev.satisfied);
+  const pinned = anyHandClaimedWidgetInPanel(prevStates, laid, root.id);
+  const target = (gateSatisfied || pinned) ? 1 : 0;
+  const dir = target > prev.alpha ? 1 : (target < prev.alpha ? -1 : 0);
+  const alpha = clamp01(prev.alpha + dir * stepAmt);
+  transitions.set(root.id, { satisfied: gateSatisfied, alpha });
+  for (const id of transitions.keys()) {
+    if (id !== root.id) transitions.delete(id);
+  }
+}
 
 // Compute the label text the renderer should rasterize for this widget.
 // Continuous widgets show formatted value (binding.format or fixed-precision);

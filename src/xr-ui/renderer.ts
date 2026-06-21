@@ -20,7 +20,7 @@ const MAX_INSTANCES = 64;
 //   16: position vec3 + halfExtentX
 //   16: orientation vec4
 //   16: halfExtentY + kind + flags + value
-//   16: labelStripIndex + hasLabel + 2 pad u32
+//   16: labelStripIndex + hasLabel + alpha + 1 pad u32
 const INSTANCE_STRIDE_BYTES = 64;
 const CAMERA_SIZE = 208;
 const CAMERA_STRIDE = 256;
@@ -201,7 +201,11 @@ export function createXrWidgetRenderer(
         : -1;
       stagingU[o + 12] = stripIndex >= 0 ? stripIndex >>> 0 : 0;
       stagingU[o + 13] = stripIndex >= 0 ? 1 : 0;
-      stagingU[o + 14] = 0;
+      // alpha (f32) shares slot 14 with the shader's `alpha` field. Widget
+      // visibility is uniform per-panel (.18): the same value is written for
+      // every instance owned by that panel; the renderer is dumb to that —
+      // it just multiplies output alpha by inst.alpha. [LAW:dataflow-not-control-flow]
+      stagingF[o + 14] = c.alpha;
       stagingU[o + 15] = 0;
     }
     return n;
