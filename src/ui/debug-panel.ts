@@ -69,10 +69,19 @@ export function createDebugPanel(deps: DebugPanelDeps): DebugPanel {
     }
   }
 
+  // [LAW:single-enforcer] Every operation-end path routes through here:
+  // stepBy, initiateSkip, breakpoint hit, clearAll, and the two skip-complete
+  // branches in runCompute. Resetting adaptiveChunk in this one place means a
+  // GPU-heavy skip that collapses the chunk to 1 can't bleed into the next,
+  // lighter operation — each op starts from a neutral, display-rate-aware
+  // baseline derived from computeTargetPerFrame() (the .7 seam, never the
+  // deleted /60 constant). idleBaselineMs is intentionally NOT reset; it's a
+  // stable property of the device, not per-operation state.
   function cancelMovement(): void {
     debugState.skipTarget = null;
     debugState.manualStepsRemaining = 0;
     debugState.lastSkipDispatches = 0;
+    debugState.adaptiveChunk = Math.max(DEBUG_ADAPTIVE_MIN, Math.floor(computeTargetPerFrame() / 4));
   }
 
   // [LAW:one-source-of-truth] debugState targets (skipTarget, breakAtStep,
@@ -123,8 +132,7 @@ export function createDebugPanel(deps: DebugPanelDeps): DebugPanel {
       if (debugState.skipTarget !== null) {
         const delta = debugState.skipTarget - physicsSim.getSimStep();
         if (delta === 0) {
-          debugState.skipTarget = null;
-          debugState.lastSkipDispatches = 0;
+          cancelMovement();
           physicsSim.setBlurTime(0);
           deps.state.paused = true;
           deps.syncPauseButtons();
@@ -169,11 +177,10 @@ export function createDebugPanel(deps: DebugPanelDeps): DebugPanel {
           break;
         }
         if (debugState.skipTarget !== null && curStep === debugState.skipTarget) {
-          debugState.skipTarget = null;
+          cancelMovement();
           deps.state.paused = true;
           deps.syncPauseButtons();
           physicsSim.setBlurTime(0);
-          debugState.lastSkipDispatches = 0;
           break;
         }
       }
