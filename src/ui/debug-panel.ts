@@ -25,10 +25,16 @@ interface DebugState {
   manualStepsRemaining: number;
   manualDirection: number;
   lastSkipDispatches: number;
+  idleBaselineMs: number;
 }
 
-const DEBUG_FRAME_OVER_MS = 20.0;
-const DEBUG_FRAME_UNDER_MS = 14.0;
+// [LAW:one-source-of-truth] idleBaselineMs is the measured rAF cadence; every
+// "what counts as a slow/fast frame" and every "steps per frame" derives from
+// it, so the loop tracks 60/90/120/240 Hz displays without a second constant.
+const DEBUG_FRAME_OVER_FACTOR = 1.3;
+const DEBUG_FRAME_UNDER_FACTOR = 0.85;
+const DEBUG_BASELINE_EMA_ALPHA = 0.1;
+const DEBUG_BASELINE_INITIAL_MS = 16.7;
 const DEBUG_ADAPTIVE_GROW = 1.3;
 const DEBUG_ADAPTIVE_SHRINK = 0.7;
 const DEBUG_ADAPTIVE_MIN = 1;
@@ -43,7 +49,13 @@ export function createDebugPanel(deps: DebugPanelDeps): DebugPanel {
     manualStepsRemaining: 0,
     manualDirection: 1,
     lastSkipDispatches: 0,
+    idleBaselineMs: DEBUG_BASELINE_INITIAL_MS,
   };
+
+  function computeTargetPerFrame(): number {
+    // refresh Hz = 1000 / baseline; steps/frame = steps/sec ÷ refreshHz
+    return Math.max(1, Math.ceil(debugState.targetStepsPerSec * debugState.idleBaselineMs / 1000));
+  }
 
   function refreshBreakpointUI(): void {
     const status = document.getElementById('debug-break-status');
@@ -77,11 +89,22 @@ export function createDebugPanel(deps: DebugPanelDeps): DebugPanel {
     cancelMovement,
     clearAll,
     updateAdaptiveChunk(frameDeltaMs) {
-      if (debugState.lastSkipDispatches <= 0) return;
-      const targetPerFrame = Math.max(1, Math.ceil(debugState.targetStepsPerSec / 60));
-      if (frameDeltaMs > DEBUG_FRAME_OVER_MS) {
+      // [LAW:types-are-the-program] Idle frames carry the natural rAF cadence;
+      // sample them via EMA so over/under thresholds and the per-frame cap
+      // track the display refresh rate (16.7ms@60Hz, 8.3ms@120Hz, …) instead
+      // of assuming a 60 Hz cadence.
+      if (debugState.lastSkipDispatches <= 0) {
+        debugState.idleBaselineMs =
+          debugState.idleBaselineMs * (1 - DEBUG_BASELINE_EMA_ALPHA) +
+          frameDeltaMs * DEBUG_BASELINE_EMA_ALPHA;
+        return;
+      }
+      const overMs = debugState.idleBaselineMs * DEBUG_FRAME_OVER_FACTOR;
+      const underMs = debugState.idleBaselineMs * DEBUG_FRAME_UNDER_FACTOR;
+      const targetPerFrame = computeTargetPerFrame();
+      if (frameDeltaMs > overMs) {
         debugState.adaptiveChunk = Math.max(DEBUG_ADAPTIVE_MIN, Math.floor(debugState.adaptiveChunk * DEBUG_ADAPTIVE_SHRINK));
-      } else if (frameDeltaMs < DEBUG_FRAME_UNDER_MS && debugState.adaptiveChunk < targetPerFrame) {
+      } else if (frameDeltaMs < underMs && debugState.adaptiveChunk < targetPerFrame) {
         debugState.adaptiveChunk = Math.min(DEBUG_ADAPTIVE_MAX, Math.ceil(debugState.adaptiveChunk * DEBUG_ADAPTIVE_GROW));
       }
     },
@@ -108,8 +131,7 @@ export function createDebugPanel(deps: DebugPanelDeps): DebugPanel {
           return;
         }
         overrideDir = delta > 0 ? 1 : -1;
-        const targetPerFrame = Math.max(1, Math.ceil(debugState.targetStepsPerSec / 60));
-        stepCount = Math.min(targetPerFrame, debugState.adaptiveChunk, Math.abs(delta));
+        stepCount = Math.min(computeTargetPerFrame(), debugState.adaptiveChunk, Math.abs(delta));
         skipActiveThisFrame = true;
       } else if (debugState.manualStepsRemaining > 0) {
         overrideDir = debugState.manualDirection;
