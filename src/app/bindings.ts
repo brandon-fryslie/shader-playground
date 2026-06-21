@@ -12,9 +12,19 @@ export interface FxBindingDef {
   step: number;
 }
 
+// Read-only snapshot of runtime diagnostic counters. [LAW:one-source-of-truth]
+// The owners (frame stats, GPU timing, error log) stay the canonical source;
+// this is the get-only window the metrics bindings expose to readout widgets.
+export interface MetricsAccess {
+  fps(): number;
+  gpuMs(): number;
+  errorCount(): number;
+}
+
 export interface AppBindingsDependencies {
   actions: AppActions;
   fxParamDefs: FxBindingDef[];
+  metrics: MetricsAccess;
   modeParams: ModeParamsAccess;
   modeTabLabels: Record<SimMode, string>;
   paramDefs: Record<SimMode, ParamSection[]>;
@@ -112,6 +122,44 @@ export function registerAppBindings(deps: AppBindingsDependencies): void {
     group: 'app',
     get: () => deps.state.paused,
     set: (v) => deps.actions.setPaused(v),
+  });
+
+  // Runtime metrics surfaced to the in-XR debug HUD (ticket .22). Read-only
+  // continuous bindings: `set` is a no-op because nothing should write FPS or
+  // GPU frame time back at the runtime. [LAW:no-silent-failure] readout widgets
+  // never invoke `set`, so a no-op here can't be mistaken for "value applied" —
+  // it's silenced at the type level by the widget that consumes it. The format
+  // closures keep the HUD label legible at headset distance (one decimal for
+  // sub-millisecond GPU times, integer count for FPS / errors).
+  deps.registry.register({
+    kind: 'continuous',
+    id: 'metrics.fps',
+    label: 'FPS',
+    group: 'metrics',
+    get: () => deps.metrics.fps(),
+    set: () => {},
+    range: { min: 0, max: 120 },
+    format: (v) => `${Math.round(v)} fps`,
+  });
+  deps.registry.register({
+    kind: 'continuous',
+    id: 'metrics.gpuMs',
+    label: 'GPU',
+    group: 'metrics',
+    get: () => deps.metrics.gpuMs(),
+    set: () => {},
+    range: { min: 0, max: 50 },
+    format: (v) => `${v.toFixed(1)} ms`,
+  });
+  deps.registry.register({
+    kind: 'continuous',
+    id: 'metrics.errorCount',
+    label: 'Errors',
+    group: 'metrics',
+    get: () => deps.metrics.errorCount(),
+    set: () => {},
+    range: { min: 0, max: 100 },
+    format: (v) => `${Math.round(v)} err`,
   });
 
   // FX (post-processing) sliders. Group 'visuals' so the XR panel's Visuals
