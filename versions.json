@@ -2,6 +2,28 @@
   "schema": 2,
   "versions": [
     {
+      "version": "pr-25",
+      "ref": "refs/pull/25/merge",
+      "sha": "1c997ecd460b6cc05a4fc89b7df669247405d2eb",
+      "timestamp": "2026-06-21T03:59:09.562Z",
+      "commits": [
+        {
+          "sha": "1c997ecd460b6cc05a4fc89b7df669247405d2eb",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-06-20T21:58:49-06:00",
+          "message": "Merge e1e55ce9fdf3e15fb43fe1395f08d04d6628a99d into 0573973b5d1133e08f4df641e8d0de3055d2b994\n"
+        },
+        {
+          "sha": "e1e55ce9fdf3e15fb43fe1395f08d04d6628a99d",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-06-20T21:58:20-06:00",
+          "message": "feat(xr-ui): dual-speed fine modifier (off-hand grip)\n\nCloses shader-xrpanel-blk.15. When the off-hand pinches thumb+ring,\nall continuous drag interactions on the on-hand apply gain 0.1 instead\nof 1.0; releasing restores normal speed mid-drag without restarting\nthe pinch. Per the ticket's law cites:\n\n- xrTuning.gainMultiplier is now DERIVED from per-hand\n  xrPrevGestureSnap[h].fineModifier at the end of every gesture-detect\n  pass (single-enforcer + dataflow-not-control-flow). The event-driven\n  cases are kept in the stream for metrics but no longer mutate global\n  state. Resistant to event re-ordering when both hands rapidly toggle.\n- Mid-drag rebase: the dragging InteractionState now carries\n  appliedGain. When tuning.gainMultiplier changes during a drag, the\n  HOLD branch rebases valueAtOrigin + handOriginPos to current pose\n  under the OLD gain, then stamps the NEW gain. The slider value\n  evolves smoothly through fine-modifier toggles — no jump.\n- Visual indicator: RenderCommand gains fineMode: boolean (stamped\n  from tuning.gainMultiplier < 1 in xrUiStep). renderer packs it as\n  flag bit 8; xr-widgets.wgsl draws a subtle accent border along the\n  rounded-box edge on every widget when the bit is set. The same SDF\n  drives the border mask — no extra geometry or draw call.\n\ntsc + vite build + check:architecture all clean.\n\nIn-headset acceptance NOT verified (no Vision Pro from this\nenvironment); pinch-on-slider while off-hand grips thumb+ring should\nvisibly slow the slider and show the accent border on every widget.\n"
+        }
+      ]
+    },
+    {
       "version": "r101-0573973",
       "ref": "refs/heads/master",
       "sha": "0573973b5d1133e08f4df641e8d0de3055d2b994",
