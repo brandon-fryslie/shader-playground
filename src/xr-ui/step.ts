@@ -50,15 +50,20 @@ export type InteractionState =
   | { kind: 'idle' }
   | { kind: 'hovering'; widgetId: string }
   | { kind: 'pressing';
-      widgetId: string; bindingId: string; startedAt: number;
+      widgetId: string; startedAt: number;
       cancelPending: boolean;
       // Discriminator chosen at pinch-start; tells the commit handler which
       // side effect to emit if the press isn't cancelled. Captured here so the
-      // commit doesn't have to look the widget up again at pinch-end.
+      // commit doesn't have to look the widget up again at pinch-end. The
+      // target id (bindingId for binding-affecting commits, layoutId+tabId for
+      // tab-switch) lives ON the variant — keeping it on the outer pressing
+      // would force the tab-switch variant to carry a meaningless bindingId.
+      // [LAW:types-are-the-program]
       commit:
-        | { kind: 'invoke' }                              // button / preset-tile → action binding
-        | { kind: 'toggle'; valueAtOrigin: boolean }      // toggle widget → flip
-        | { kind: 'increment'; valueAtOrigin: number; step: number; min: number; max: number } }
+        | { kind: 'invoke';     bindingId: string }                                 // button / preset-tile → action binding
+        | { kind: 'toggle';     bindingId: string; valueAtOrigin: boolean }         // toggle widget → flip
+        | { kind: 'increment';  bindingId: string; valueAtOrigin: number; step: number; min: number; max: number }
+        | { kind: 'tab-switch'; layoutId: string;  tabId: string } }                // category-tile → tab-switch effect
   | { kind: 'dragging';
       widgetId: string; bindingId: string;
       handOriginPos: number[];        // world-space hand position at origin
@@ -160,8 +165,9 @@ export function xrUiStep(
     focusTransitions: prev.focusTransitions, // mutated in place below
   };
 
-  const root = registry.activeLayoutId != null ? registry.layouts.get(registry.activeLayoutId) : undefined;
-  if (!root) {
+  const activeLayoutId = registry.activeLayoutId;
+  const root = activeLayoutId != null ? registry.layouts.get(activeLayoutId) : undefined;
+  if (!root || activeLayoutId == null) {
     next.states.left = { kind: 'idle' }; next.states.right = { kind: 'idle' };
     next.focusTransitions = new Map(); // no active panel → no transitions in flight
     return { next, sideEffects, renderList };
@@ -191,7 +197,7 @@ export function xrUiStep(
       const id = hf.gazeRay ? hitTestWidgets(laid, hf.gazeRay) : null;
       const laidEntry = id ? laid.get(id) ?? null : null;
       const widget = laidEntry?.widget ?? null;
-      nextState = (widget && id && laidEntry) ? beginInteraction(widget, id, laidEntry.pose, registry.bindings, hf, root, tuning.gainMultiplier) : { kind: 'idle' };
+      nextState = (widget && id && laidEntry) ? beginInteraction(widget, id, laidEntry.pose, registry.bindings, hf, root, activeLayoutId, tuning.gainMultiplier) : { kind: 'idle' };
       // If we entered drag on a widget whose ancestor is a focus-view, switch
       // that focus-view's `focused` field — the tween toward expanded starts
       // next frame. [LAW:one-source-of-truth] the field is the only place
@@ -206,12 +212,14 @@ export function xrUiStep(
       if (prevState.kind === 'pressing' && !prevState.cancelPending) {
         const c = prevState.commit;
         if (c.kind === 'invoke') {
-          sideEffects.push({ kind: 'binding-invoke', bindingId: prevState.bindingId });
+          sideEffects.push({ kind: 'binding-invoke', bindingId: c.bindingId });
         } else if (c.kind === 'toggle') {
-          sideEffects.push({ kind: 'binding-set', bindingId: prevState.bindingId, value: !c.valueAtOrigin });
-        } else { // increment
+          sideEffects.push({ kind: 'binding-set', bindingId: c.bindingId, value: !c.valueAtOrigin });
+        } else if (c.kind === 'increment') {
           const next = Math.max(c.min, Math.min(c.max, c.valueAtOrigin + c.step));
-          sideEffects.push({ kind: 'binding-set', bindingId: prevState.bindingId, value: next });
+          sideEffects.push({ kind: 'binding-set', bindingId: c.bindingId, value: next });
+        } else {
+          sideEffects.push({ kind: 'tab-switch', layoutId: c.layoutId, tabId: c.tabId });
         }
       }
       // Clear the focus-view we set at drag-start (if any). The collapse tween
@@ -297,7 +305,18 @@ export function uiHandClaimed(state: InteractionState): boolean {
 
 export function applySideEffects(effects: XrUiSideEffect[], registry: XrUiRegistry): void {
   for (const effect of effects) {
-    if (effect.kind === 'tab-switch') continue; // ticket .16 wires tab swapping
+    if (effect.kind === 'tab-switch') {
+      // Walk the named layout once to find the tabs container that owns the
+      // target tab id; flip its activeTabId. [LAW:one-source-of-truth] the
+      // tabs container's activeTabId is the only place "which tab is active"
+      // is recorded — no mirror in XrUiPrev, no per-panel flag elsewhere.
+      // Tab ids are required to be unique within a layout (the inverse —
+      // duplicated ids across tabs containers — would create ambiguity that
+      // the type can't catch); the first match wins.
+      const layout = registry.layouts.get(effect.layoutId);
+      if (layout) setActiveTabId(layout, effect.tabId);
+      continue;
+    }
     const b = registry.bindings.get(effect.bindingId);
     if (!b) continue;
     if (effect.kind === 'binding-invoke' && b.kind === 'action') { b.invoke(); continue; }
@@ -306,6 +325,28 @@ export function applySideEffects(effects: XrUiSideEffect[], registry: XrUiRegist
       else if (b.kind === 'toggle' && typeof effect.value === 'boolean') b.set(effect.value);
       else if (b.kind === 'enum' && typeof effect.value === 'string') b.set(effect.value);
     }
+  }
+}
+
+// Find the tabs container whose tabs include `tabId` and set its activeTabId.
+// Returns true on success. The walk lives here rather than in step.ts because
+// it's the side-effect applier's job to know how to mutate the layout tree;
+// xrUiStep itself only emits the descriptor. [LAW:one-way-deps]
+function setActiveTabId(node: Node, tabId: string): boolean {
+  if (isWidget(node)) return false;
+  if (node.kind === 'tabs' && node.tabs.some(t => t.id === tabId)) {
+    node.activeTabId = tabId;
+    return true;
+  }
+  switch (node.kind) {
+    case 'panel':
+    case 'group':
+    case 'focus-view':
+      for (const child of node.children) if (setActiveTabId(child, tabId)) return true;
+      return false;
+    case 'tabs':
+      for (const tab of node.tabs) if (setActiveTabId(tab.body, tabId)) return true;
+      return false;
   }
 }
 
@@ -407,7 +448,14 @@ function clamp01(v: number): number { return v < 0 ? 0 : v > 1 ? 1 : v; }
 // stepper show the current value. Returns undefined when no label makes sense
 // (the renderer skips atlas allocation for that instance).
 function readWidgetLabel(widget: Widget, bindings: BindingRegistry): string | undefined {
-  if (widget.kind === 'category-tile') return undefined; // targetTabId, not a binding
+  if (widget.kind === 'category-tile') {
+    // SummarySpec is opaque; the only field this seam reads is `label`. Other
+    // future summary fields (icon, count, etc.) are consumed by the renderer
+    // through the same single seam (RenderCommand.label / etc.) — no second
+    // path into the SummarySpec. [LAW:single-enforcer]
+    const label = widget.summary.label;
+    return typeof label === 'string' ? label : undefined;
+  }
   const b = bindings.get(widget.binding);
   if (!b) return undefined;
   if (widget.kind === 'slider' || widget.kind === 'dial' || widget.kind === 'readout' || widget.kind === 'stepper') {
@@ -456,27 +504,39 @@ function beginInteraction(
   bindings: BindingRegistry,
   hf: HandFrame,
   root: Container & { kind: 'panel' },
+  activeLayoutId: string,
   gainAtStart: number,
 ): InteractionState {
   if (widget.kind === 'button' || widget.kind === 'preset-tile') {
     const b = bindings.get(widget.binding);
     if (!b || b.kind !== 'action') return { kind: 'idle' };
-    return { kind: 'pressing', widgetId, bindingId: b.id, startedAt: hf.pinch.startTime,
-             cancelPending: false, commit: { kind: 'invoke' } };
+    return { kind: 'pressing', widgetId, startedAt: hf.pinch.startTime,
+             cancelPending: false, commit: { kind: 'invoke', bindingId: b.id } };
   }
   if (widget.kind === 'toggle') {
     const b = bindings.get(widget.binding);
     if (!b || b.kind !== 'toggle') return { kind: 'idle' };
-    return { kind: 'pressing', widgetId, bindingId: b.id, startedAt: hf.pinch.startTime,
-             cancelPending: false, commit: { kind: 'toggle', valueAtOrigin: b.get() } };
+    return { kind: 'pressing', widgetId, startedAt: hf.pinch.startTime,
+             cancelPending: false, commit: { kind: 'toggle', bindingId: b.id, valueAtOrigin: b.get() } };
   }
   if (widget.kind === 'stepper') {
     const b = bindings.get(widget.binding);
     if (!b || b.kind !== 'continuous') return { kind: 'idle' };
-    return { kind: 'pressing', widgetId, bindingId: b.id, startedAt: hf.pinch.startTime,
+    return { kind: 'pressing', widgetId, startedAt: hf.pinch.startTime,
              cancelPending: false,
-             commit: { kind: 'increment', valueAtOrigin: b.get(), step: widget.step,
-                       min: b.range.min, max: b.range.max } };
+             commit: { kind: 'increment', bindingId: b.id, valueAtOrigin: b.get(),
+                       step: widget.step, min: b.range.min, max: b.range.max } };
+  }
+  if (widget.kind === 'category-tile') {
+    // Tab navigation rides the same pressing → cancel-on-slide-off flow as
+    // buttons: pinch-end on the tile commits a tab-switch effect, slide-off
+    // cancels. [LAW:single-enforcer] tab-switching is exactly one mechanism —
+    // pinch a category-tile whose targetTabId names the destination. Back
+    // buttons are tiles whose targetTabId points at the root tab; no second
+    // mechanism (no action-binding-with-side-channel) is needed.
+    return { kind: 'pressing', widgetId, startedAt: hf.pinch.startTime,
+             cancelPending: false,
+             commit: { kind: 'tab-switch', layoutId: activeLayoutId, tabId: widget.targetTabId } };
   }
   if (widget.kind === 'slider' || widget.kind === 'dial') {
     const b = bindings.get(widget.binding);
@@ -496,9 +556,8 @@ function beginInteraction(
       focusViewId,
     };
   }
-  // enum-chips, category-tile, readout — not yet wired.
-  // enum-chips needs chip-level hit zones (not just one big plate);
-  // category-tile needs the tabs container behavior from ticket .16.
+  // enum-chips, readout — not yet wired.
+  // enum-chips needs chip-level hit zones (not just one big plate; ticket .20).
   // Returning idle leaves the pinch unclaimed; sim-side input proceeds normally.
   return { kind: 'idle' };
 }

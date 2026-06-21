@@ -7,7 +7,7 @@ import type { PointerSystem } from '../input/pointer';
 import type { MobileInput } from '../input/mobile';
 import type { XrInputSystem } from '../xr/input';
 import { loadState as hydrateState } from '../persistence/local-storage';
-import { registerAppBindings } from './bindings';
+import { registerAppBindings, type FxBindingDef } from './bindings';
 import { installDevtools } from '../diagnostics/devtools';
 import { evaluateAnchor } from '../xr-ui/anchors';
 import { hitTestWidgets, layout as xrUiLayout } from '../xr-ui/layout';
@@ -17,6 +17,7 @@ type ModeParamsReader = (mode: SimMode) => Record<string, number | string | bool
 
 export interface AppStartupCatalog {
   defaults: ModeParamsMap;
+  fxParamDefs: FxBindingDef[];
   modeTabLabels: Record<SimMode, string>;
   paramDefs: Record<SimMode, ParamSection[]>;
   presets: Record<SimMode, Record<string, Record<string, number | string | boolean>>>;
@@ -59,6 +60,7 @@ export function runAppStartup(deps: AppStartupDeps): void {
 
   registerAppBindings({
     actions: deps.appActions,
+    fxParamDefs: deps.catalog.fxParamDefs,
     modeParams: deps.modeParams,
     modeTabLabels: deps.catalog.modeTabLabels,
     paramDefs: deps.catalog.paramDefs,

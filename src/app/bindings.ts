@@ -1,11 +1,20 @@
-import type { AppState, ParamSection, SimMode, ThemeColors } from '../types';
+import type { AppState, FxParams, ParamSection, SimMode, ThemeColors } from '../types';
 import type { BindingRegistry } from '../xr-ui/bindings';
 import type { AppActions } from './actions';
 
 type ModeParamsAccess = (mode: SimMode) => Record<string, number | string | boolean>;
 
+export interface FxBindingDef {
+  key: keyof FxParams;
+  label: string;
+  min: number;
+  max: number;
+  step: number;
+}
+
 export interface AppBindingsDependencies {
   actions: AppActions;
+  fxParamDefs: FxBindingDef[];
   modeParams: ModeParamsAccess;
   modeTabLabels: Record<SimMode, string>;
   paramDefs: Record<SimMode, ParamSection[]>;
@@ -104,4 +113,21 @@ export function registerAppBindings(deps: AppBindingsDependencies): void {
     get: () => deps.state.paused,
     set: (v) => deps.actions.setPaused(v),
   });
+
+  // FX (post-processing) sliders. Group 'visuals' so the XR panel's Visuals
+  // tab can pick them up via filterByGroup. The XR layout cherry-picks which
+  // ones to surface — registering all keeps the same descriptor available to
+  // DOM controls and to any future panel without duplicating the closures.
+  for (const def of deps.fxParamDefs) {
+    deps.registry.register({
+      kind: 'continuous',
+      id: `fx.${def.key}`,
+      label: def.label,
+      group: 'visuals',
+      get: () => deps.state.fx[def.key],
+      set: (v) => { deps.state.fx[def.key] = v; },
+      range: { min: def.min, max: def.max },
+      step: def.step,
+    });
+  }
 }
