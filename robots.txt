@@ -1,4 +1,5 @@
 User-agent: *
+Disallow: /shader-playground/pr-37/
 Disallow: /shader-playground/pr-36/
 Disallow: /shader-playground/pr-35/
 Disallow: /shader-playground/pr-34/

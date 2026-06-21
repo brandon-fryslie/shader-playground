@@ -2,6 +2,28 @@
   "schema": 2,
   "versions": [
     {
+      "version": "pr-37",
+      "ref": "refs/pull/37/merge",
+      "sha": "d30ab3104abdd5ffaf8cb3adc435fd5d903ce8d9",
+      "timestamp": "2026-06-21T06:24:26.429Z",
+      "commits": [
+        {
+          "sha": "d30ab3104abdd5ffaf8cb3adc435fd5d903ce8d9",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-06-21T00:24:04-06:00",
+          "message": "Merge 194a260afb2bc8ef62eaaf16cbf5cc0aeb42ef2f into d3702ac695594571d3f1abc627b5eed47d05cfb5\n"
+        },
+        {
+          "sha": "194a260afb2bc8ef62eaaf16cbf5cc0aeb42ef2f",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-06-21T00:23:26-06:00",
+          "message": "fix(debug): clear debug state on mode switch (#shader-debug-6oi.6)\n\nA pending skip / breakpoint / manual-step is indexed against the\noutgoing simulation's simStep. Switching modes silently preserved\nthose targets, so toggling away and back to physics resumed the queued\nwork against an unrelated simStep with no Resume button as a visible\nindicator.\n\nReuse the seam introduced by .5: route selectMode through\nuiOrchestrator.clearDebugState() before swapping sims, so every\ndebug-target wipe — Reset button, preset apply, requiresReset slider,\nand now mode switch — goes through one enforcer. [LAW:single-enforcer]\n"
+        }
+      ]
+    },
+    {
       "version": "r113-d3702ac",
       "ref": "refs/heads/master",
       "sha": "d3702ac695594571d3f1abc627b5eed47d05cfb5",
