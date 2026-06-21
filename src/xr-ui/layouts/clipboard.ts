@@ -25,12 +25,26 @@ const TILT_W = Math.cos(TILT_HALF_ANGLE);
 
 const SLIDER_VISUAL = { x: 0.17, y: 0.030 };
 
+// Expanded slider footprint — covers most of the panel interior for a
+// generous drag throw. Width matches the panel width minus a small bezel;
+// height is ~6× the natural slider so the precision gain is visible at a
+// glance in headset. [LAW:one-source-of-truth] this is the single place
+// the "fill the panel" target dimensions are declared; layout reads it
+// from the focus-view container, no other code recomputes it.
+const PANEL_SIZE = { x: 0.20, y: 0.28 };
+const EXPANDED_SLIDER = { x: 0.18, y: 0.18 };
+
 function horizontalSlider(id: string, binding: string): Widget {
   return {
     id,
     kind: 'slider',
     binding,
     orientation: 'horizontal',
+    // [LAW:dataflow-not-control-flow] interaction stays direct-drag even
+    // when the slider is wrapped in a focus-view. Expansion is a layout
+    // property (the focus-view's expandedSize feeds the renderer), NOT an
+    // interaction kind. Per the ticket: do NOT re-scale the drag delta —
+    // the wider visual track is the whole point of the precision gain.
     interaction: { kind: 'direct-drag', axis: 'x' },
     visualSize: SLIDER_VISUAL,
     hitPadding: HIG_DEFAULTS.defaultHitPadding,
@@ -49,12 +63,12 @@ export function createClipboardLayout(hand: Hand): Container & { kind: 'panel' }
         orientation: [TILT_X, 0, 0, TILT_W],
       },
     },
-    size: { x: 0.20, y: 0.28 },
+    size: PANEL_SIZE,
     children: [{
-      id: 'clipboard-col',
-      kind: 'group',
-      layout: 'column',
-      gap: 0.015,
+      id: 'clipboard-focus',
+      kind: 'focus-view',
+      focused: null,
+      expandedSize: EXPANDED_SLIDER,
       children: [
         horizontalSlider('clipboard-G',     'physics.G'),
         horizontalSlider('clipboard-soft',  'physics.softening'),
