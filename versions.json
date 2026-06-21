@@ -2,6 +2,28 @@
   "schema": 2,
   "versions": [
     {
+      "version": "pr-21",
+      "ref": "refs/pull/21/merge",
+      "sha": "b1d02450622e1e0e43ce420d8736a2e4bbb2b5f1",
+      "timestamp": "2026-06-21T02:48:46.604Z",
+      "commits": [
+        {
+          "sha": "b1d02450622e1e0e43ce420d8736a2e4bbb2b5f1",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-06-20T20:48:30-06:00",
+          "message": "Merge d640170288ab20f99651786fbc602bec83994a43 into 57a5849191b539fa409928df0e62c0cb558c1325\n"
+        },
+        {
+          "sha": "d640170288ab20f99651786fbc602bec83994a43",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-06-20T20:47:59-06:00",
+          "message": "Absorb startup sequencing into one app/startup seam\n\nruntime-impl.ts had a 35-line imperative tail that scattered runtime\nstartup concerns — persistence hydration, mobile defaults, binding\nregistration, UI init, control wiring, simulation ensure, initial\nrender kick-off, and devtools install — across in-order procedural\nsteps. The three forwarders saveState / loadState / initBindings\nexisted only to wrap module-owned functions in closures.\n\nMove the post-service-construction startup into src/app/startup.ts\nbehind one typed AppStartupDeps boundary. The startup module imports\nhydrateState, registerAppBindings, and installDevtools directly, so\nthe runtime forwarders disappear (the same shape PR #20 used to kill\nthe duplicate metrics bus). appActions.saveStateInternal becomes an\ninline arrow over persistState — the lone remaining persistence use.\n\nruntime-impl.ts: 605 → 526 lines (-79). Net +26 across both files,\nbut startup order now lives in one place instead of being implicit\nin the runtime entrypoint's procedural body.\n\nCloses shader-runtime-5ui.4.\n"
+        }
+      ]
+    },
+    {
       "version": "r97-57a5849",
       "ref": "refs/heads/master",
       "sha": "57a5849191b539fa409928df0e62c0cb558c1325",
