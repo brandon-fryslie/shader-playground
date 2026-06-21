@@ -1,26 +1,20 @@
 import '../../styles/main.css';
 import type { SimMode, Simulation, AppState, DepthRef } from '../types';
 import { bindingRegistry } from '../xr-ui/bindings';
-import { evaluateAnchor } from '../xr-ui/anchors';
-import { layout as xrUiLayout, hitTestWidgets } from '../xr-ui/layout';
-import {
-  xrUiStep, applySideEffects as xrUiApplyEffects, makeIdlePrev as xrUiMakeIdlePrev,
-} from '../xr-ui/step';
 import { GAS_SHADER_SOURCES } from '../gasReservoir';
 import { DEFAULTS as catalogDefaults, PRESETS as catalogPresets, PARAM_DEFS as catalogParamDefs, COLOR_THEMES as catalogColorThemes, DEFAULT_THEME as catalogDefaultTheme, THEME_FADE_MS as catalogThemeFadeMs, DEFAULT_CLEAR_COLOR as catalogDefaultClearColor, SHAPE_IDS as catalogShapeIds, SHAPE_PARAMS as catalogShapeParams, FX_PARAM_DEFS as catalogFxParamDefs, MODE_TAB_LABELS as catalogModeTabLabels } from './catalog';
 import { createAppActions, type AppActions } from './actions';
 import { createGpuContext, type GpuContext, type GpuContextDeps } from './gpu-context';
 import { createInitialState } from './state';
-import { registerAppBindings } from './bindings';
 import { createUiOrchestrator, type UiOrchestrator } from './ui-orchestrator';
-import { saveState as persistState, loadState as hydrateState, STORAGE_KEY as storageKey } from '../persistence/local-storage';
+import { saveState as persistState, STORAGE_KEY as storageKey } from '../persistence/local-storage';
+import { runAppStartup } from './startup';
 import { createSimulationFactories } from '../simulations/factories';
 import { isPhysicsSimulation } from '../simulations/types';
 import { createSimulationRegistry, type SimulationRegistry } from '../simulations/registry';
 import type { SimulationFactoryContext } from '../simulations/shared';
 import { getShaderSources as getCatalogShaderSources, applyShaderEdit as applyCatalogShaderEdit, resetShaderEdit as resetCatalogShaderEdit } from '../gpu/shaders';
 import type { GpuTimingBucket } from '../gpu/timestamps';
-import { installDevtools } from '../diagnostics/devtools';
 import { createDiagnosticsLogger } from '../diagnostics/logging';
 import { metrics } from '../metrics/bus';
 import { createAttractorSystem, type AttractorSystem, ATTRACTOR_MAX, MARKERS_PER_ATTRACTOR, PHYSICS_BASE_DT } from '../input/attractors';
@@ -342,26 +336,6 @@ function setSimulationInteractionInactive(): void {
 const mobileQuery = matchMedia('(max-width: 768px)');
 let isMobile = mobileQuery.matches;
 
-function setupMouseControls() {
-  pointerSystem.setupMouseControls();
-}
-
-function setupMobileTouchControls() {
-  mobileInput.setupTouchControls();
-}
-
-function setupMobileFab() {
-  mobileInput.setupFab();
-}
-
-function setupBottomSheet() {
-  mobileInput.setupBottomSheet();
-}
-
-function applyMobileDefaults() {
-  mobileInput.applyMobileDefaults();
-}
-
 // Maps simulation mode → named shader sources
 function getShaderSources(mode: SimMode): Record<string, string> {
   if (mode === 'physics') {
@@ -401,10 +375,6 @@ function updateStats() {
   gpuContext.frameRuntime.updateStats();
 }
 
-function resizeCanvas() {
-  gpuContext.frameRuntime.resize();
-}
-
 function runBloomChain(encoder: GPUCommandEncoder, timingBucket?: GpuTimingBucket) {
   gpuContext.frameRuntime.runBloomChain(encoder, timingBucket);
 }
@@ -417,41 +387,6 @@ function runComposite(
   timingBucket?: GpuTimingBucket
 ) {
   gpuContext.frameRuntime.runComposite(encoder, finalView, finalFormat, viewport, timingBucket);
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// SECTION 10: STATE PERSISTENCE
-// ═══════════════════════════════════════════════════════════════════════════════
-
-function saveState() {
-  persistState(state, catalogDefaults, modeParams);
-}
-
-function loadState() {
-  hydrateState(state, catalogDefaults, catalogColorThemes, modeParams,
-    (themeName) => uiOrchestrator.syncThemeTransition(themeName));
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// BINDING REGISTRATION (parallel data source for the new XR widget system)
-// ═══════════════════════════════════════════════════════════════════════════════
-// [LAW:one-source-of-truth] Each Binding read/writes the canonical state field directly.
-// The DOM controls also write the same fields — both paths converge on the same state.
-// No widget consumes these bindings yet (that lands in ticket .10+); for now this is a
-// parallel descriptor tree the future widget layer will compose against.
-// [LAW:one-way-deps] bindings.ts knows nothing about main.ts; we register from here
-// using closures that capture state and mode-helper functions.
-function initBindings(): void {
-  registerAppBindings({
-    actions: appActions,
-    modeParams,
-    modeTabLabels: catalogModeTabLabels,
-    paramDefs: catalogParamDefs,
-    presets: catalogPresets,
-    registry: bindingRegistry,
-    state,
-    themes: catalogColorThemes,
-  });
 }
 
 export async function startAppRuntimeImpl() {
@@ -500,7 +435,7 @@ export async function startAppRuntimeImpl() {
     presets: catalogPresets,
     reflectPaused: () => uiOrchestrator.syncPauseButtons(),
     resetCurrentSimulationInternal: resetCurrentSim,
-    saveStateInternal: saveState,
+    saveStateInternal: () => persistState(state, catalogDefaults, modeParams),
     selectTheme: (themeName) => uiOrchestrator.selectTheme(themeName),
     state,
     syncUi: () => uiOrchestrator.syncUiFromState(),
@@ -566,40 +501,26 @@ export async function startAppRuntimeImpl() {
     window.location.reload();
   });
 
-  initGrid();
-  loadState();
-  if (isMobile) applyMobileDefaults();
-  uiOrchestrator.syncThemeTransition(state.colorTheme);
-  initBindings();
-  uiOrchestrator.init();
-  if (isMobile) {
-    setupMobileTouchControls();
-    setupMobileFab();
-    setupBottomSheet();
-  } else {
-    setupMouseControls();
-  }
-  uiOrchestrator.syncUiFromState();
-  resizeCanvas();
-  ensureSimulation();
-  appActions.updateAll();
-  gpuContext.frameRuntime.start();
-  installDevtools({
-    state,
-    getCurrentSimulation: () => simulations[state.mode],
-    getGpuStats: () => gpuContext.frameRuntime.getGpuStats(),
-    bindings: bindingRegistry,
-    anchors: { evaluateAnchor, handFrames: xrInputSystem.getHandFrames() },
-    xrUi: {
-      layout: xrUiLayout,
-      hitTestWidgets,
-      step: xrUiStep,
-      applyEffects: xrUiApplyEffects,
-      registry: xrInputSystem.getUiRegistry(),
-      makeIdlePrev: xrUiMakeIdlePrev,
-      getRenderList: () => xrInputSystem.getRenderList(),
-      getPrev: () => xrInputSystem.getPrev(),
-      getClaimed: () => xrInputSystem.getClaimed(),
+  runAppStartup({
+    appActions,
+    bindingRegistry,
+    catalog: {
+      defaults: catalogDefaults,
+      modeTabLabels: catalogModeTabLabels,
+      paramDefs: catalogParamDefs,
+      presets: catalogPresets,
+      themes: catalogColorThemes,
     },
+    ensureSimulation,
+    getCurrentSimulation: () => simulations[state.mode],
+    gpuContext,
+    initGrid,
+    isMobile,
+    mobileInput,
+    modeParams,
+    pointerSystem,
+    state,
+    uiOrchestrator,
+    xrInputSystem,
   });
 }
