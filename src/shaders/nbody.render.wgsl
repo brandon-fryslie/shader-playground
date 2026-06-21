@@ -186,17 +186,41 @@ fn fs_main(
   @location(3) interactProximity: f32,
   @location(4) headU: f32,
 ) -> @location(0) vec4f {
-  // Distance from the current particle "head" along the streak axis. For static particles (headU=0)
-  // the tail-compression must NOT trigger — `dAlong` collapses to `|uv.x|`, dist becomes the original
-  // radial distance, and the particle renders as a symmetric disc. [LAW:types-are-the-program]: the
-  // "headU=0 ⇒ original circle" invariant is encoded as a gate on headU, not assumed by comment.
-  let dx = uv.x - headU;
-  let dAlong = select(abs(dx), -dx * 0.5, dx < 0.0 && headU > 0.0);
-  let dist = sqrt(dAlong * dAlong + uv.y * uv.y);
+  // Capsule shading. The vertex stage builds a quad that's a 2x2 square at headU=0 (no blur) and
+  // stretches into a long rectangle + two rounded end caps as headU → 1 (high blur). uv space:
+  // body occupies |uv.x| <= headU, caps occupy |uv.x| > headU with cap width 1 - headU.
 
-  if (dist > 1.0) { discard; }
-  let core = exp(-dist * 22.0) * 1.8;
-  let halo = exp(-dist * 5.0) * 0.45;
+  // Aspect-correct ellipsoid clip on the caps; body always passes. At headU=0 (cap width = 1) this
+  // is exactly the original radial discard (uv.x² + uv.y² > 1). [LAW:dataflow-not-control-flow]:
+  // one predicate continuous in headU — no select on body-vs-cap.
+  let capR = max(0.0001, 1.0 - headU);
+  let capDx = max(0.0, abs(uv.x) - headU);
+  if ((capDx * capDx) / (capR * capR) + uv.y * uv.y > 1.0) { discard; }
+
+  // Head bead: original radial falloff anchored at the head (uv.x = headU, uv.y = 0). At headU = 0
+  // headDist collapses to sqrt(uv.x² + uv.y²) so the unblurred particle renders identically to the
+  // pre-anisotropic original.
+  let headDx = uv.x - headU;
+  let headDist = sqrt(headDx * headDx + uv.y * uv.y);
+  let headCore = exp(-headDist * 22.0) * 1.8;
+  let headHalo = exp(-headDist * 5.0) * 0.45;
+
+  // Anisotropic trail behind the head. dBehind is along-axis distance from the head toward the
+  // tail (0 ahead of head, so the trail never leaks into the head cap). K_along is small enough
+  // that the trail stays visible across the full capsule — the old radial exp(-dist*22) decayed
+  // to ~3e-9 within 30% of the quad. K_across is large enough to keep the trail's lateral width
+  // close to the head bead so the particle reads as a comet, not a horizontal smear.
+  let dBehind = max(0.0, -headDx);
+  let trailCore = exp(-(dBehind * 1.5 + uv.y * uv.y * 100.0)) * 1.8;
+  let trailHalo = exp(-(dBehind * 0.5 + uv.y * uv.y * 25.0)) * 0.45;
+
+  // blurNorm fades the trail in as the capsule actually stretches; at headU = 0 it is zero and the
+  // head bead alone renders the particle as a symmetric disc. The shader-debug-6oi.2 `headU > 0`
+  // select gate is gone — variability is the smoothstep value, not a branch on geometry.
+  let blurNorm = smoothstep(0.3, 0.7, headU);
+  let core = max(headCore, trailCore * blurNorm);
+  let halo = max(headHalo, trailHalo * blurNorm);
+
   let intensity = core + halo;
   let whiteShift = clamp(core * 0.06, 0.0, 0.3);
   let tinted = mix(color, vec3f(1.0), whiteShift);
