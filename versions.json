@@ -2,6 +2,28 @@
   "schema": 2,
   "versions": [
     {
+      "version": "pr-35",
+      "ref": "refs/pull/35/merge",
+      "sha": "eb6ffe4fce199979a64e2aa1a9756765a41b5276",
+      "timestamp": "2026-06-21T06:11:07.845Z",
+      "commits": [
+        {
+          "sha": "eb6ffe4fce199979a64e2aa1a9756765a41b5276",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-06-21T00:10:54-06:00",
+          "message": "Merge c5346c59d4fd60c54fa0249daaf8388b5b9fe09e into db250affac536c18b6a9176874286a5f05eaf59a\n"
+        },
+        {
+          "sha": "c5346c59d4fd60c54fa0249daaf8388b5b9fe09e",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-06-21T00:09:40-06:00",
+          "message": "fix(debug): unconditional cancelDebugMovement in setPaused (#shader-debug-6oi.4)\n\ninitiateSkip sets paused=true so the button reads \"Resume\". The prior\n`if (paused) cancelDebugMovement()` only cleared skipTarget when the new\npause state was true — so unpausing from a skip-induced pause flipped\npaused=false without clearing skipTarget, and the skip kept running with\nno UI to stop it.\n\nDrop the conditional. A user pause toggle is authoritative over any\nin-flight debug movement regardless of the new pause value; cancel is a\nno-op when nothing is pending. Variability now lives in `paused` alone,\nnot in whether the side effect runs. [LAW:dataflow-not-control-flow]\n"
+        }
+      ]
+    },
+    {
       "version": "r111-db250af",
       "ref": "refs/heads/master",
       "sha": "db250affac536c18b6a9176874286a5f05eaf59a",
