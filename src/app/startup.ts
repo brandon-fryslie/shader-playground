@@ -7,7 +7,7 @@ import type { PointerSystem } from '../input/pointer';
 import type { MobileInput } from '../input/mobile';
 import type { XrInputSystem } from '../xr/input';
 import { loadState as hydrateState } from '../persistence/local-storage';
-import { registerAppBindings, type FxBindingDef } from './bindings';
+import { registerAppBindings, type FxBindingDef, type MetricsAccess } from './bindings';
 import { installDevtools } from '../diagnostics/devtools';
 import { evaluateAnchor } from '../xr-ui/anchors';
 import { hitTestWidgets, layout as xrUiLayout } from '../xr-ui/layout';
@@ -33,6 +33,7 @@ export interface AppStartupDeps {
   gpuContext: GpuContext;
   initGrid(): void;
   isMobile: boolean;
+  metrics: MetricsAccess;
   mobileInput: MobileInput;
   modeParams: ModeParamsReader;
   pointerSystem: PointerSystem;
@@ -61,6 +62,7 @@ export function runAppStartup(deps: AppStartupDeps): void {
   registerAppBindings({
     actions: deps.appActions,
     fxParamDefs: deps.catalog.fxParamDefs,
+    metrics: deps.metrics,
     modeParams: deps.modeParams,
     modeTabLabels: deps.catalog.modeTabLabels,
     paramDefs: deps.catalog.paramDefs,

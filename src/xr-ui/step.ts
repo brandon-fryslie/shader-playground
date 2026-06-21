@@ -196,7 +196,17 @@ export interface XrUiPrev {
 export interface XrUiRegistry {
   bindings: BindingRegistry;
   layouts: Map<string, Container & { kind: 'panel' }>;
+  // The single panel that owns this frame's interaction (hit-test, drag/press,
+  // tab switching). Selection, cancel, and hover only ever consult this panel.
   activeLayoutId: string | null;
+  // Panels that are laid out + rendered every frame but never participate in
+  // hit-test or interaction state. Today: the in-XR debug HUD (.22). The list
+  // shape is honest about plurality without forcing the active slot to become
+  // an array — interaction needs a single winner; passive panels coexist
+  // freely. [LAW:no-mode-explosion] one extra slot, capped by the assumption
+  // that HUDs never grow widgets that require pinch input. If a future HUD
+  // wants to become interactive, promote it to activeLayoutId for its session.
+  hudLayoutIds: string[];
 }
 
 export interface XrUiTuning { gainMultiplier: number }
@@ -235,25 +245,43 @@ export function xrUiStep(
     visibilityTransitions: prev.visibilityTransitions, // mutated in place below
   };
 
+  // Track which focus-view / panel ids are alive this frame so a single
+  // sweep at the end can prune stale entries across every panel processed
+  // (active layout + HUDs). Per-panel pruning would erase a sibling panel's
+  // in-flight transitions, which is why the advance* helpers no longer prune.
+  const liveFocusViewIds = new Set<string>();
+  const livePanelIds = new Set<string>();
+  const fineMode = tuning.gainMultiplier < 1;
+
   const activeLayoutId = registry.activeLayoutId;
   const root = activeLayoutId != null ? registry.layouts.get(activeLayoutId) : undefined;
   if (!root || activeLayoutId == null) {
     next.states.left = { kind: 'idle' }; next.states.right = { kind: 'idle' };
-    next.focusTransitions = new Map(); // no active panel → no transitions in flight
-    next.visibilityTransitions = new Map();
+    // No active panel: HUDs (if any) still render — they're independent of
+    // the interaction surface. [LAW:dataflow-not-control-flow] the HUD walk
+    // runs unconditionally; presence of the active panel is data for the
+    // interaction loop, not a gate on HUD rendering.
+    walkHudLayouts(registry, ctx, prev.states, next, dtMs, fineMode,
+                   liveFocusViewIds, livePanelIds, renderList);
+    pruneMap(next.focusTransitions, liveFocusViewIds);
+    pruneMap(next.visibilityTransitions, livePanelIds);
     return { next, sideEffects, renderList };
   }
   // Advance the focus tween for every focus-view in the active panel, BEFORE
-  // layout, so this frame's renderList already reflects the new t. The map
-  // also has any stale entries pruned (focus-views from a swapped layout).
+  // layout, so this frame's renderList already reflects the new t.
   // [LAW:dataflow-not-control-flow] tween advancement is unconditional —
   // empty map / t=0 / no focus all flow through the same arithmetic.
-  advanceFocusTransitions(root, next.focusTransitions, dtMs);
+  advanceFocusTransitions(root, next.focusTransitions, liveFocusViewIds, dtMs);
   const laid = layout(root, ctx, next.focusTransitions, registry.bindings);
   if (!laid) {
     next.states.left = { kind: 'idle' }; next.states.right = { kind: 'idle' };
+    walkHudLayouts(registry, ctx, prev.states, next, dtMs, fineMode,
+                   liveFocusViewIds, livePanelIds, renderList);
+    pruneMap(next.focusTransitions, liveFocusViewIds);
+    pruneMap(next.visibilityTransitions, livePanelIds);
     return { next, sideEffects, renderList };
   }
+  livePanelIds.add(root.id);
 
   // Visibility (.18). Gate evaluates to a binary `satisfied` per panel with
   // hysteresis; alpha tweens toward 1 when satisfied OR when any hand has
@@ -380,37 +408,88 @@ export function xrUiStep(
 
   // Build render command list. [LAW:single-enforcer] All UI rendering reads
   // this list — nothing else computes widget poses for display.
-  // Render iteration skips sub-zone entries: the widget entry produces the
-  // single command, and per-zone highlight is encoded in `subZones` below.
-  const fineMode = tuning.gainMultiplier < 1;
+  emitRenderCommands(laid, next.states, next.visibilityTransitions,
+                     registry.bindings, fineMode, renderList);
+
+  // HUD layouts: laid out + rendered every frame, never interactive.
+  // [LAW:dataflow-not-control-flow] the same emit helper runs; per-hand
+  // interaction state is just absent for HUDs because no widget id matches.
+  walkHudLayouts(registry, ctx, prev.states, next, dtMs, fineMode,
+                 liveFocusViewIds, livePanelIds, renderList);
+
+  pruneMap(next.focusTransitions, liveFocusViewIds);
+  pruneMap(next.visibilityTransitions, livePanelIds);
+
+  return { next, sideEffects, renderList };
+}
+
+// Emit one RenderCommand per laid widget (skipping the panel root and any
+// sub-zone proxy entries). Used for the active layout (with real per-hand
+// state) and for HUD layouts (with all-idle state, which means no widget id
+// matches → no hover/pressed/dragging flags). [LAW:single-enforcer] the only
+// place RenderCommand instances are constructed.
+function emitRenderCommands(
+  laid: Map<string, LaidOut>,
+  states: Record<Hand, InteractionState>,
+  visibilityTransitions: Map<string, PanelVisibilityState>,
+  bindings: BindingRegistry,
+  fineMode: boolean,
+  out: RenderCommand[],
+): void {
   for (const [id, entry] of laid) {
     if (!entry.widget || entry.subZoneId !== undefined) continue;
     const widget = entry.widget;
-    const hover = anyState(next.states, s => s.kind === 'hovering' && s.widgetId === id);
-    const pressed  = anyState(next.states, s => s.kind === 'pressing' && s.widgetId === id);
-    const dragging = anyState(next.states, s => s.kind === 'dragging' && s.widgetId === id);
+    const hover    = anyState(states, s => s.kind === 'hovering' && s.widgetId === id);
+    const pressed  = anyState(states, s => s.kind === 'pressing' && s.widgetId === id);
+    const dragging = anyState(states, s => s.kind === 'dragging' && s.widgetId === id);
     // Per-widget alpha = its owning panel's smoothed visibility. Widgets
     // chain to the panel root via parentId (group/tabs/focus-view containers
     // don't appear in `laid`, so a leaf's parentId is always the panel id).
     // [LAW:one-source-of-truth] one map, one lookup, no per-kind branch.
     const ownerPanelId = entry.parentId;
     const widgetAlpha = ownerPanelId != null
-      ? (next.visibilityTransitions.get(ownerPanelId)?.alpha ?? 1)
+      ? (visibilityTransitions.get(ownerPanelId)?.alpha ?? 1)
       : 1;
-    renderList.push({
+    out.push({
       widgetId: id,
       pose: entry.pose,
       visualHalfExtent: entry.visualRect.halfExtent,
       kind: widget.kind,
-      state: { hover, pressed, dragging, value: readWidgetValue(widget, registry.bindings) },
-      subZones: buildSubZoneRenderState(widget, id, next.states, registry.bindings),
-      label: readWidgetLabel(widget, registry.bindings),
+      state: { hover, pressed, dragging, value: readWidgetValue(widget, bindings) },
+      subZones: buildSubZoneRenderState(widget, id, states, bindings),
+      label: readWidgetLabel(widget, bindings),
       fineMode,
       alpha: widgetAlpha,
     });
   }
+}
 
-  return { next, sideEffects, renderList };
+// Walk every registered HUD panel: advance focus + visibility tweens, lay it
+// out, append render commands. Unknown ids and panels whose anchor can't be
+// evaluated this frame skip silently — same data-as-absence shape as the
+// active layout's anchor-null branch. [LAW:dataflow-not-control-flow]
+function walkHudLayouts(
+  registry: XrUiRegistry,
+  ctx: AnchorContext,
+  prevStates: Record<Hand, InteractionState>,
+  next: XrUiPrev,
+  dtMs: number,
+  fineMode: boolean,
+  liveFocusViewIds: Set<string>,
+  livePanelIds: Set<string>,
+  out: RenderCommand[],
+): void {
+  for (const hudId of registry.hudLayoutIds) {
+    const hudRoot = registry.layouts.get(hudId);
+    if (!hudRoot) continue;
+    advanceFocusTransitions(hudRoot, next.focusTransitions, liveFocusViewIds, dtMs);
+    const hudLaid = layout(hudRoot, ctx, next.focusTransitions, registry.bindings);
+    if (!hudLaid) continue;
+    livePanelIds.add(hudRoot.id);
+    advancePanelVisibility(hudRoot, next.visibilityTransitions, prevStates, hudLaid, ctx, dtMs);
+    emitRenderCommands(hudLaid, next.states, next.visibilityTransitions,
+                       registry.bindings, fineMode, out);
+  }
 }
 
 // A hand is "claimed by UI" while its pinch is held on a widget. Sim-input code
@@ -528,17 +607,18 @@ function containsWidget(node: Node, widgetId: string): boolean {
 // Step every focus-view's tween toward its target (`focused != null` → 1,
 // else → 0). `rendered` is kept pinned to the last focused widget through
 // the collapse tail so the focus-view keeps drawing it on the way down.
-// Stale map entries (focus-views removed from the active panel since last
-// frame) are dropped — the map can never grow unbounded across layout swaps.
+// Collects live focus-view ids into `liveIds` so a single sweep at the end
+// of xrUiStep can prune entries across active+huds panels — pruning here
+// would erase entries from a sibling panel that also has focus-views.
 function advanceFocusTransitions(
   root: Container & { kind: 'panel' },
   transitions: Map<string, FocusViewVisualState>,
+  liveIds: Set<string>,
   dtMs: number,
 ): void {
-  const live = new Set<string>();
   const step = Math.max(0, dtMs) / FOCUS_TRANSITION_MS;
   forEachFocusView(root, fv => {
-    live.add(fv.id);
+    liveIds.add(fv.id);
     const prevState = transitions.get(fv.id) ?? { rendered: null, t: 0 };
     const target = fv.focused != null ? 1 : 0;
     const dir = target > prevState.t ? 1 : (target < prevState.t ? -1 : 0);
@@ -552,9 +632,6 @@ function advanceFocusTransitions(
       : (tNext > 0 ? prevState.rendered : null);
     transitions.set(fv.id, { rendered, t: tNext });
   });
-  for (const id of transitions.keys()) {
-    if (!live.has(id)) transitions.delete(id);
-  }
 }
 
 function clamp01(v: number): number { return v < 0 ? 0 : v > 1 ? 1 : v; }
@@ -625,9 +702,11 @@ function anyHandClaimedWidgetInPanel(
   return false;
 }
 
-// Step every panel's visibility tween toward its target (gate satisfied OR a
+// Step one panel's visibility tween toward its target (gate satisfied OR a
 // hand is currently dragging/pressing one of its widgets → 1; else → 0).
-// Drops map entries for panels that aren't in the active layout this frame.
+// Pruning of stale entries happens once in xrUiStep against the union of
+// active+hud panel ids — sibling panels' entries are NOT touched here, so a
+// HUD walk doesn't erase the clipboard's alpha and vice versa.
 function advancePanelVisibility(
   root: Container & { kind: 'panel' },
   transitions: Map<string, PanelVisibilityState>,
@@ -644,8 +723,12 @@ function advancePanelVisibility(
   const dir = target > prev.alpha ? 1 : (target < prev.alpha ? -1 : 0);
   const alpha = clamp01(prev.alpha + dir * stepAmt);
   transitions.set(root.id, { satisfied: gateSatisfied, alpha });
-  for (const id of transitions.keys()) {
-    if (id !== root.id) transitions.delete(id);
+}
+
+// Drop entries for keys not present in `liveIds`. Single sweep at frame end.
+function pruneMap<V>(map: Map<string, V>, liveIds: ReadonlySet<string>): void {
+  for (const id of map.keys()) {
+    if (!liveIds.has(id)) map.delete(id);
   }
 }
 

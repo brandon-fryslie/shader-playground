@@ -187,6 +187,7 @@ export function createXrInputSystem(deps: XrInputSystemDeps): XrInputSystem {
     bindings: deps.bindings,
     layouts: new Map(),
     activeLayoutId: null,
+    hudLayoutIds: [],
   };
   let xrUiPrev: XrUiPrev = xrUiMakeIdlePrev();
   let xrUiRenderList: XrRenderCommand[] = [];

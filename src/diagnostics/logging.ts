@@ -11,6 +11,10 @@ interface ErrorLogEntry {
 export interface DiagnosticsLogger {
   createShaderModuleChecked(label: string, code: string): GPUShaderModule;
   createShaderModuleCheckedForDevice(device: GPUDevice, label: string, code: string): GPUShaderModule;
+  // [LAW:one-source-of-truth] errorLog lives in this closure; consumers read its
+  // size through this accessor rather than reaching into globalThis.__errorLog
+  // (which is the devtools view, not a clean dependency).
+  getErrorCount(): number;
   installGlobalHandlers(): void;
   logError(kind: string, err: unknown, extra?: string): void;
   logInfo(kind: string, msg: string, ...extra: unknown[]): void;
@@ -114,6 +118,7 @@ export function createDiagnosticsLogger(options: DiagnosticsLoggerOptions): Diag
   return {
     createShaderModuleChecked,
     createShaderModuleCheckedForDevice,
+    getErrorCount: () => errorLog.length,
     installGlobalHandlers,
     logError,
     logInfo,

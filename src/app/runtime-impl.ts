@@ -386,6 +386,11 @@ export async function startAppRuntimeImpl() {
     gpuContext,
     initGrid,
     isMobile,
+    metrics: {
+      fps:        () => gpuContext.frameRuntime.getGpuStats().currentFps,
+      gpuMs:      () => gpuContext.frameRuntime.getGpuStats().gpuFrameMs,
+      errorCount: () => diagnosticsLogger.getErrorCount(),
+    },
     mobileInput,
     modeParams,
     pointerSystem,

@@ -3,6 +3,7 @@ import type { CameraSystem } from '../render/camera';
 import { createXrWidgetRenderer, type XrWidgetRenderer } from '../xr-ui/renderer';
 import type { XrUiRegistry, RenderCommand as XrRenderCommand } from '../xr-ui/step';
 import { createClipboardLayout } from '../xr-ui/layouts/clipboard';
+import { createDebugHudLayout } from '../xr-ui/layouts/debug-hud';
 
 export interface XrRuntime {
   getDepthOverride(): GPUTextureView | null;
@@ -305,6 +306,14 @@ export function createXrRuntime(deps: XrRuntimeDeps): XrRuntime {
 
         deps.uiRegistry.layouts.set('clipboard', createClipboardLayout(XR_PANEL_HAND));
         deps.uiRegistry.activeLayoutId = 'clipboard';
+        // Debug HUD: head-anchored panel with FPS / GPU ms / error count.
+        // Registered as a passive layout — xrUiStep walks it for layout +
+        // render only, never for hit-test. [LAW:dataflow-not-control-flow]
+        // includes the HUD id in hudLayoutIds is the entire wiring.
+        deps.uiRegistry.layouts.set('debug-hud', createDebugHudLayout());
+        if (!deps.uiRegistry.hudLayoutIds.includes('debug-hud')) {
+          deps.uiRegistry.hudLayoutIds.push('debug-hud');
+        }
 
         xrSession.addEventListener('visibilitychange', () => {
           deps.logInfo('xr', 'visibilitychange', {
