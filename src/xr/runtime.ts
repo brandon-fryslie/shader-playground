@@ -1,9 +1,8 @@
 import type { AppState, Simulation } from '../types';
 import type { CameraSystem } from '../render/camera';
-import { HIG_DEFAULTS } from '../xr-ui/widgets';
 import { createXrWidgetRenderer, type XrWidgetRenderer } from '../xr-ui/renderer';
 import type { XrUiRegistry, RenderCommand as XrRenderCommand } from '../xr-ui/step';
-import type { Anchor } from '../xr-ui/anchors';
+import { createClipboardLayout } from '../xr-ui/layouts/clipboard';
 
 export interface XrRuntime {
   getDepthOverride(): GPUTextureView | null;
@@ -304,59 +303,7 @@ export function createXrRuntime(deps: XrRuntimeDeps): XrRuntime {
         deps.state.xrEnabled = true;
         deps.setCurrentPhase('xr:awaiting first frame');
 
-        const idQuat: [number, number, number, number] = [0, 0, 0, 1];
-        const widgetSize = { x: 0.16, y: 0.06 };
-        const widgetPad = { x: 0.02, y: 0.02 };
-        deps.uiRegistry.layouts.set('debug', {
-          id: 'debug-panel', kind: 'panel',
-          anchor: { kind: 'head-hud', distance: 0.7, offset: { position: [0, -0.15, 0], orientation: idQuat } },
-          size: { x: 1.1, y: 0.5 },
-          children: [
-            {
-              id: 'debug-row-1', kind: 'group', layout: 'row',
-              children: [
-                { id: 'debug-s1', kind: 'slider', binding: 'physics.G', orientation: 'horizontal', interaction: { kind: 'direct-drag', axis: 'x' }, visualSize: widgetSize, hitPadding: widgetPad },
-                { id: 'debug-b1', kind: 'button', binding: 'preset.physics.Default', style: 'primary', visualSize: widgetSize, hitPadding: widgetPad },
-                { id: 'debug-r1', kind: 'readout', binding: 'physics.G', visualSize: widgetSize, hitPadding: widgetPad },
-                { id: 'debug-d1', kind: 'dial', binding: 'physics.softening', interaction: { kind: 'direct-drag', axis: 'x' }, visualSize: widgetSize, hitPadding: widgetPad },
-              ],
-            },
-            {
-              id: 'debug-row-2', kind: 'group', layout: 'row',
-              children: [
-                { id: 'debug-tg1', kind: 'toggle', binding: 'app.paused', style: 'switch', visualSize: widgetSize, hitPadding: widgetPad },
-                { id: 'debug-st1', kind: 'stepper', binding: 'physics.count', step: 1000, visualSize: widgetSize, hitPadding: widgetPad },
-                { id: 'debug-en1', kind: 'enum-chips', binding: 'physics.distribution', visualSize: widgetSize, hitPadding: widgetPad },
-                { id: 'debug-pt1', kind: 'preset-tile', binding: 'preset.physics.Spiral Galaxy', visualSize: widgetSize, hitPadding: widgetPad },
-                { id: 'debug-ct1', kind: 'category-tile', targetTabId: 'physics', summary: {}, visualSize: widgetSize, hitPadding: widgetPad },
-              ],
-            },
-          ],
-        });
-
-        const tiltX = Math.sin(Math.PI * 0.33);
-        const tiltW = Math.cos(Math.PI * 0.33);
-        const clipboardOffset = {
-          position: [0.00, 0.15, -0.10] as [number, number, number],
-          orientation: [tiltX, 0, 0, tiltW] as [number, number, number, number],
-        };
-        const clipboardAnchor: Anchor = { kind: 'held', hand: XR_PANEL_HAND, offset: clipboardOffset };
-        const sliderSize = { x: 0.17, y: 0.030 };
-        const readoutSize = { x: 0.18, y: 0.025 };
-        deps.uiRegistry.layouts.set('clipboard', {
-          id: 'clipboard-panel', kind: 'panel',
-          anchor: clipboardAnchor,
-          size: { x: 0.20, y: 0.28 },
-          children: [{
-            id: 'clipboard-col', kind: 'group', layout: 'column', gap: 0.015,
-            children: [
-              { id: 'clipboard-title', kind: 'readout', binding: 'physics.G', visualSize: readoutSize, hitPadding: { x: 0, y: 0 } },
-              { id: 'clipboard-G', kind: 'slider', binding: 'physics.G', orientation: 'horizontal', interaction: { kind: 'direct-drag', axis: 'x' }, visualSize: sliderSize, hitPadding: HIG_DEFAULTS.defaultHitPadding },
-              { id: 'clipboard-soft', kind: 'slider', binding: 'physics.softening', orientation: 'horizontal', interaction: { kind: 'direct-drag', axis: 'x' }, visualSize: sliderSize, hitPadding: HIG_DEFAULTS.defaultHitPadding },
-              { id: 'clipboard-int', kind: 'slider', binding: 'physics.interactionStrength', orientation: 'horizontal', interaction: { kind: 'direct-drag', axis: 'x' }, visualSize: sliderSize, hitPadding: HIG_DEFAULTS.defaultHitPadding },
-            ],
-          }],
-        });
+        deps.uiRegistry.layouts.set('clipboard', createClipboardLayout(XR_PANEL_HAND));
         deps.uiRegistry.activeLayoutId = 'clipboard';
 
         xrSession.addEventListener('visibilitychange', () => {
