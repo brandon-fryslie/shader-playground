@@ -237,10 +237,12 @@ export function xrUiStep(
     if (isPinching && !wasPinching) {
       // PINCH-START → SELECTION pipeline.
       // [LAW:one-source-of-truth] Selection ALWAYS reads gazeRay (frozen at pinch-start).
-      // Gated on the owning panel's hittable threshold so the user can't pinch
-      // widgets the panel has faded away — the panel is still in the laid map
-      // (layout is unconditional) but selection refuses the hit. [LAW:dataflow-not-control-flow]
-      const id = (panelHittable && hf.gazeRay) ? hitTestWidgets(laid, hf.gazeRay) : null;
+      // [LAW:dataflow-not-control-flow] hit-test always runs when a ray is
+      // available (the ray null-check is a structural prerequisite for the
+      // call). Visibility is a separate filter applied to the result as data,
+      // not a guard that decides whether to compute.
+      const hitId = hf.gazeRay ? hitTestWidgets(laid, hf.gazeRay) : null;
+      const id = panelHittable ? hitId : null;
       const laidEntry = id ? laid.get(id) ?? null : null;
       const widget = laidEntry?.widget ?? null;
       nextState = (widget && id && laidEntry) ? beginInteraction(widget, id, laidEntry.pose, registry.bindings, hf, root, activeLayoutId, tuning.gainMultiplier) : { kind: 'idle' };
@@ -312,8 +314,9 @@ export function xrUiStep(
     } else {
       // NO PINCH → HOVER pipeline.
       // [LAW:one-source-of-truth] Hover ALWAYS reads hf.ray (advisory laser).
-      // Gated on panel visibility for the same reason as selection above.
-      const id = (panelHittable && hf.ray) ? hitTestWidgets(laid, hf.ray) : null;
+      // Same compute-then-filter shape as selection above. [LAW:dataflow-not-control-flow]
+      const hitId = hf.ray ? hitTestWidgets(laid, hf.ray) : null;
+      const id = panelHittable ? hitId : null;
       nextState = id ? { kind: 'hovering', widgetId: id } : { kind: 'idle' };
     }
 
