@@ -69,8 +69,11 @@ export function createAppActions(deps: AppActionsDeps): AppActions {
       actions.updateAll();
     },
     setPaused(paused) {
+      // [LAW:dataflow-not-control-flow] A user pause toggle is authoritative
+      // over any in-flight skip / manual-step queue. Unconditional cancel is a
+      // no-op when nothing is pending.
       deps.state.paused = paused;
-      if (paused) deps.cancelDebugMovement();
+      deps.cancelDebugMovement();
       deps.reflectPaused();
     },
     setTheme(themeName) {
