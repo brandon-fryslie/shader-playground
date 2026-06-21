@@ -34,7 +34,7 @@ struct Instance {
   value: f32,
   labelStripIndex: u32,
   hasLabel: u32,
-  _pad0: u32,
+  alpha: f32,        // [0, 1] per-instance opacity from RenderCommand.alpha (.18)
   _pad1: u32,
 };
 
@@ -58,6 +58,7 @@ struct VsOut {
   @location(5) @interpolate(flat) hasLabel: u32,
   @location(6) @interpolate(flat) halfX: f32,
   @location(7) @interpolate(flat) halfY: f32,
+  @location(8) @interpolate(flat) alpha: f32,
 };
 
 fn qrot(q: vec4<f32>, v: vec3<f32>) -> vec3<f32> {
@@ -86,6 +87,7 @@ fn vs(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> VsOut
   out.hasLabel = inst.hasLabel;
   out.halfX = inst.halfExtentX;
   out.halfY = inst.halfExtentY;
+  out.alpha = inst.alpha;
   return out;
 }
 
@@ -250,5 +252,8 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     }
   }
 
-  return vec4<f32>(fill, plate);
+  // Per-instance opacity (visibility gate, .18). Layout always runs; the
+  // shader fades the plate uniformly by multiplying the output alpha. fill
+  // is unchanged because src-alpha blending already weights color by alpha.
+  return vec4<f32>(fill, plate * in.alpha);
 }
