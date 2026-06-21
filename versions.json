@@ -2,6 +2,28 @@
   "schema": 2,
   "versions": [
     {
+      "version": "pr-39",
+      "ref": "refs/pull/39/merge",
+      "sha": "0eb9fb8307e31210b454d501d4d7cc7aea122ec3",
+      "timestamp": "2026-06-21T06:37:34.239Z",
+      "commits": [
+        {
+          "sha": "0eb9fb8307e31210b454d501d4d7cc7aea122ec3",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-06-21T00:37:20-06:00",
+          "message": "Merge 898dd6c9c18c435d9a2ade613e28ec88a084b023 into cf21f60cbee694445f220daee7beb7e71783d2ff\n"
+        },
+        {
+          "sha": "898dd6c9c18c435d9a2ade613e28ec88a084b023",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-06-21T00:36:40-06:00",
+          "message": "fix(debug): reset adaptiveChunk on every operation boundary (#shader-debug-6oi.8)\n\nA GPU-heavy skip that collapsed adaptiveChunk to 1 left the next, lighter\noperation crawling — each frame would only grow the chunk by 1.3×, taking\nmany frames to climb back. The feedback signal is only meaningful while\nthe work profile is stable; operation boundaries are the natural reset\npoints.\n\nExtend cancelMovement() — the single seam every operation-end path\nroutes through (stepBy, initiateSkip, breakpoint hit, clearAll, and the\ntwo skip-complete branches in runCompute) — to reset adaptiveChunk to\ncomputeTargetPerFrame()/4. The reset value derives from the .7\ndisplay-rate seam so it scales with display Hz and target steps/sec\ninstead of a magic constant. idleBaselineMs is intentionally NOT reset;\nthe device refresh rate is stable across operations.\n\nFolded the two inline cleanup sites in runCompute (skip-already-at-target\nand skip-target-reached-mid-batch) into cancelMovement() calls so the\nchunk reset propagates without duplication. [LAW:single-enforcer]\n"
+        }
+      ]
+    },
+    {
       "version": "r115-cf21f60",
       "ref": "refs/heads/master",
       "sha": "cf21f60cbee694445f220daee7beb7e71783d2ff",
