@@ -112,6 +112,9 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
   let hover    = (in.flags & 1u) != 0u;
   let pressed  = (in.flags & 2u) != 0u;
   let dragging = (in.flags & 4u) != 0u;
+  // bit 3: dual-speed fine modifier active — every widget shows an accent
+  // border so the user reads "drag gain reduced" at a glance.
+  let fineMode = (in.flags & 8u) != 0u;
 
   let d = sdRoundedBox(in.uv, 0.25);
   let aa = fwidth(d) * 1.5;
@@ -209,6 +212,17 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     fill = mix(fill, baseAccent, chevMask);
     if (hover) { fill = mix(fill, basePri, 0.2); }
   }
+
+  // ── FINE-MODIFIER BORDER ────────────────────────────────────────────────
+  // When fineMode is engaged, paint a thin accent-colored ring along the
+  // plate's inside edge. `d` is the rounded-box SDF (negative inside), so
+  // distance-to-edge is -d. A narrow band at the edge takes the tint.
+  // [LAW:dataflow-not-control-flow] no branch — the mask multiplies out to
+  // zero when fineMode is false.
+  let edgeDist = -d;
+  let borderWidth = 0.05;
+  let borderMask = (1.0 - smoothstep(0.0, borderWidth, edgeDist)) * select(0.0, 1.0, fineMode);
+  fill = mix(fill, baseAccent * 1.4, borderMask * 0.65);
 
   // ── LABEL OVERLAY ───────────────────────────────────────────────────────
   // Aspect-correct atlas sampling. Atlas strip is 8:1 wide; widget text region

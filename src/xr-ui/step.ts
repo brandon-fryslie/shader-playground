@@ -61,13 +61,21 @@ export type InteractionState =
         | { kind: 'increment'; valueAtOrigin: number; step: number; min: number; max: number } }
   | { kind: 'dragging';
       widgetId: string; bindingId: string;
-      handOriginPos: number[];        // world-space hand position at pinch-start
+      handOriginPos: number[];        // world-space hand position at origin
       // Widget orientation frozen at pinch-start. Drag deltas are rotated into this frame so the
       // users mental axis (slider X, pinch-pull forward, etc.) matches panel-local space even when
       // the panel is wrist/palm anchored and tilted. Locked at start so a rotating wrist mid-drag
       // does not remap axes underneath the user.
       widgetOrientationAtOrigin: [number, number, number, number];
-      valueAtOrigin: number;          // binding value snapshot at pinch-start
+      valueAtOrigin: number;          // binding value snapshot at origin
+      // Gain multiplier under which valueAtOrigin/handOriginPos were captured.
+      // When the global gain changes mid-drag (fine-modifier toggled), the
+      // HOLD branch rebases origin to "current pose, current value" so the
+      // value evolves smoothly with the new slope rather than jumping by
+      // (newGain - oldGain) * delta. [LAW:types-are-the-program] storing the
+      // gain under which the origin is valid makes the no-jump invariant
+      // explicit in the type, not implicit in the loop.
+      appliedGain: number;
       interaction: ContinuousInteraction;
       cancelPending: boolean;
       // Id of the focus-view container whose `focused` we set at pinch-start
@@ -93,6 +101,12 @@ export interface RenderCommand {
   // so the renderer never reaches back to the binding registry.
   // [LAW:one-way-deps]
   label?: string;
+  // Global per-frame stamp: dual-speed fine modifier is engaged. Renderer
+  // draws a subtle accent border on every command so the user sees that
+  // drag gain is reduced. Stamped on every command because it's a frame-
+  // wide property, not per-widget — keeps RenderCommand the single seam
+  // the renderer reads. [LAW:one-source-of-truth]
+  fineMode: boolean;
 }
 
 export interface XrUiPrev {
@@ -177,7 +191,7 @@ export function xrUiStep(
       const id = hf.gazeRay ? hitTestWidgets(laid, hf.gazeRay) : null;
       const laidEntry = id ? laid.get(id) ?? null : null;
       const widget = laidEntry?.widget ?? null;
-      nextState = (widget && id && laidEntry) ? beginInteraction(widget, id, laidEntry.pose, registry.bindings, hf, root) : { kind: 'idle' };
+      nextState = (widget && id && laidEntry) ? beginInteraction(widget, id, laidEntry.pose, registry.bindings, hf, root, tuning.gainMultiplier) : { kind: 'idle' };
       // If we entered drag on a widget whose ancestor is a focus-view, switch
       // that focus-view's `focused` field — the tween toward expanded starts
       // next frame. [LAW:one-source-of-truth] the field is the only place
@@ -215,11 +229,27 @@ export function xrUiStep(
       // the user starts dragging. (Bug fix from initial XR session feedback.)
       if (prevState.kind === 'dragging') {
         const binding = registry.bindings.get(prevState.bindingId);
-        if (binding && binding.kind === 'continuous') {
-          const value = computeDragValue(prevState, hf, binding, tuning.gainMultiplier);
-          sideEffects.push({ kind: 'binding-set', bindingId: prevState.bindingId, value });
+        let dragging = prevState;
+        // Gain transition mid-drag (fine-modifier toggled) → rebase origin to
+        // current pose + current value so the slider doesn't jump. The next
+        // line evaluates as: new valueAtOrigin = current value under OLD gain,
+        // then origin pose snaps to current pinch, then appliedGain stamps NEW.
+        // [LAW:dataflow-not-control-flow] this is an unconditional rebase that
+        // happens to be a no-op when gains match (delta from new origin = 0).
+        if (binding && binding.kind === 'continuous' && dragging.appliedGain !== tuning.gainMultiplier) {
+          const rebasedValue = computeDragValue(dragging, hf, binding, dragging.appliedGain);
+          dragging = {
+            ...dragging,
+            valueAtOrigin: rebasedValue,
+            handOriginPos: [hf.pinch.current[0], hf.pinch.current[1], hf.pinch.current[2]],
+            appliedGain: tuning.gainMultiplier,
+          };
         }
-        nextState = prevState;
+        if (binding && binding.kind === 'continuous') {
+          const value = computeDragValue(dragging, hf, binding, tuning.gainMultiplier);
+          sideEffects.push({ kind: 'binding-set', bindingId: dragging.bindingId, value });
+        }
+        nextState = dragging;
       } else if (prevState.kind === 'pressing') {
         // [LAW:one-source-of-truth] Cancel test ALWAYS reads currentRay (hand-steered).
         const onWidget = !!hf.currentRay && hitTestWidgets(laid, hf.currentRay) === prevState.widgetId;
@@ -237,6 +267,7 @@ export function xrUiStep(
 
   // Build render command list. [LAW:single-enforcer] All UI rendering reads
   // this list — nothing else computes widget poses for display.
+  const fineMode = tuning.gainMultiplier < 1;
   for (const [id, entry] of laid) {
     if (!entry.widget) continue;
     const widget = entry.widget;
@@ -250,6 +281,7 @@ export function xrUiStep(
       kind: widget.kind,
       state: { hover, pressed, dragging, value: readWidgetValue(widget, registry.bindings) },
       label: readWidgetLabel(widget, registry.bindings),
+      fineMode,
     });
   }
 
@@ -424,6 +456,7 @@ function beginInteraction(
   bindings: BindingRegistry,
   hf: HandFrame,
   root: Container & { kind: 'panel' },
+  gainAtStart: number,
 ): InteractionState {
   if (widget.kind === 'button' || widget.kind === 'preset-tile') {
     const b = bindings.get(widget.binding);
@@ -457,6 +490,7 @@ function beginInteraction(
         pose.orientation[0], pose.orientation[1], pose.orientation[2], pose.orientation[3],
       ],
       valueAtOrigin: b.get(),
+      appliedGain: gainAtStart,
       interaction: widget.interaction,
       cancelPending: false,
       focusViewId,

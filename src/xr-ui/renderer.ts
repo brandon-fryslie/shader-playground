@@ -186,7 +186,13 @@ export function createXrWidgetRenderer(
       stagingF[o + 7]  = c.pose.orientation[3];
       stagingF[o + 8]  = c.visualHalfExtent.y;
       stagingU[o + 9]  = KIND[c.kind] ?? 0;
-      const flags = (c.state.hover ? 1 : 0) | (c.state.pressed ? 2 : 0) | (c.state.dragging ? 4 : 0);
+      // Flag bits MUST match xr-widgets.wgsl. Adding a bit here without the
+      // shader change yields silent visual no-ops.
+      //   bit 0 hover, bit 1 pressed, bit 2 dragging, bit 3 fineMode
+      const flags = (c.state.hover ? 1 : 0)
+                  | (c.state.pressed ? 2 : 0)
+                  | (c.state.dragging ? 4 : 0)
+                  | (c.fineMode ? 8 : 0);
       stagingU[o + 10] = flags >>> 0;
       stagingF[o + 11] = c.state.value ?? 0;
       // Label slot == instance slot. -1 sentinel when the command has no label → hasLabel=0 path in shader.
