@@ -2,6 +2,28 @@
   "schema": 2,
   "versions": [
     {
+      "version": "pr-38",
+      "ref": "refs/pull/38/merge",
+      "sha": "3d0bd6f319396999cfbdf5f764425c255b7a6d3d",
+      "timestamp": "2026-06-21T06:31:05.845Z",
+      "commits": [
+        {
+          "sha": "3d0bd6f319396999cfbdf5f764425c255b7a6d3d",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-06-21T00:30:48-06:00",
+          "message": "Merge f89a41b3afa3837c2dfcdc49ea55ac776a75ccbc into 05b943dc35a78b487049892c35f32ade3ce84d22\n"
+        },
+        {
+          "sha": "f89a41b3afa3837c2dfcdc49ea55ac776a75ccbc",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-06-21T00:30:07-06:00",
+          "message": "fix(debug): derive adaptive-chunk thresholds from idle rAF baseline (#shader-debug-6oi.7)\n\nDEBUG_FRAME_OVER_MS=20 / DEBUG_FRAME_UNDER_MS=14 assumed a 16.7 ms rAF\ncadence. On a 120 Hz display, rAF fires at ~8.3 ms — always below 14, so\nthe \"GPU can't keep up\" branch was unreachable and adaptiveChunk grew\npast sustainable. The same hardcoded 60 leaked into runCompute's\ntargetPerFrame cap (steps/sec ÷ 60), capping at 2x the user's target on\n120 Hz.\n\nBoth now derive from idleBaselineMs, an EMA of rAF delta sampled only on\nidle frames (lastSkipDispatches <= 0) so the active-skip cost cannot\npoison the cadence measurement. Thresholds become 1.3x / 0.85x baseline;\ntargetPerFrame becomes steps/sec * baseline/1000. At 60 Hz the loop\nbehaves as before; at 90/120/240 Hz it tracks the real cadence.\n\n[LAW:one-source-of-truth] one baseline feeds both the over/under check\nand the per-frame cap, so they can never drift relative to each other.\n"
+        }
+      ]
+    },
+    {
       "version": "r114-05b943d",
       "ref": "refs/heads/master",
       "sha": "05b943dc35a78b487049892c35f32ade3ce84d22",
