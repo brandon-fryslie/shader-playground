@@ -2,6 +2,28 @@
   "schema": 2,
   "versions": [
     {
+      "version": "pr-32",
+      "ref": "refs/pull/32/merge",
+      "sha": "70a1dae2c2d5dbc4f71079daf82bbc4757d2dabc",
+      "timestamp": "2026-06-21T05:42:19.531Z",
+      "commits": [
+        {
+          "sha": "70a1dae2c2d5dbc4f71079daf82bbc4757d2dabc",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-06-20T23:41:56-06:00",
+          "message": "Merge b8371c840ce9c39412b9b8b414892345f87252f9 into 7759c9818e1bde0941266715825ed866596c0365\n"
+        },
+        {
+          "sha": "b8371c840ce9c39412b9b8b414892345f87252f9",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-06-20T23:41:21-06:00",
+          "message": "fix(debug): dedupe GPU timestamp slots per frame (#shader-debug-6oi.1)\n\nrunDebugCompute loops physicsSim.compute() N times in a single command\nbuffer during skip-frame chunks. Each iteration's compute pass tried to\nwrite to the same timestamp query indices, triggering WebGPU validation\nerrors that polluted timing readback and (on strict implementations)\ncould lose the device.\n\nEnforce the \"each query index written at most once per command buffer\"\ninvariant where slots are allocated: GpuTimingService. First call per\nbucket per frame returns the slot pair; subsequent calls return\nundefined and the pass simply skips timing. [LAW:single-enforcer]\n\nAvoided pushing a captureTimings flag into compute()'s ABI; timing\ncapture is a frame-level concern, not a sim parameter\n[LAW:no-mode-explosion]. The same fix transparently corrects XR stereo\nrender (which would have hit the same bug rendering both eyes).\n\nAlso fixed two latent double-call sites in physics/compute.ts that\nrelied on tsWrites being a pure indexer — cache the result once\n[LAW:one-source-of-truth].\n"
+        }
+      ]
+    },
+    {
       "version": "r108-7759c98",
       "ref": "refs/heads/master",
       "sha": "7759c9818e1bde0941266715825ed866596c0365",
