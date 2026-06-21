@@ -97,7 +97,8 @@ export function createPhysicsComputeService(
       });
 
       {
-        const pass = encoder.beginComputePass(tsWrites('boundarySample') ? { timestampWrites: tsWrites('boundarySample') } : undefined);
+        const boundaryTs = tsWrites('boundarySample');
+        const pass = encoder.beginComputePass(boundaryTs ? { timestampWrites: boundaryTs } : undefined);
         pass.setPipeline(particleMesh.boundarySamplePipeline);
         pass.setBindGroup(0, particleMesh.boundarySampleBG);
         pass.dispatchWorkgroups(
@@ -136,7 +137,8 @@ export function createPhysicsComputeService(
         tsWrites('gasInterpolatePressure'),
       );
 
-      const pass = encoder.beginComputePass(tsWrites('starGasIntegrate') ? { timestampWrites: tsWrites('starGasIntegrate') } : undefined);
+      const integrateTs = tsWrites('starGasIntegrate');
+      const pass = encoder.beginComputePass(integrateTs ? { timestampWrites: integrateTs } : undefined);
       particleMesh.gas.integrate(pass, pingPong);
       pass.setPipeline(computePipeline);
       pass.setBindGroup(0, computeBG[pingPong]);
