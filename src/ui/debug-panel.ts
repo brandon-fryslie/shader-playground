@@ -3,6 +3,7 @@ import type { PhysicsSimulation } from '../simulations/types';
 
 export interface DebugPanel {
   cancelMovement(): void;
+  clearAll(): void;
   runCompute(sim: Simulation, encoder: GPUCommandEncoder): void;
   setupControls(): void;
   updateAdaptiveChunk(frameDeltaMs: number): void;
@@ -62,8 +63,19 @@ export function createDebugPanel(deps: DebugPanelDeps): DebugPanel {
     debugState.lastSkipDispatches = 0;
   }
 
+  // [LAW:one-source-of-truth] debugState targets (skipTarget, breakAtStep,
+  // manualStepsRemaining) are coordinates in the sim's simStep space. When the
+  // sim is destroyed and rebuilt at step 0, every stored target is stale —
+  // wipe them all so the new sim starts in a clean debug state.
+  function clearAll(): void {
+    cancelMovement();
+    debugState.breakAtStep = null;
+    refreshBreakpointUI();
+  }
+
   return {
     cancelMovement,
+    clearAll,
     updateAdaptiveChunk(frameDeltaMs) {
       if (debugState.lastSkipDispatches <= 0) return;
       const targetPerFrame = Math.max(1, Math.ceil(debugState.targetStepsPerSec / 60));

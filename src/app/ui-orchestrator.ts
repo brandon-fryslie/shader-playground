@@ -70,6 +70,7 @@ export interface UiOrchestrator {
 
   // Debug-panel surface consumed by the frame runtime.
   cancelDebugMovement(): void;
+  clearDebugState(): void;
   runDebugCompute(sim: Simulation, encoder: GPUCommandEncoder): void;
   updateAdaptiveChunk(deltaMs: number): void;
   updateDebugPanel(): void;
@@ -255,6 +256,7 @@ export function createUiOrchestrator(deps: UiOrchestratorDeps): UiOrchestrator {
     updatePrompt: () => renderPrompt(state, catalog.defaults, modeParams, catalog.defaultTheme),
     updateShaderPanel: () => shaderPanel.update(),
     cancelDebugMovement: () => debugPanel.cancelMovement(),
+    clearDebugState: () => debugPanel.clearAll(),
     runDebugCompute: (sim, encoder) => debugPanel.runCompute(sim, encoder),
     updateAdaptiveChunk: (deltaMs) => debugPanel.updateAdaptiveChunk(deltaMs),
     updateDebugPanel: () => debugPanel.updatePanel(),
