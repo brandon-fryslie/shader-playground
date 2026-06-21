@@ -23,7 +23,7 @@
 // (return idle); we never substitute a default UI or swallow the absence.
 
 import type { AnchorContext, Pose } from './anchors';
-import { quatConj, quatRotateVec } from './anchors';
+import { quatConj, quatMul, quatRotateVec } from './anchors';
 import type { Container, Node, Widget, Vec2, ContinuousInteraction, VisibilityGate } from './widgets';
 import { isWidget } from './widgets';
 import type { Binding, BindingRegistry } from './bindings';
@@ -33,6 +33,12 @@ import { layout, hitTestWidgets } from './layout';
 // 150ms tween between collapsed (t=0) and fully expanded (t=1) — matches the
 // ticket spec. Tuned by feel; if it lands wrong in headset, tweak here only.
 const FOCUS_TRANSITION_MS = 150;
+
+// Radians of wrist twist that map to one full binding-range traversal.
+// π/2 (90°) is a comfortable end-to-end range for a forearm roll without
+// shoulder recruitment. Tunable in headset; same shape as direct-drag's
+// implicit "1m of hand travel → full range" constant.
+const PINCH_TWIST_RADIANS_PER_RANGE = Math.PI / 2;
 
 // Visibility gate (.18). Smooth fade across ~200ms. Hysteresis thresholds for
 // palm-facing-user keep the gate from flip-flopping at the boundary. Hit-test
@@ -93,6 +99,17 @@ export type InteractionState =
       // the panel is wrist/palm anchored and tilted. Locked at start so a rotating wrist mid-drag
       // does not remap axes underneath the user.
       widgetOrientationAtOrigin: [number, number, number, number];
+      // Wrist orientation at pinch-start (world-space xyzw). Pinch-twist reads
+      // it each frame as `conj(wristAtOrigin) * wristNow` to derive the rotation
+      // in the wrist-LOCAL frame at origin — the user's "roll/pitch/yaw" stays
+      // stable even if the forearm itself drifts during the gesture.
+      // [LAW:no-ambient-temporal-coupling] the origin frame is captured once
+      // and frozen, not re-read from ambient hand state every tick.
+      // Null when wrist tracking was unavailable at pinch-start; pinch-twist
+      // then yields delta=0 each frame (no jumps, just no response) instead of
+      // substituting an identity quaternion that would silently misattribute
+      // every later motion. [LAW:no-silent-failure]
+      wristQuatAtOrigin: [number, number, number, number] | null;
       valueAtOrigin: number;          // binding value snapshot at origin
       // Gain multiplier under which valueAtOrigin/handOriginPos were captured.
       // When the global gain changes mid-drag (fine-modifier toggled), the
@@ -318,10 +335,20 @@ export function xrUiStep(
         // happens to be a no-op when gains match (delta from new origin = 0).
         if (binding && binding.kind === 'continuous' && dragging.appliedGain !== tuning.gainMultiplier) {
           const rebasedValue = computeDragValue(dragging, hf, binding, dragging.appliedGain);
+          // The wrist quat origin rebases alongside handOriginPos so pinch-twist
+          // also reads "no delta at this frame" right after a gain transition.
+          // Falling back to the old origin when wrist tracking is missing keeps
+          // the angle continuous rather than zeroing it (which would cancel any
+          // in-flight rotation on a single dropped sample).
+          const wristNow = hf.joints?.wrist;
+          const wristQuatAtOrigin: [number, number, number, number] | null = wristNow
+            ? [wristNow.orientation[0], wristNow.orientation[1], wristNow.orientation[2], wristNow.orientation[3]]
+            : dragging.wristQuatAtOrigin;
           dragging = {
             ...dragging,
             valueAtOrigin: rebasedValue,
             handOriginPos: [hf.pinch.current[0], hf.pinch.current[1], hf.pinch.current[2]],
+            wristQuatAtOrigin,
             appliedGain: tuning.gainMultiplier,
           };
         }
@@ -791,6 +818,14 @@ function beginInteraction(
     const b = bindings.get(widget.binding);
     if (!b || b.kind !== 'continuous') return { kind: 'idle' };
     const focusViewId = findFocusViewContaining(root, widgetId);
+    // Capture wrist orientation unconditionally — direct-drag/pinch-pull never
+    // read it, pinch-twist always needs it. Branching on interaction.kind here
+    // would push the question "is this twist?" into beginInteraction; storing
+    // it always keeps the dragging shape uniform. [LAW:dataflow-not-control-flow]
+    const wrist = hf.joints?.wrist;
+    const wristQuatAtOrigin: [number, number, number, number] | null = wrist
+      ? [wrist.orientation[0], wrist.orientation[1], wrist.orientation[2], wrist.orientation[3]]
+      : null;
     return {
       kind: 'dragging',
       widgetId, bindingId: b.id,
@@ -798,6 +833,7 @@ function beginInteraction(
       widgetOrientationAtOrigin: [
         pose.orientation[0], pose.orientation[1], pose.orientation[2], pose.orientation[3],
       ],
+      wristQuatAtOrigin,
       valueAtOrigin: b.get(),
       appliedGain: gainAtStart,
       interaction: widget.interaction,
@@ -841,9 +877,28 @@ function computeDragValue(
         const raw = ax === 'forward' ? -dz : ax === 'up' ? dy : dx;
         return raw * interaction.unitsPerMeter;
       }
-      case 'pinch-twist':
-        // Wrist quat delta wiring lands in a later ticket — for MVP, no twist response.
-        return 0;
+      case 'pinch-twist': {
+        // Express the wrist's current rotation in the wrist-LOCAL frame at
+        // pinch-start: q_localDelta = conj(wristAtOrigin) * wristNow. Then
+        // swing-twist-decompose around the requested canonical axis; for a
+        // basis axis a, the twist angle collapses to 2*atan2(q[a], q.w) — a
+        // signed value in (-π, π], so reverse rotation naturally negates the
+        // delta without a sign branch. [LAW:dataflow-not-control-flow]
+        // Tracking loss (origin or current wrist null) yields delta=0 this
+        // frame rather than substituting identity, which would silently treat
+        // every wrist movement as if rotation had restarted. [LAW:no-silent-failure]
+        const wristNow = hf.joints?.wrist;
+        if (!state.wristQuatAtOrigin || !wristNow) return 0;
+        const wn = wristNow.orientation;
+        const qLocalDelta = quatMul(
+          quatConj(state.wristQuatAtOrigin),
+          [wn[0], wn[1], wn[2], wn[3]],
+        );
+        // axis basis in wrist-local frame: pitch=X, yaw=Y, roll=Z.
+        const axisIdx = interaction.axis === 'pitch' ? 0 : interaction.axis === 'yaw' ? 1 : 2;
+        const angle = 2 * Math.atan2(qLocalDelta[axisIdx], qLocalDelta[3]);
+        return (angle / PINCH_TWIST_RADIANS_PER_RANGE) * span;
+      }
       case 'expand-to-focus':
         // Defensive: nothing in the current widget set declares this as its
         // interaction kind (expand-to-focus is structural — applied via a
