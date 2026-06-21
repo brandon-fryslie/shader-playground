@@ -78,19 +78,27 @@ export function createGpuTimingService(): GpuTimingService {
       activeGpuTimingBuckets = new Set<GpuTimingBucket>();
       gpuTimingFrameActive = true;
     },
+    // [LAW:single-enforcer] WebGPU rejects a command buffer that writes the
+    // same query index more than once. This service owns slot allocation, so
+    // it owns the uniqueness invariant: the first call per bucket per frame
+    // returns the slots; later calls (a looped compute(), a second XR eye)
+    // return undefined and silently skip timing for that pass.
     tsWrites(bucket) {
       if (!gpuTs || !gpuTimingFrameActive) return undefined;
+      if (activeGpuTimingBuckets.has(bucket)) return undefined;
       activeGpuTimingBuckets.add(bucket);
       const slotPair = GPU_TIMING_INDEX[bucket];
       return { querySet: gpuTs.querySet, beginningOfPassWriteIndex: slotPair * 2, endOfPassWriteIndex: slotPair * 2 + 1 };
     },
     tsBegin(bucket) {
       if (!gpuTs || !gpuTimingFrameActive) return undefined;
+      if (activeGpuTimingBuckets.has(bucket)) return undefined;
       activeGpuTimingBuckets.add(bucket);
       return { querySet: gpuTs.querySet, beginningOfPassWriteIndex: GPU_TIMING_INDEX[bucket] * 2 };
     },
     tsEnd(bucket) {
       if (!gpuTs || !gpuTimingFrameActive) return undefined;
+      if (activeGpuTimingBuckets.has(bucket)) return undefined;
       activeGpuTimingBuckets.add(bucket);
       return { querySet: gpuTs.querySet, endOfPassWriteIndex: GPU_TIMING_INDEX[bucket] * 2 + 1 };
     },
