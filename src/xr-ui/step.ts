@@ -59,9 +59,18 @@ export interface HandFrame {
 
 export type InteractionState =
   | { kind: 'idle' }
-  | { kind: 'hovering'; widgetId: string }
+  | { kind: 'hovering'; widgetId: string; subZoneId?: string }
   | { kind: 'pressing';
-      widgetId: string; startedAt: number;
+      widgetId: string;
+      // Sub-zone the press is committed against (chip value, stepper side).
+      // Captured at pinch-start and frozen — sliding across sub-zones within
+      // the same widget does NOT re-pick the sub-zone (sliding off-widget
+      // cancels via cancelPending; intra-widget movement is ignored). This
+      // matches the cancel-pending invariant for slide-off-to-cancel.
+      // [LAW:one-source-of-truth] the press's committed sub-zone lives here
+      // and only here; render reads it via state for per-zone highlight.
+      subZoneId?: string;
+      startedAt: number;
       cancelPending: boolean;
       // Discriminator chosen at pinch-start; tells the commit handler which
       // side effect to emit if the press isn't cancelled. Captured here so the
@@ -74,6 +83,7 @@ export type InteractionState =
         | { kind: 'invoke';     bindingId: string }                                 // button / preset-tile → action binding
         | { kind: 'toggle';     bindingId: string; valueAtOrigin: boolean }         // toggle widget → flip
         | { kind: 'increment';  bindingId: string; valueAtOrigin: number; step: number; min: number; max: number }
+        | { kind: 'enum-set';   bindingId: string; value: string }                  // enum-chips chip pinch → set option
         | { kind: 'tab-switch'; layoutId: string;  tabId: string } }                // category-tile → tab-switch effect
   | { kind: 'dragging';
       widgetId: string; bindingId: string;
@@ -105,12 +115,24 @@ export type XrUiSideEffect =
   | { kind: 'binding-invoke'; bindingId: string }
   | { kind: 'tab-switch';     layoutId: string; tabId: string };
 
+// Per-widget sub-zone render state. Only widget kinds with sub-zones produce
+// this; absence means "no sub-zone visuals to draw" (the shader takes the
+// single-zone path it already had). Chip indices use -1 as the "none"
+// sentinel — the renderer packs into a u32 instance slot, the shader unpacks.
+// [LAW:dataflow-not-control-flow] the same shader path runs every frame;
+// indices flow as data and gate visual highlights via mix() factors, not
+// per-chip if-branches.
+export type SubZoneRenderState =
+  | { kind: 'chips';   count: number; activeIdx: number; hoverIdx: number; pressIdx: number }
+  | { kind: 'stepper'; hoverSide: 'left' | 'right' | null; pressSide: 'left' | 'right' | null };
+
 export interface RenderCommand {
   widgetId: string;
   pose: Pose;
   visualHalfExtent: Vec2;
   kind: Widget['kind'];
   state: { hover: boolean; pressed: boolean; dragging: boolean; value?: number };
+  subZones?: SubZoneRenderState;
   // Pre-rendered text the label atlas should display on this widget.
   // null/undefined means "no label" — the renderer skips atlas allocation
   // for that instance. Computed in xrUiStep from binding.label / format(value)
@@ -210,7 +232,7 @@ export function xrUiStep(
   // [LAW:dataflow-not-control-flow] tween advancement is unconditional —
   // empty map / t=0 / no focus all flow through the same arithmetic.
   advanceFocusTransitions(root, next.focusTransitions, dtMs);
-  const laid = layout(root, ctx, next.focusTransitions);
+  const laid = layout(root, ctx, next.focusTransitions, registry.bindings);
   if (!laid) {
     next.states.left = { kind: 'idle' }; next.states.right = { kind: 'idle' };
     return { next, sideEffects, renderList };
@@ -241,11 +263,11 @@ export function xrUiStep(
       // available (the ray null-check is a structural prerequisite for the
       // call). Visibility is a separate filter applied to the result as data,
       // not a guard that decides whether to compute.
-      const hitId = hf.gazeRay ? hitTestWidgets(laid, hf.gazeRay) : null;
-      const id = panelHittable ? hitId : null;
-      const laidEntry = id ? laid.get(id) ?? null : null;
+      const rawHit = hf.gazeRay ? hitTestWidgets(laid, hf.gazeRay) : null;
+      const hit = panelHittable ? rawHit : null;
+      const laidEntry = hit ? laid.get(hit.widgetId) ?? null : null;
       const widget = laidEntry?.widget ?? null;
-      nextState = (widget && id && laidEntry) ? beginInteraction(widget, id, laidEntry.pose, registry.bindings, hf, root, activeLayoutId, tuning.gainMultiplier) : { kind: 'idle' };
+      nextState = (widget && hit && laidEntry) ? beginInteraction(widget, hit.widgetId, hit.subZoneId, laidEntry.pose, registry.bindings, hf, root, activeLayoutId, tuning.gainMultiplier) : { kind: 'idle' };
       // If we entered drag on a widget whose ancestor is a focus-view, switch
       // that focus-view's `focused` field — the tween toward expanded starts
       // next frame. [LAW:one-source-of-truth] the field is the only place
@@ -266,6 +288,8 @@ export function xrUiStep(
         } else if (c.kind === 'increment') {
           const next = Math.max(c.min, Math.min(c.max, c.valueAtOrigin + c.step));
           sideEffects.push({ kind: 'binding-set', bindingId: c.bindingId, value: next });
+        } else if (c.kind === 'enum-set') {
+          sideEffects.push({ kind: 'binding-set', bindingId: c.bindingId, value: c.value });
         } else {
           sideEffects.push({ kind: 'tab-switch', layoutId: c.layoutId, tabId: c.tabId });
         }
@@ -308,16 +332,20 @@ export function xrUiStep(
         nextState = dragging;
       } else if (prevState.kind === 'pressing') {
         // [LAW:one-source-of-truth] Cancel test ALWAYS reads currentRay (hand-steered).
-        const onWidget = !!hf.currentRay && hitTestWidgets(laid, hf.currentRay) === prevState.widgetId;
+        // Cancel keys on the WIDGET, not the sub-zone — sliding from chip A
+        // to chip B inside the same enum-chips widget keeps the original
+        // commit alive. Off-widget triggers cancelPending.
+        const cancelHit = hf.currentRay ? hitTestWidgets(laid, hf.currentRay) : null;
+        const onWidget = cancelHit !== null && cancelHit.widgetId === prevState.widgetId;
         nextState = { ...prevState, cancelPending: !onWidget };
       }
     } else {
       // NO PINCH → HOVER pipeline.
       // [LAW:one-source-of-truth] Hover ALWAYS reads hf.ray (advisory laser).
       // Same compute-then-filter shape as selection above. [LAW:dataflow-not-control-flow]
-      const hitId = hf.ray ? hitTestWidgets(laid, hf.ray) : null;
-      const id = panelHittable ? hitId : null;
-      nextState = id ? { kind: 'hovering', widgetId: id } : { kind: 'idle' };
+      const rawHit = hf.ray ? hitTestWidgets(laid, hf.ray) : null;
+      const hit = panelHittable ? rawHit : null;
+      nextState = hit ? { kind: 'hovering', widgetId: hit.widgetId, subZoneId: hit.subZoneId } : { kind: 'idle' };
     }
 
     next.states[hand] = nextState;
@@ -325,9 +353,11 @@ export function xrUiStep(
 
   // Build render command list. [LAW:single-enforcer] All UI rendering reads
   // this list — nothing else computes widget poses for display.
+  // Render iteration skips sub-zone entries: the widget entry produces the
+  // single command, and per-zone highlight is encoded in `subZones` below.
   const fineMode = tuning.gainMultiplier < 1;
   for (const [id, entry] of laid) {
-    if (!entry.widget) continue;
+    if (!entry.widget || entry.subZoneId !== undefined) continue;
     const widget = entry.widget;
     const hover = anyState(next.states, s => s.kind === 'hovering' && s.widgetId === id);
     const pressed  = anyState(next.states, s => s.kind === 'pressing' && s.widgetId === id);
@@ -346,6 +376,7 @@ export function xrUiStep(
       visualHalfExtent: entry.visualRect.halfExtent,
       kind: widget.kind,
       state: { hover, pressed, dragging, value: readWidgetValue(widget, registry.bindings) },
+      subZones: buildSubZoneRenderState(widget, id, next.states, registry.bindings),
       label: readWidgetLabel(widget, registry.bindings),
       fineMode,
       alpha: widgetAlpha,
@@ -634,6 +665,56 @@ function formatNumber(v: number): string {
   return v.toFixed(3);
 }
 
+// Derive the sub-zone render state for kinds whose visual splits by zone.
+// Other kinds return undefined → the shader takes the single-zone path. Hover
+// and press sub-zones are looked up by walking both hands' interaction state
+// once; absence (the user is hovering a non-sub-zone widget, or no chip in
+// this widget) leaves the indices at -1 (chips) or null (stepper sides).
+// [LAW:single-enforcer] this is the only place sub-zone render packing happens.
+function buildSubZoneRenderState(
+  widget: Widget,
+  widgetId: string,
+  states: Record<Hand, InteractionState>,
+  bindings: BindingRegistry,
+): SubZoneRenderState | undefined {
+  if (widget.kind === 'stepper') {
+    const hoverZone = findSubZoneId(states, widgetId, 'hovering');
+    const pressZone = findSubZoneId(states, widgetId, 'pressing');
+    const asSide = (z: string | undefined): 'left' | 'right' | null =>
+      z === 'left' ? 'left' : z === 'right' ? 'right' : null;
+    return { kind: 'stepper', hoverSide: asSide(hoverZone), pressSide: asSide(pressZone) };
+  }
+  if (widget.kind === 'enum-chips') {
+    const b = bindings.get(widget.binding);
+    if (!b || b.kind !== 'enum') return undefined;
+    const valueToIdx = (v: string | undefined): number => {
+      if (v === undefined) return -1;
+      const i = b.options.findIndex(o => o.value === v);
+      return i;
+    };
+    return {
+      kind: 'chips',
+      count: b.options.length,
+      activeIdx: valueToIdx(b.get()),
+      hoverIdx: valueToIdx(findSubZoneId(states, widgetId, 'hovering')),
+      pressIdx: valueToIdx(findSubZoneId(states, widgetId, 'pressing')),
+    };
+  }
+  return undefined;
+}
+
+function findSubZoneId(
+  states: Record<Hand, InteractionState>,
+  widgetId: string,
+  stateKind: 'hovering' | 'pressing',
+): string | undefined {
+  for (const hand of HANDS) {
+    const s = states[hand];
+    if (s.kind === stateKind && s.widgetId === widgetId) return s.subZoneId;
+  }
+  return undefined;
+}
+
 function readWidgetValue(widget: Widget, bindings: BindingRegistry): number | undefined {
   if (widget.kind !== 'slider' && widget.kind !== 'dial' && widget.kind !== 'readout') return undefined;
   const b = bindings.get(widget.binding);
@@ -649,6 +730,7 @@ function readWidgetValue(widget: Widget, bindings: BindingRegistry): number | un
 function beginInteraction(
   widget: Widget,
   widgetId: string,
+  subZoneId: string | undefined,
   pose: Pose,
   bindings: BindingRegistry,
   hf: HandFrame,
@@ -671,10 +753,28 @@ function beginInteraction(
   if (widget.kind === 'stepper') {
     const b = bindings.get(widget.binding);
     if (!b || b.kind !== 'continuous') return { kind: 'idle' };
-    return { kind: 'pressing', widgetId, startedAt: hf.pinch.startTime,
+    // Stepper sub-zones are intrinsic: 'left' decrements, 'right' increments.
+    // A pinch with no sub-zone (e.g. hand-tracking glitch produced a hit on
+    // the parent widget despite zero hitRect) collapses to idle rather than
+    // silently incrementing in an arbitrary direction. [LAW:no-silent-failure]
+    if (subZoneId !== 'left' && subZoneId !== 'right') return { kind: 'idle' };
+    const signedStep = subZoneId === 'left' ? -widget.step : widget.step;
+    return { kind: 'pressing', widgetId, subZoneId, startedAt: hf.pinch.startTime,
              cancelPending: false,
              commit: { kind: 'increment', bindingId: b.id, valueAtOrigin: b.get(),
-                       step: widget.step, min: b.range.min, max: b.range.max } };
+                       step: signedStep, min: b.range.min, max: b.range.max } };
+  }
+  if (widget.kind === 'enum-chips') {
+    const b = bindings.get(widget.binding);
+    if (!b || b.kind !== 'enum' || subZoneId === undefined) return { kind: 'idle' };
+    // The chip's sub-zone id IS the option's value (see deriveSubZones), so
+    // no second lookup is needed. Confirm the value is still a registered
+    // option in case the binding's options changed mid-frame — a stale chip
+    // would otherwise set the binding to an unknown value. [LAW:no-silent-failure]
+    if (!b.options.some(o => o.value === subZoneId)) return { kind: 'idle' };
+    return { kind: 'pressing', widgetId, subZoneId, startedAt: hf.pinch.startTime,
+             cancelPending: false,
+             commit: { kind: 'enum-set', bindingId: b.id, value: subZoneId } };
   }
   if (widget.kind === 'category-tile') {
     // Tab navigation rides the same pressing → cancel-on-slide-off flow as
@@ -705,9 +805,7 @@ function beginInteraction(
       focusViewId,
     };
   }
-  // enum-chips, readout — not yet wired.
-  // enum-chips needs chip-level hit zones (not just one big plate; ticket .20).
-  // Returning idle leaves the pinch unclaimed; sim-side input proceeds normally.
+  // readout — display-only.
   return { kind: 'idle' };
 }
 

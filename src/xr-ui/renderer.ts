@@ -11,7 +11,7 @@
 // [LAW:one-way-deps] Renderer imports RenderCommand from step.ts; step.ts
 // never imports the renderer.
 
-import type { RenderCommand } from './step';
+import type { RenderCommand, SubZoneRenderState } from './step';
 import type { Widget } from './widgets';
 import SHADER_XR_WIDGETS from '../shaders/xr-widgets.wgsl?raw';
 
@@ -20,7 +20,7 @@ const MAX_INSTANCES = 64;
 //   16: position vec3 + halfExtentX
 //   16: orientation vec4
 //   16: halfExtentY + kind + flags + value
-//   16: labelStripIndex + hasLabel + alpha + 1 pad u32
+//   16: labelStripIndex + hasLabel + alpha + subZoneState (u32)
 const INSTANCE_STRIDE_BYTES = 64;
 const CAMERA_SIZE = 208;
 const CAMERA_STRIDE = 256;
@@ -206,9 +206,39 @@ export function createXrWidgetRenderer(
       // every instance owned by that panel; the renderer is dumb to that —
       // it just multiplies output alpha by inst.alpha. [LAW:dataflow-not-control-flow]
       stagingF[o + 14] = c.alpha;
-      stagingU[o + 15] = 0;
+      // slot 15 = packed subZoneState (.20). Encoding shared with xr-widgets.wgsl:
+      //   bits  0-3   chipCount (enum-chips; 0 means "no sub-zones")
+      //   bits  4-7   activeChipIdx (15 sentinel = none)
+      //   bits  8-11  hoverChipIdx
+      //   bits 12-15  pressChipIdx
+      //   bits 16-17  stepperHoverSide (0 none, 1 left, 2 right)
+      //   bits 18-19  stepperPressSide
+      stagingU[o + 15] = packSubZoneState(c.subZones);
     }
     return n;
+  }
+
+  // Pack the SubZoneRenderState discriminated union into the 32-bit instance
+  // slot the shader unpacks. The encoding is a hard contract — any change
+  // here REQUIRES a matching shader edit. The 4-bit chip-index sentinel of
+  // 15 means "none"; the cap is 15 chips per enum-chips widget (any more
+  // would silently truncate, so the clamp protects against bugs upstream).
+  // [LAW:single-enforcer] this function is the sole packing seam.
+  function packSubZoneState(s: SubZoneRenderState | undefined): number {
+    if (!s) return 0;
+    const NONE = 15;
+    const enc4 = (i: number): number => (i < 0 || i > 14 ? NONE : i);
+    if (s.kind === 'chips') {
+      const count = Math.min(15, Math.max(0, s.count));
+      return (count & 0xf)
+           | ((enc4(s.activeIdx) & 0xf) << 4)
+           | ((enc4(s.hoverIdx)  & 0xf) << 8)
+           | ((enc4(s.pressIdx)  & 0xf) << 12);
+    }
+    // stepper
+    const sideCode = (side: 'left' | 'right' | null): number =>
+      side === 'left' ? 1 : side === 'right' ? 2 : 0;
+    return (sideCode(s.hoverSide) << 16) | (sideCode(s.pressSide) << 18);
   }
 
   return {

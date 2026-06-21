@@ -35,7 +35,14 @@ struct Instance {
   labelStripIndex: u32,
   hasLabel: u32,
   alpha: f32,        // [0, 1] per-instance opacity from RenderCommand.alpha (.18)
-  _pad1: u32,
+  // Packed sub-zone state (.20). Encoding mirrors renderer.ts packSubZoneState:
+  //   bits  0-3   chipCount (enum-chips; 0 = no sub-zones)
+  //   bits  4-7   activeChipIdx (15 = none)
+  //   bits  8-11  hoverChipIdx
+  //   bits 12-15  pressChipIdx
+  //   bits 16-17  stepperHoverSide (0 none, 1 left, 2 right)
+  //   bits 18-19  stepperPressSide
+  subZoneState: u32,
 };
 
 const ATLAS_W: f32 = 512.0;
@@ -59,6 +66,7 @@ struct VsOut {
   @location(6) @interpolate(flat) halfX: f32,
   @location(7) @interpolate(flat) halfY: f32,
   @location(8) @interpolate(flat) alpha: f32,
+  @location(9) @interpolate(flat) subZoneState: u32,
 };
 
 fn qrot(q: vec4<f32>, v: vec3<f32>) -> vec3<f32> {
@@ -88,6 +96,7 @@ fn vs(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> VsOut
   out.halfX = inst.halfExtentX;
   out.halfY = inst.halfExtentY;
   out.alpha = inst.alpha;
+  out.subZoneState = inst.subZoneState;
   return out;
 }
 
@@ -184,19 +193,52 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     fill = mix(fill, basePri, knob);
     labelCenterY = -0.6;
   } else if (in.kind == 5u) {
-    // STEPPER. Plate + ◀ ▶ chevrons on edges. Chevrons brighten on hover.
-    let chevColor = mix(basePri, baseAccent, select(0.0, 1.0, hover));
+    // STEPPER. Plate + ◀ ▶ chevrons on edges. The whole-widget `hover`/
+    // `pressed` bits ride from the outer state (they're true whenever ANY
+    // sub-zone is hovered/pressed) and supply the plate-wide bg darkening.
+    // The per-chevron tint comes from subZoneState — only the side actually
+    // under the pointer accents. [LAW:one-source-of-truth] each visual cue
+    // reads its narrowest source: plate from outer flags, chevron from zone.
+    let hoverSide = (in.subZoneState >> 16u) & 0x3u; // 0 none, 1 left, 2 right
+    let pressSide = (in.subZoneState >> 18u) & 0x3u;
+    let leftActive  = select(0.0, 1.0, hoverSide == 1u);
+    let rightActive = select(0.0, 1.0, hoverSide == 2u);
+    let leftPressed  = select(0.0, 1.0, pressSide == 1u);
+    let rightPressed = select(0.0, 1.0, pressSide == 2u);
     let leftDist  = sdTriangleX(in.uv, vec2<f32>(-0.75, 0.0), 0.18, -1.0);
     let rightDist = sdTriangleX(in.uv, vec2<f32>( 0.75, 0.0), 0.18,  1.0);
     let leftMask  = 1.0 - smoothstep(0.0 - aa, 0.0 + aa, leftDist);
     let rightMask = 1.0 - smoothstep(0.0 - aa, 0.0 + aa, rightDist);
-    fill = mix(bg, chevColor, max(leftMask, rightMask));
+    let leftColor  = mix(basePri, baseAccent, leftActive)  * mix(1.0, 0.6, leftPressed);
+    let rightColor = mix(basePri, baseAccent, rightActive) * mix(1.0, 0.6, rightPressed);
+    fill = mix(bg, leftColor,  leftMask);
+    fill = mix(fill, rightColor, rightMask);
     labelCenterY = 0.0;
   } else if (in.kind == 6u) {
-    // ENUM-CHIPS. Bg plate with the active value's label centered. Real
-    // multi-chip rendering is a future polish; this MVP shows current value.
-    fill = mix(bg, baseSec * 0.4, 0.5);
-    if (hover) { fill = mix(fill, basePri, 0.2); }
+    // ENUM-CHIPS. Widget splits into `count` adjacent chips along uv.x. The
+    // active chip (binding's current value) gets an accent fill; hovered and
+    // pressed chips brighten/darken on top. Chip index for the current
+    // fragment = floor((uv.x + 1) / 2 * count). [LAW:dataflow-not-control-flow]
+    // chip selection is arithmetic on uv, not a per-chip if-branch.
+    let count = max(1u, in.subZoneState & 0xfu);
+    let countF = f32(count);
+    let chipIdx = u32(clamp(floor((in.uv.x + 1.0) * 0.5 * countF), 0.0, countF - 1.0));
+    let activeIdx = (in.subZoneState >>  4u) & 0xfu; // 15 = none
+    let hoverIdx  = (in.subZoneState >>  8u) & 0xfu;
+    let pressIdx  = (in.subZoneState >> 12u) & 0xfu;
+    let isActive  = select(0.0, 1.0, chipIdx == activeIdx);
+    let isHover   = select(0.0, 1.0, chipIdx == hoverIdx);
+    let isPress   = select(0.0, 1.0, chipIdx == pressIdx);
+    var chipFill = mix(bg, baseSec * 0.4, 0.5);
+    chipFill = mix(chipFill, baseAccent, isActive * 0.7);
+    chipFill = mix(chipFill, basePri, isHover * 0.25);
+    chipFill = chipFill * mix(1.0, 0.7, isPress);
+    // Inter-chip divider: a thin dark band at each chip boundary so the
+    // separations are legible without drawing per-chip rounded boxes.
+    let cellX = (in.uv.x + 1.0) * 0.5 * countF;
+    let edgeProx = abs(fract(cellX) - 0.5);
+    let dividerMask = smoothstep(0.48, 0.50, edgeProx) * select(1.0, 0.0, count == 1u);
+    fill = mix(chipFill, vec3<f32>(0.04, 0.04, 0.05), dividerMask);
   } else if (in.kind == 7u) {
     // PRESET-TILE. Larger preview blob in the upper band, label below.
     fill = bg;
