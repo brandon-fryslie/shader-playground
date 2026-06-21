@@ -2,6 +2,28 @@
   "schema": 2,
   "versions": [
     {
+      "version": "pr-33",
+      "ref": "refs/pull/33/merge",
+      "sha": "8797a9c3ef385b3544e9cbf8d222df37d92b62dc",
+      "timestamp": "2026-06-21T05:48:41.403Z",
+      "commits": [
+        {
+          "sha": "8797a9c3ef385b3544e9cbf8d222df37d92b62dc",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-06-20T23:48:19-06:00",
+          "message": "Merge 8cd0be048e602a0d7fad7ba498700e4d151094c2 into 9152fe1bbb20b925fffd8dbdd9c46ff3059144d3\n"
+        },
+        {
+          "sha": "8cd0be048e602a0d7fad7ba498700e4d151094c2",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-06-20T23:47:43-06:00",
+          "message": "fix(render): gate trail compression on headU>0 to keep stationary particles symmetric (#shader-debug-6oi.2)\n\nAt blurTime=0 (live play, manual step), headU=0 and dx=uv.x ranges\n[-1,1]. The old `select(abs(dx), -dx * 0.5, dx < 0.0)` compressed the\nentire left half by 0.5x regardless of motion, rendering stationary\nparticles as left-biased asymmetric blobs and breaking the\n\"headU=0 ⇒ original circle\" invariant the motion-blur plan was built on.\n\nGate the tail-compression on headU > 0: when headU == 0, dAlong\ncollapses to abs(dx), dist becomes the original radial distance, and\nthe symmetric core+halo fall out of the existing formulas — the\nno-motion path is now textually identical to the pre-motion-blur shader.\n\n[LAW:types-are-the-program] — the \"headU=0 ⇒ circle\" invariant was\nencoded only as a wish in a comment that the code immediately violated.\nThe fix puts the invariant where it's checked, not where it's hoped for.\n\nLong-term fix from the ticket (re-derive the trail with separate\nalong/across-axis terms so blurTime→0 is a continuous limit instead\nof a discriminator on dx-sign) is deferred — separate ticket if/when\nthe visual quality of the head→tail transition matters.\n"
+        }
+      ]
+    },
+    {
       "version": "r109-9152fe1",
       "ref": "refs/heads/master",
       "sha": "9152fe1bbb20b925fffd8dbdd9c46ff3059144d3",
