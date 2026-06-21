@@ -375,6 +375,7 @@ export async function startAppRuntimeImpl() {
     bindingRegistry,
     catalog: {
       defaults: catalogDefaults,
+      fxParamDefs: catalogFxParamDefs,
       modeTabLabels: catalogModeTabLabels,
       paramDefs: catalogParamDefs,
       presets: catalogPresets,
