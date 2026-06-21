@@ -2,6 +2,28 @@
   "schema": 2,
   "versions": [
     {
+      "version": "pr-19",
+      "ref": "refs/pull/19/merge",
+      "sha": "8520d9c40d0b8c437ac6c9a3b6bda9e214d3751b",
+      "timestamp": "2026-06-21T02:30:13.194Z",
+      "commits": [
+        {
+          "sha": "8520d9c40d0b8c437ac6c9a3b6bda9e214d3751b",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-06-20T20:29:56-06:00",
+          "message": "Merge f253b12a8caf13366c956050c58ffeedb340d7cf into ac74352a49837299c9ca22c68df1c14df5702c58\n"
+        },
+        {
+          "sha": "f253b12a8caf13366c956050c58ffeedb340d7cf",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-06-20T20:29:11-06:00",
+          "message": "Absorb UI orchestration into one app/ui-orchestrator seam\n\nTheme system, controls API, debug panel, shader panel, prompt rendering,\nXR record button, XR enter button, and time-reverse keybindings used to\nbe wired through ~15 thin forwarder functions in runtime-impl.ts that\neach shaped one subsystem's coordination back to the runtime. Each\nforwarder was its own callsite, so adding or moving a UI concern meant\ntouching the runtime in two places.\n\ncreateUiOrchestrator() collapses them into one typed boundary. The\nruntime constructs it after gpu boot, hands it state/catalog/late-bound\nhooks, and consumes a single object for every DOM-facing concern. The\nrecord-button and time-reverse setup that were inlined in runtime-impl\nmove with the rest. runtime-impl shrinks from 1006 → 743 lines (-26%);\nduplicated coordination logic is deleted rather than relocated.\n\nThe metrics bus stays in runtime-impl for ticket .3; the orchestrator\nconsumes a minimal MetricsApi interface so that future move drops in\nwithout changing this seam.\n\nshader-runtime-5ui.2\n"
+        }
+      ]
+    },
+    {
       "version": "r95-ac74352",
       "ref": "refs/heads/master",
       "sha": "ac74352a49837299c9ca22c68df1c14df5702c58",
