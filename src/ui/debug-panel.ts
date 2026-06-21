@@ -22,6 +22,7 @@ interface DebugState {
   targetStepsPerSec: number;
   adaptiveChunk: number;
   breakAtStep: number | null;
+  lastFiredAtStep: number | null;
   manualStepsRemaining: number;
   manualDirection: number;
   lastSkipDispatches: number;
@@ -46,6 +47,7 @@ export function createDebugPanel(deps: DebugPanelDeps): DebugPanel {
     targetStepsPerSec: 6000,
     adaptiveChunk: 8,
     breakAtStep: null,
+    lastFiredAtStep: null,
     manualStepsRemaining: 0,
     manualDirection: 1,
     lastSkipDispatches: 0,
@@ -91,6 +93,7 @@ export function createDebugPanel(deps: DebugPanelDeps): DebugPanel {
   function clearAll(): void {
     cancelMovement();
     debugState.breakAtStep = null;
+    debugState.lastFiredAtStep = null;
     refreshBreakpointUI();
   }
 
@@ -167,12 +170,23 @@ export function createDebugPanel(deps: DebugPanelDeps): DebugPanel {
       for (let i = 0; i < stepCount; i++) {
         physicsSim.compute(encoder);
         const curStep = physicsSim.getSimStep();
-        if (debugState.breakAtStep !== null && curStep === debugState.breakAtStep) {
-          debugState.breakAtStep = null;
+        // [LAW:dataflow-not-control-flow] lastFiredAtStep is a value driven by
+        // curStep, not a flag toggled by every operation-init handler. Once the
+        // sim moves to any other step, the guard self-clears — so a re-entry
+        // into breakAtStep (reverse over it, step away then back, skip past
+        // and reverse) re-fires with no per-handler re-arm.
+        if (debugState.lastFiredAtStep !== null && curStep !== debugState.lastFiredAtStep) {
+          debugState.lastFiredAtStep = null;
+        }
+        if (
+          debugState.breakAtStep !== null &&
+          curStep === debugState.breakAtStep &&
+          debugState.lastFiredAtStep !== curStep
+        ) {
+          debugState.lastFiredAtStep = curStep;
           cancelMovement();
           deps.state.paused = true;
           deps.syncPauseButtons();
-          refreshBreakpointUI();
           physicsSim.setBlurTime(0);
           break;
         }
@@ -236,25 +250,24 @@ export function createDebugPanel(deps: DebugPanelDeps): DebugPanel {
       });
 
       const breakInput = byId<HTMLInputElement>('debug-break-step');
+      // [LAW:single-enforcer] One seam for "user changed the breakpoint" —
+      // both arm and clear route through here so lastFiredAtStep can't drift
+      // out of sync with breakAtStep across the three input sites.
+      const setBreakAtStep = (value: number | null) => {
+        debugState.breakAtStep = value;
+        debugState.lastFiredAtStep = null;
+        refreshBreakpointUI();
+      };
       byId('debug-break-btn')?.addEventListener('click', () => {
         const value = parseInt(breakInput?.value ?? '', 10);
-        if (Number.isFinite(value) && value >= 0) {
-          debugState.breakAtStep = value;
-          refreshBreakpointUI();
-        }
+        if (Number.isFinite(value) && value >= 0) setBreakAtStep(value);
       });
       breakInput?.addEventListener('keydown', (event) => {
         if (event.key !== 'Enter') return;
         const value = parseInt(breakInput.value, 10);
-        if (Number.isFinite(value) && value >= 0) {
-          debugState.breakAtStep = value;
-          refreshBreakpointUI();
-        }
+        if (Number.isFinite(value) && value >= 0) setBreakAtStep(value);
       });
-      byId('debug-break-clear')?.addEventListener('click', () => {
-        debugState.breakAtStep = null;
-        refreshBreakpointUI();
-      });
+      byId('debug-break-clear')?.addEventListener('click', () => setBreakAtStep(null));
 
       const scrub = byId<HTMLInputElement>('debug-scrub');
       scrub?.addEventListener('change', () => {
