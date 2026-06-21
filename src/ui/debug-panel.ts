@@ -4,6 +4,7 @@ import type { PhysicsSimulation } from '../simulations/types';
 export interface DebugPanel {
   cancelMovement(): void;
   clearAll(): void;
+  hasPendingMovement(): boolean;
   runCompute(sim: Simulation, encoder: GPUCommandEncoder): void;
   setupControls(): void;
   updateAdaptiveChunk(frameDeltaMs: number): void;
@@ -86,6 +87,14 @@ export function createDebugPanel(deps: DebugPanelDeps): DebugPanel {
     debugState.adaptiveChunk = Math.max(DEBUG_ADAPTIVE_MIN, Math.floor(computeTargetPerFrame() / 4));
   }
 
+  // [LAW:one-source-of-truth] "An operation is in flight" is derived from the
+  // two debugState slots that own it; no parallel boolean. Internal queue-
+  // collision UI and the external pause-button label (shader-debug-6oi.4.1)
+  // read the same value, so they cannot disagree.
+  function hasPendingMovement(): boolean {
+    return debugState.skipTarget !== null || debugState.manualStepsRemaining > 0;
+  }
+
   // [LAW:one-source-of-truth] debugState targets (skipTarget, breakAtStep,
   // manualStepsRemaining) are coordinates in the sim's simStep space. When the
   // sim is destroyed and rebuilt at step 0, every stored target is stale —
@@ -100,6 +109,7 @@ export function createDebugPanel(deps: DebugPanelDeps): DebugPanel {
   return {
     cancelMovement,
     clearAll,
+    hasPendingMovement,
     updateAdaptiveChunk(frameDeltaMs) {
       // [LAW:types-are-the-program] Idle frames carry the natural rAF cadence;
       // sample them via EMA so over/under thresholds and the per-frame cap
@@ -292,6 +302,22 @@ export function createDebugPanel(deps: DebugPanelDeps): DebugPanel {
       });
     },
     updatePanel() {
+      // [LAW:dataflow-not-control-flow] Queue-initiating controls reflect the
+      // canonical pending state every frame. Any path that sets/clears the
+      // queue (stepBy, initiateSkip, breakpoint hit, scrub, clearAll, natural
+      // completion in runCompute) gets the right UI on the next frame without
+      // a per-handler push. Runs ahead of the mode-gated section so the
+      // buttons recover on mode-switch back into physics. The scrubber stays
+      // enabled — it's a continuous control where "abort + new target" is its
+      // intended UX.
+      const pending = hasPendingMovement();
+      document.querySelectorAll<HTMLButtonElement>('.debug-step-btn')
+        .forEach((b) => { b.disabled = pending; });
+      const skipBtn = document.getElementById('debug-skip-btn') as HTMLButtonElement | null;
+      if (skipBtn) skipBtn.disabled = pending;
+      const skipInput = document.getElementById('debug-skip-target') as HTMLInputElement | null;
+      if (skipInput) skipInput.disabled = pending;
+
       const sim = deps.getPhysicsSimulation();
       if (deps.state.mode !== 'physics' || !sim) return;
       const step = sim.getSimStep();
