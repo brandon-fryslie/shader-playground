@@ -18,11 +18,28 @@
 // [LAW:no-defensive-null-guards] The function returns null in exactly one
 // case: the root anchor is unavailable this frame. Callers handle null as
 // data ("skip this frame"); they never receive a half-laid-out panel.
+//
+// Focus-view containers consult an optional `focusStates` map keyed by
+// container id. When a focus-view has no entry (or t === 0), it lays out
+// children as an implicit column stack — its "collapsed" form. When t > 0,
+// it places only the `rendered` child at the focus-view center with its
+// visual + hit half-extents linearly mixed between the natural rectangle
+// and halve(expandedSize) by t; siblings disappear from the laid-out map
+// (and therefore from rendering and hit tests). [LAW:dataflow-not-control-flow]
+// the renderer never sees an "is expanded?" branch — the mixed half-extents
+// flow through the same RenderCommand path as any other widget.
 
 import type { AnchorContext, Pose } from './anchors';
 import { evaluateAnchor, composePose, quatRotateVec, quatConj } from './anchors';
 import type { Container, Node, Vec2, Widget } from './widgets';
 import { HIG_DEFAULTS, isWidget } from './widgets';
+
+// Per-focus-view visual state — provided by xrUiStep, consumed here.
+// `rendered` is the widget id currently occupying the expanded slot (which
+// stays pinned to the last focused child while t collapses from 1 → 0).
+// `t` is the tween amplitude in [0, 1]: 0 = collapsed, 1 = fully expanded.
+export interface FocusViewVisualState { rendered: string | null; t: number }
+export type FocusStates = ReadonlyMap<string, FocusViewVisualState>;
 
 export interface Rect { halfExtent: Vec2 }
 
@@ -40,7 +57,11 @@ export interface XrRay { origin: number[]; dir: number[] }
 
 type RootPanel = Container & { kind: 'panel' };
 
-export function layout(root: RootPanel, ctx: AnchorContext): Map<string, LaidOut> | null {
+export function layout(
+  root: RootPanel,
+  ctx: AnchorContext,
+  focusStates?: FocusStates,
+): Map<string, LaidOut> | null {
   const pose = evaluateAnchor(root.anchor, ctx);
   if (!pose) return null;
 
@@ -48,7 +69,7 @@ export function layout(root: RootPanel, ctx: AnchorContext): Map<string, LaidOut
   const widgetIds: string[] = [];
   // Panel children stack as an implicit column at the panel center.
   // Inner `group` containers override with their own layout direction.
-  placeAsColumn(root.children, pose, { x: 0, y: 0 }, root.id, out, widgetIds);
+  placeAsColumn(root.children, pose, { x: 0, y: 0 }, root.id, out, widgetIds, focusStates);
 
   out.set(root.id, {
     pose,
@@ -70,9 +91,10 @@ function placeNode(
   parentId: string,
   out: Map<string, LaidOut>,
   parentChildrenIds: string[],
+  focusStates: FocusStates | undefined,
 ): void {
   if (isWidget(node)) {
-    const m = measure(node);
+    const m = measure(node, focusStates);
     out.set(node.id, {
       pose: composeLocal(parentPose, localOffset),
       visualRect: { halfExtent: m.visualHalf },
@@ -85,16 +107,14 @@ function placeNode(
     return;
   }
   switch (node.kind) {
-    case 'group':       placeGroup(node, parentPose, localOffset, parentId, out, parentChildrenIds); return;
+    case 'group':       placeGroup(node, parentPose, localOffset, parentId, out, parentChildrenIds, focusStates); return;
     case 'tabs': {
       const active = node.tabs.find(t => t.id === node.activeTabId);
-      if (active) placeNode(active.body, parentPose, localOffset, parentId, out, parentChildrenIds);
+      if (active) placeNode(active.body, parentPose, localOffset, parentId, out, parentChildrenIds, focusStates);
       return;
     }
     case 'focus-view': {
-      if (node.focused == null) return;
-      const focused = node.children.find(c => c.id === node.focused);
-      if (focused) placeNode(focused, parentPose, localOffset, parentId, out, parentChildrenIds);
+      placeFocusView(node, parentPose, localOffset, parentId, out, parentChildrenIds, focusStates);
       return;
     }
     case 'panel':
@@ -105,6 +125,50 @@ function placeNode(
   }
 }
 
+function placeFocusView(
+  node: Container & { kind: 'focus-view' },
+  parentPose: Pose,
+  localOffset: Vec2,
+  parentId: string,
+  out: Map<string, LaidOut>,
+  parentChildrenIds: string[],
+  focusStates: FocusStates | undefined,
+): void {
+  const state = focusStates?.get(node.id);
+  const t = state?.t ?? 0;
+  // The focus-view itself never appears in `out` — it is a layout container,
+  // not a hittable surface, and treats its `parentId` the same as `group`
+  // does: passed through to children so they chain to the panel root.
+  if (t <= 0) {
+    // Collapsed → behave as an implicit column of children.
+    placeAsColumn(node.children, parentPose, localOffset, parentId, out, parentChildrenIds, focusStates);
+    return;
+  }
+  // Expanded (or transitioning) → place only the rendered child at center.
+  const renderedId = state?.rendered ?? null;
+  const child = renderedId != null ? node.children.find(c => c.id === renderedId) : undefined;
+  if (!child || !isWidget(child)) return;
+  const natural = measure(child, focusStates);
+  const expandedVisual = halve(node.expandedSize);
+  const expandedHit: Vec2 = {
+    x: Math.max(expandedVisual.x + child.hitPadding.x, HIG_DEFAULTS.minHitHalfExtent.x),
+    y: Math.max(expandedVisual.y + child.hitPadding.y, HIG_DEFAULTS.minHitHalfExtent.y),
+  };
+  out.set(child.id, {
+    pose: composeLocal(parentPose, localOffset),
+    visualRect: { halfExtent: lerpVec(natural.visualHalf, expandedVisual, t) },
+    hitRect:    { halfExtent: lerpVec(natural.hitHalf,    expandedHit,    t) },
+    widget: child,
+    parentId,
+    childrenIds: [],
+  });
+  parentChildrenIds.push(child.id);
+}
+
+function lerpVec(a: Vec2, b: Vec2, t: number): Vec2 {
+  return { x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t };
+}
+
 function placeAsColumn(
   children: Node[],
   parentPose: Pose,
@@ -112,15 +176,16 @@ function placeAsColumn(
   parentId: string,
   out: Map<string, LaidOut>,
   parentChildrenIds: string[],
+  focusStates: FocusStates | undefined,
 ): void {
-  const measured = children.map(measure);
+  const measured = children.map(c => measure(c, focusStates));
   const gap = HIG_DEFAULTS.minNeighborHitGap;
   const totalH = stackExtent(measured, 'y', gap);
   let cursor = totalH / 2;
   for (let i = 0; i < children.length; i++) {
     const m = measured[i];
     const cy = cursor - m.hitHalf.y;
-    placeNode(children[i], parentPose, { x: origin.x, y: origin.y + cy }, parentId, out, parentChildrenIds);
+    placeNode(children[i], parentPose, { x: origin.x, y: origin.y + cy }, parentId, out, parentChildrenIds, focusStates);
     cursor -= m.hitHalf.y * 2 + gap;
   }
 }
@@ -132,9 +197,10 @@ function placeGroup(
   parentId: string,
   out: Map<string, LaidOut>,
   parentChildrenIds: string[],
+  focusStates: FocusStates | undefined,
 ): void {
   const gap = Math.max(g.gap ?? 0, HIG_DEFAULTS.minNeighborHitGap);
-  const measured = g.children.map(measure);
+  const measured = g.children.map(c => measure(c, focusStates));
 
   if (g.layout === 'row') {
     const totalW = stackExtent(measured, 'x', gap);
@@ -142,7 +208,7 @@ function placeGroup(
     for (let i = 0; i < g.children.length; i++) {
       const m = measured[i];
       const cx = cursor + m.hitHalf.x;
-      placeNode(g.children[i], parentPose, { x: groupOrigin.x + cx, y: groupOrigin.y }, parentId, out, parentChildrenIds);
+      placeNode(g.children[i], parentPose, { x: groupOrigin.x + cx, y: groupOrigin.y }, parentId, out, parentChildrenIds, focusStates);
       cursor += m.hitHalf.x * 2 + gap;
     }
     return;
@@ -153,7 +219,7 @@ function placeGroup(
     for (let i = 0; i < g.children.length; i++) {
       const m = measured[i];
       const cy = cursor - m.hitHalf.y;
-      placeNode(g.children[i], parentPose, { x: groupOrigin.x, y: groupOrigin.y + cy }, parentId, out, parentChildrenIds);
+      placeNode(g.children[i], parentPose, { x: groupOrigin.x, y: groupOrigin.y + cy }, parentId, out, parentChildrenIds, focusStates);
       cursor -= m.hitHalf.y * 2 + gap;
     }
     return;
@@ -170,7 +236,7 @@ function placeGroup(
     const c = i % cols;
     const cx = -totalW / 2 + c * (cellW * 2 + gap) + cellW;
     const cy = totalH / 2 - r * (cellH * 2 + gap) - cellH;
-    placeNode(g.children[i], parentPose, { x: groupOrigin.x + cx, y: groupOrigin.y + cy }, parentId, out, parentChildrenIds);
+    placeNode(g.children[i], parentPose, { x: groupOrigin.x + cx, y: groupOrigin.y + cy }, parentId, out, parentChildrenIds, focusStates);
   }
 }
 
@@ -181,7 +247,7 @@ function placeGroup(
 
 interface Measured { hitHalf: Vec2; visualHalf: Vec2 }
 
-function measure(node: Node): Measured {
+function measure(node: Node, focusStates: FocusStates | undefined): Measured {
   if (isWidget(node)) {
     const visualHalf = halve(node.visualSize);
     const hitHalf: Vec2 = {
@@ -195,7 +261,7 @@ function measure(node: Node): Measured {
       return { hitHalf: halve(node.size), visualHalf: halve(node.size) };
     case 'group': {
       const gap = Math.max(node.gap ?? 0, HIG_DEFAULTS.minNeighborHitGap);
-      const m = node.children.map(measure);
+      const m = node.children.map(c => measure(c, focusStates));
       if (node.layout === 'row') {
         const w = stackExtent(m, 'x', gap);
         const h = m.length === 0 ? 0 : Math.max(...m.map(x => x.hitHalf.y * 2));
@@ -216,12 +282,18 @@ function measure(node: Node): Measured {
     }
     case 'tabs': {
       const active = node.tabs.find(t => t.id === node.activeTabId);
-      return active ? measure(active.body) : { hitHalf: { x: 0, y: 0 }, visualHalf: { x: 0, y: 0 } };
+      return active ? measure(active.body, focusStates) : { hitHalf: { x: 0, y: 0 }, visualHalf: { x: 0, y: 0 } };
     }
     case 'focus-view': {
-      if (node.focused == null) return { hitHalf: { x: 0, y: 0 }, visualHalf: { x: 0, y: 0 } };
-      const focused = node.children.find(c => c.id === node.focused);
-      return focused ? measure(focused) : { hitHalf: { x: 0, y: 0 }, visualHalf: { x: 0, y: 0 } };
+      // The focus-view's measured footprint is the column stack of children
+      // regardless of expansion. The expanded child overflows this footprint
+      // by design — its parent (the panel) carries its own fixed size, so
+      // we never need to "reserve" the expanded area in the parent's layout.
+      const gap = HIG_DEFAULTS.minNeighborHitGap;
+      const m = node.children.map(c => measure(c, focusStates));
+      const h = stackExtent(m, 'y', gap);
+      const w = m.length === 0 ? 0 : Math.max(...m.map(x => x.hitHalf.x * 2));
+      return { hitHalf: { x: w / 2, y: h / 2 }, visualHalf: { x: w / 2, y: h / 2 } };
     }
   }
 }

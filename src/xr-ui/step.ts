@@ -24,9 +24,15 @@
 
 import type { AnchorContext, Pose } from './anchors';
 import { quatConj, quatRotateVec } from './anchors';
-import type { Container, Widget, Vec2, ContinuousInteraction } from './widgets';
+import type { Container, Node, Widget, Vec2, ContinuousInteraction } from './widgets';
+import { isWidget } from './widgets';
 import type { Binding, BindingRegistry } from './bindings';
+import type { FocusViewVisualState } from './layout';
 import { layout, hitTestWidgets } from './layout';
+
+// 150ms tween between collapsed (t=0) and fully expanded (t=1) — matches the
+// ticket spec. Tuned by feel; if it lands wrong in headset, tweak here only.
+const FOCUS_TRANSITION_MS = 150;
 
 export type Hand = 'left' | 'right';
 
@@ -63,7 +69,12 @@ export type InteractionState =
       widgetOrientationAtOrigin: [number, number, number, number];
       valueAtOrigin: number;          // binding value snapshot at pinch-start
       interaction: ContinuousInteraction;
-      cancelPending: boolean };
+      cancelPending: boolean;
+      // Id of the focus-view container whose `focused` we set at pinch-start
+      // (null if the widget had no expand-to-focus ancestor). Stored so
+      // drag-end clears the same container we set — the focus-view stays
+      // the single source of truth for "which widget is expanded".
+      focusViewId: string | null };
 
 export type XrUiSideEffect =
   | { kind: 'binding-set';    bindingId: string; value: number | boolean | string }
@@ -87,6 +98,12 @@ export interface RenderCommand {
 export interface XrUiPrev {
   states:  Record<Hand, InteractionState>;
   pinches: Record<Hand, boolean>;       // last frame's hf.pinch.active per hand
+  // Per-focus-view visual tween state, keyed by focus-view container id.
+  // Independent from container.focused (the SoT for "which widget is
+  // expanded"); this map holds only the in-flight visual amplitude and the
+  // pinned `rendered` widget that the collapse tween keeps showing while
+  // it falls from 1 → 0. [LAW:one-source-of-truth]
+  focusTransitions: Map<string, FocusViewVisualState>;
 }
 
 export interface XrUiRegistry {
@@ -107,6 +124,7 @@ export function makeIdlePrev(): XrUiPrev {
   return {
     states:  { left: { kind: 'idle' }, right: { kind: 'idle' } },
     pinches: { left: false, right: false },
+    focusTransitions: new Map(),
   };
 }
 
@@ -118,21 +136,29 @@ export function xrUiStep(
   prev: XrUiPrev,
   ctx: AnchorContext,
   tuning: XrUiTuning,
-  _dtMs: number,
+  dtMs: number,
 ): XrUiStepResult {
   const sideEffects: XrUiSideEffect[] = [];
   const renderList: RenderCommand[] = [];
   const next: XrUiPrev = {
     states:  { left: prev.states.left,  right: prev.states.right  },
     pinches: { left: hands.left.pinch.active, right: hands.right.pinch.active },
+    focusTransitions: prev.focusTransitions, // mutated in place below
   };
 
   const root = registry.activeLayoutId != null ? registry.layouts.get(registry.activeLayoutId) : undefined;
   if (!root) {
     next.states.left = { kind: 'idle' }; next.states.right = { kind: 'idle' };
+    next.focusTransitions = new Map(); // no active panel → no transitions in flight
     return { next, sideEffects, renderList };
   }
-  const laid = layout(root, ctx);
+  // Advance the focus tween for every focus-view in the active panel, BEFORE
+  // layout, so this frame's renderList already reflects the new t. The map
+  // also has any stale entries pruned (focus-views from a swapped layout).
+  // [LAW:dataflow-not-control-flow] tween advancement is unconditional —
+  // empty map / t=0 / no focus all flow through the same arithmetic.
+  advanceFocusTransitions(root, next.focusTransitions, dtMs);
+  const laid = layout(root, ctx, next.focusTransitions);
   if (!laid) {
     next.states.left = { kind: 'idle' }; next.states.right = { kind: 'idle' };
     return { next, sideEffects, renderList };
@@ -151,7 +177,16 @@ export function xrUiStep(
       const id = hf.gazeRay ? hitTestWidgets(laid, hf.gazeRay) : null;
       const laidEntry = id ? laid.get(id) ?? null : null;
       const widget = laidEntry?.widget ?? null;
-      nextState = (widget && id && laidEntry) ? beginInteraction(widget, id, laidEntry.pose, registry.bindings, hf) : { kind: 'idle' };
+      nextState = (widget && id && laidEntry) ? beginInteraction(widget, id, laidEntry.pose, registry.bindings, hf, root) : { kind: 'idle' };
+      // If we entered drag on a widget whose ancestor is a focus-view, switch
+      // that focus-view's `focused` field — the tween toward expanded starts
+      // next frame. [LAW:one-source-of-truth] the field is the only place
+      // this is recorded; the renderer reads the tween via layout, not via
+      // a side channel.
+      if (nextState.kind === 'dragging' && nextState.focusViewId != null) {
+        const fv = findFocusView(root, nextState.focusViewId);
+        if (fv) fv.focused = nextState.widgetId;
+      }
     } else if (!isPinching && wasPinching) {
       // PINCH-END → COMMIT or RELEASE.
       if (prevState.kind === 'pressing' && !prevState.cancelPending) {
@@ -164,6 +199,12 @@ export function xrUiStep(
           const next = Math.max(c.min, Math.min(c.max, c.valueAtOrigin + c.step));
           sideEffects.push({ kind: 'binding-set', bindingId: prevState.bindingId, value: next });
         }
+      }
+      // Clear the focus-view we set at drag-start (if any). The collapse tween
+      // runs on subsequent frames as `focused` is null but t > 0.
+      if (prevState.kind === 'dragging' && prevState.focusViewId != null) {
+        const fv = findFocusView(root, prevState.focusViewId);
+        if (fv) fv.focused = null;
       }
       nextState = { kind: 'idle' };
     } else if (isPinching && wasPinching) {
@@ -242,6 +283,92 @@ function anyState(states: Record<Hand, InteractionState>, fn: (s: InteractionSta
   return fn(states.left) || fn(states.right);
 }
 
+type FocusView = Container & { kind: 'focus-view' };
+
+// Walk the container tree once and call `visit` on every focus-view.
+// Recursion lives in one place (here) so future container kinds with
+// children don't grow a parallel walker. [LAW:locality-or-seam]
+function forEachFocusView(node: Node, visit: (fv: FocusView) => void): void {
+  if (isWidget(node)) return;
+  if (node.kind === 'focus-view') visit(node);
+  switch (node.kind) {
+    case 'panel':
+    case 'group':
+    case 'focus-view':
+      for (const child of node.children) forEachFocusView(child, visit);
+      return;
+    case 'tabs':
+      for (const tab of node.tabs) forEachFocusView(tab.body, visit);
+      return;
+  }
+}
+
+function findFocusView(root: Node, id: string): FocusView | null {
+  let found: FocusView | null = null;
+  forEachFocusView(root, fv => { if (fv.id === id) found = fv; });
+  return found;
+}
+
+// Return the id of the INNERMOST focus-view ancestor that transitively
+// contains `widgetId`, or null. `forEachFocusView` is depth-first and
+// outer-first, so by overwriting `found` on each match we end up with the
+// deepest hit — the focus-view whose `focused` field semantically owns
+// "what's expanded in this region". Nested focus-views aren't used by
+// the clipboard today but will be once categories ship (.16).
+function findFocusViewContaining(root: Node, widgetId: string): string | null {
+  let found: string | null = null;
+  forEachFocusView(root, fv => {
+    if (fv.children.some(child => containsWidget(child, widgetId))) found = fv.id;
+  });
+  return found;
+}
+
+function containsWidget(node: Node, widgetId: string): boolean {
+  if (isWidget(node)) return node.id === widgetId;
+  switch (node.kind) {
+    case 'panel':
+    case 'group':
+    case 'focus-view':
+      return node.children.some(c => containsWidget(c, widgetId));
+    case 'tabs':
+      return node.tabs.some(t => containsWidget(t.body, widgetId));
+  }
+}
+
+// Step every focus-view's tween toward its target (`focused != null` → 1,
+// else → 0). `rendered` is kept pinned to the last focused widget through
+// the collapse tail so the focus-view keeps drawing it on the way down.
+// Stale map entries (focus-views removed from the active panel since last
+// frame) are dropped — the map can never grow unbounded across layout swaps.
+function advanceFocusTransitions(
+  root: Container & { kind: 'panel' },
+  transitions: Map<string, FocusViewVisualState>,
+  dtMs: number,
+): void {
+  const live = new Set<string>();
+  const step = Math.max(0, dtMs) / FOCUS_TRANSITION_MS;
+  forEachFocusView(root, fv => {
+    live.add(fv.id);
+    const prevState = transitions.get(fv.id) ?? { rendered: null, t: 0 };
+    const target = fv.focused != null ? 1 : 0;
+    const dir = target > prevState.t ? 1 : (target < prevState.t ? -1 : 0);
+    const tNext = clamp01(prevState.t + dir * step);
+    // While focused is set, the rendered widget is the focused one (snap on
+    // focus change). While focused becomes null but t > 0, hold the last
+    // rendered id so the collapse tail keeps drawing it. At t === 0 with
+    // no focused, drop the rendered id so siblings come back on next frame.
+    const rendered = fv.focused != null
+      ? fv.focused
+      : (tNext > 0 ? prevState.rendered : null);
+    transitions.set(fv.id, { rendered, t: tNext });
+  });
+  for (const id of transitions.keys()) {
+    if (!live.has(id)) transitions.delete(id);
+  }
+}
+
+function clamp01(v: number): number { return v < 0 ? 0 : v > 1 ? 1 : v; }
+
 // Compute the label text the renderer should rasterize for this widget.
 // Continuous widgets show formatted value (binding.format or fixed-precision);
 // action widgets show the binding's label; toggles show on/off; enum-chips and
@@ -296,6 +423,7 @@ function beginInteraction(
   pose: Pose,
   bindings: BindingRegistry,
   hf: HandFrame,
+  root: Container & { kind: 'panel' },
 ): InteractionState {
   if (widget.kind === 'button' || widget.kind === 'preset-tile') {
     const b = bindings.get(widget.binding);
@@ -320,6 +448,7 @@ function beginInteraction(
   if (widget.kind === 'slider' || widget.kind === 'dial') {
     const b = bindings.get(widget.binding);
     if (!b || b.kind !== 'continuous') return { kind: 'idle' };
+    const focusViewId = findFocusViewContaining(root, widgetId);
     return {
       kind: 'dragging',
       widgetId, bindingId: b.id,
@@ -330,6 +459,7 @@ function beginInteraction(
       valueAtOrigin: b.get(),
       interaction: widget.interaction,
       cancelPending: false,
+      focusViewId,
     };
   }
   // enum-chips, category-tile, readout — not yet wired.
@@ -372,12 +502,16 @@ function computeDragValue(
         return raw * interaction.unitsPerMeter;
       }
       case 'pinch-twist':
-        // Wrist quat delta wiring lands in ticket .14 — for MVP, no twist response.
+        // Wrist quat delta wiring lands in a later ticket — for MVP, no twist response.
         return 0;
       case 'expand-to-focus':
-        // Outer focus mechanic lands in ticket .14; until then the wrapped
-        // slider behaves as its underlying interaction (recursive delegation
-        // beats a silent no-op for a kind that's part of the public union).
+        // Defensive: nothing in the current widget set declares this as its
+        // interaction kind (expand-to-focus is structural — applied via a
+        // focus-view container wrapping a slider/dial whose `interaction`
+        // stays direct-drag / pinch-pull / pinch-twist). Treat as the
+        // underlying interaction so a hand-authored layout can still use it
+        // as a wrapper if it wants. [LAW:dataflow-not-control-flow] value
+        // propagates by recursion, not by an early-return special case.
         return computeInteractionDelta(interaction.underlying);
     }
   };

@@ -67,7 +67,13 @@ export type Container = ContainerCommon & (
   | { kind: 'panel';      anchor: Anchor; size: Vec2; children: Node[]; visibility?: VisibilityGate }
   | { kind: 'group';      layout: 'row' | 'column' | 'grid'; gap?: number; columns?: number; children: Node[] }
   | { kind: 'tabs';       tabs: Array<{ id: string; label: string; body: Node }>; activeTabId: string }
-  | { kind: 'focus-view'; focused: string | null; children: Node[] }
+  // expand-to-focus host: when `focused` is set, that child renders at the
+  // focus-view center with its visual / hit half-extents tweened toward
+  // halve(expandedSize). [LAW:one-source-of-truth] `focused` is the only
+  // place that records "which child is currently expanded" — the tween
+  // amplitude lives separately in XrUiPrev.focusTransitions (visual state,
+  // not semantic state) keyed by this container's id.
+  | { kind: 'focus-view'; focused: string | null; expandedSize: Vec2; children: Node[] }
 );
 
 export type Node = Container | Widget;
