@@ -214,6 +214,11 @@ function ensureSimulation() {
 
 function resetCurrentSim() {
   const mode = state.mode;
+  // [LAW:single-enforcer] Destroying the sim invalidates every debug target
+  // (skip / breakpoint / manual-step) since they index into the old simStep
+  // space. Clear them here so any reset path — Reset button, preset apply,
+  // requiresReset slider — gets the same lifecycle guarantee.
+  uiOrchestrator.clearDebugState();
   if (!simulationRegistry) initializeSimulationRegistry();
   simulationRegistry?.reset(mode);
   syncSimulationCache(mode);
