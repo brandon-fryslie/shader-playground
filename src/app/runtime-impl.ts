@@ -285,6 +285,7 @@ export async function startAppRuntimeImpl() {
     cancelDebugMovement: () => uiOrchestrator.cancelDebugMovement(),
     clearDebugState: () => uiOrchestrator.clearDebugState(),
     ensureSimulation,
+    hasPendingDebugMovement: () => uiOrchestrator.hasPendingDebugMovement(),
     modeParams,
     presets: catalogPresets,
     reflectPaused: () => uiOrchestrator.syncPauseButtons(),
