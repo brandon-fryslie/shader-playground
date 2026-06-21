@@ -8,11 +8,18 @@
 // plus one tab per category showing that category's controls (sliders
 // and a back tile that points at the root tab).
 //
+// Persistent preset strip (ticket .17): a sibling `group kind: 'row'`
+// of preset-tile widgets sits next to the tabs container in the panel's
+// children. The strip is placed at the bottom by the panel's implicit
+// column stacking — the tabs render first, the strip second — so it is
+// visible across every category tab without the tabs container needing
+// to know about it.
+//
 // [LAW:one-source-of-truth] The active layout is a single Container tree
-// produced by this factory. Subsequent panel features (.17 preset strip,
-// .18 palm-visibility) extend this tree rather than minting a parallel
-// layout. Within the tree, the active tab is the tabs container's
-// activeTabId — no other field records "which category am I on".
+// produced by this factory. Subsequent panel features (.18 palm-visibility)
+// extend this tree rather than minting a parallel layout. Within the tree,
+// the active tab is the tabs container's activeTabId — no other field
+// records "which category am I on".
 // [LAW:dataflow-not-control-flow] The held hand is data — the same factory
 // produces a left- or right-hand clipboard; there is no per-hand branch.
 // The tab list is a data array; adding/removing a category means appending
@@ -53,6 +60,16 @@ const BACK_VISUAL = { x: 0.17, y: 0.025 };
 const PRESET_TILE_VISUAL = { x: 0.08, y: 0.06 };
 
 const ROOT_TAB_ID = 'root';
+
+// Curated set surfaced in the persistent preset strip. Distinct from the
+// Presets tab's binding list because the strip is a quick-access shelf —
+// it stays short by design. Growing the Presets tab to all 7 physics
+// presets does not grow this list. [LAW:no-mode-explosion]
+const PRESET_STRIP_BINDINGS: string[] = [
+  'preset.physics.Default',
+  'preset.physics.Spiral Galaxy',
+  'preset.physics.Cosmic Web',
+];
 
 interface Category {
   id: string;
@@ -158,13 +175,26 @@ function backTile(fromCategoryId: string): Widget {
   };
 }
 
-function presetTile(category: Category, bindingId: string): Widget {
+// `prefix` namespaces the widget id so multiple preset-tile call sites
+// (the Presets tab, the persistent strip) can share this factory without
+// id collisions in the laid-out map. [LAW:one-source-of-truth]
+function presetTile(prefix: string, bindingId: string): Widget {
   return {
-    id: `clipboard-${category.id}-${slugify(bindingId)}`,
+    id: `${prefix}-${slugify(bindingId)}`,
     kind: 'preset-tile',
     binding: bindingId,
     visualSize: PRESET_TILE_VISUAL,
     hitPadding: HIG_DEFAULTS.defaultHitPadding,
+  };
+}
+
+function buildPresetStrip(): Container {
+  return {
+    id: 'clipboard-preset-strip',
+    kind: 'group',
+    layout: 'row',
+    gap: HIG_DEFAULTS.minNeighborHitGap,
+    children: PRESET_STRIP_BINDINGS.map(b => presetTile('clipboard-strip', b)),
   };
 }
 
@@ -190,7 +220,7 @@ function buildCategoryBody(category: Category): Container {
         layout: 'grid',
         columns: 2,
         gap: HIG_DEFAULTS.minNeighborHitGap,
-        children: category.body.bindings.map(b => presetTile(category, b)),
+        children: category.body.bindings.map(b => presetTile(`clipboard-${category.id}`, b)),
       } satisfies Container;
   return {
     id: `clipboard-tab-${category.id}`,
@@ -242,6 +272,6 @@ export function createClipboardLayout(hand: Hand): Container & { kind: 'panel' }
       },
     },
     size: PANEL_SIZE,
-    children: [tabs],
+    children: [tabs, buildPresetStrip()],
   };
 }
