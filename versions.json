@@ -2,6 +2,28 @@
   "schema": 2,
   "versions": [
     {
+      "version": "pr-22",
+      "ref": "refs/pull/22/merge",
+      "sha": "81d7052a61688cefb62f62fce6421071b9d7497e",
+      "timestamp": "2026-06-21T03:10:02.115Z",
+      "commits": [
+        {
+          "sha": "81d7052a61688cefb62f62fce6421071b9d7497e",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-06-20T21:09:42-06:00",
+          "message": "Merge 3b14dd8ac21e3570ddec9c82948970a91ab613c9 into db3623ecee8820221e822a6ed4bccdbf3b57f722\n"
+        },
+        {
+          "sha": "3b14dd8ac21e3570ddec9c82948970a91ab613c9",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-06-20T21:09:10-06:00",
+          "message": "Collapse residual render and XR coordination glue out of runtime-impl\n\nruntime-impl.ts: 526 → 395 lines (−131). Final sibling in the\nruntime-decomposition epic. What's left in runtime-impl is composition:\nbuild subsystems, hand them to factories, wire XR. No more named module-\nlevel adapter functions that simply forward to a subsystem method.\n\nConcretely:\n- Drop 8 attractorSystem forwarders (currentSimStep, currentTimeDirection,\n  attractorStrength, pruneAttractors, createAttractor, moveAttractor,\n  releaseAttractor, tickMarkers). Hoist attractorSystem creation to the\n  start of startAppRuntimeImpl so gpu-context deps can bind methods by\n  reference. [LAW:no-ambient-temporal-coupling]\n- Drop 4 pointerSystem forwarders (worldToFluidUV, intersectRayWithPlane,\n  closestPointOnRayToOrigin, setSimulationInteractionInactive). Hoist\n  pointerSystem too, pass methods by reference to mobileInput and\n  xrInputSystem deps.\n- Drop 7 postFx adapters (ensureHdrTargets, getCurrentSceneView,\n  getColorAttachment, getDepthAttachment, getRenderViewport,\n  destroyDepthRef, syncRenderConfig) and 4 frameRuntime adapters\n  (tsWrites, runBloomChain, runComposite, updateStats). Where a small\n  transform is needed (trailPersistence + clearColor for color attachment,\n  xrDepthOverride for depth attachment), bind as inline arrow at the\n  factory context construction site.\n- Drop dead seam fields: simulations/shared.ts no longer exposes\n  getRenderViewport (identity) or destroyDepthRef (empty body); 6 sim\n  files updated. [LAW:no-mode-explosion]\n- Push gas shader sources into the canonical gpu/shaders.ts registry as\n  display-only entries, eliminating the GAS_SHADER_SOURCES merge wrapper.\n  [LAW:one-source-of-truth]\n- Replace xr/runtime.ts syncRenderConfig (whose body was just\n  markNeedsClear) with markPostFxNeedsClear at the two call sites; drop\n  syncRenderConfig and canvasFormat from the deps interface. The old\n  signature was a representational lie. [FRAMING:representation]\n- Delete src/app/legacy-runtime.ts. Zero importers since the runtime\n  consolidation; arch-check and main-size allowlists updated.\n- Inline toggleXR into the uiOrchestrator construction site.\n"
+        }
+      ]
+    },
+    {
       "version": "r98-db3623e",
       "ref": "refs/heads/master",
       "sha": "db3623ecee8820221e822a6ed4bccdbf3b57f722",
