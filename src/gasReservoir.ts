@@ -3,13 +3,6 @@ import SHADER_GAS_PRESSURE_INTERPOLATE from './shaders/gas.pressure_interpolate.
 import SHADER_GAS_COMPUTE from './shaders/gas.compute.wgsl?raw';
 import SHADER_GAS_RENDER from './shaders/gas.render.wgsl?raw';
 
-export const GAS_SHADER_SOURCES = {
-  'Gas χ': SHADER_GAS_CHI,
-  'Gas Pressure': SHADER_GAS_PRESSURE_INTERPOLATE,
-  'Gas Compute': SHADER_GAS_COMPUTE,
-  'Gas Render': SHADER_GAS_RENDER,
-};
-
 type ShaderFactory = (label: string, code: string) => GPUShaderModule;
 
 export interface GasReservoirArgs {

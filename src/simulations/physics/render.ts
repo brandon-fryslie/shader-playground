@@ -23,7 +23,6 @@ interface PhysicsRenderServiceArgs {
   getCurrentSceneView(): GPUTextureView;
   getDefaultAspect(): number;
   getDepthAttachment(depthRef: DepthRef, viewport: number[] | null): GPURenderPassDepthStencilAttachment;
-  getRenderViewport(viewport: number[] | null): number[] | null;
   getSimStep(): number;
   getXrDepthOverride(): GPUTextureView | null;
   markersPerAttractor: number;
@@ -73,7 +72,6 @@ export function createPhysicsRenderService(
     getCurrentSceneView,
     getDefaultAspect,
     getDepthAttachment,
-    getRenderViewport,
     getSimStep,
     getXrDepthOverride,
     markersPerAttractor,
@@ -158,7 +156,7 @@ export function createPhysicsRenderService(
         ...(timestampWrites.starsRender ? { timestampWrites: timestampWrites.starsRender } : {}),
       });
 
-      const renderViewport = getRenderViewport(viewport);
+      const renderViewport = viewport;
       if (renderViewport) {
         pass.setViewport(renderViewport[0], renderViewport[1], renderViewport[2], renderViewport[3], 0, 1);
       }

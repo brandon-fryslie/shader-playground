@@ -13,7 +13,6 @@ type ShaderFactory = (label: string, source: string) => GPUShaderModule;
 
 type PhysicsSimulationDependencies = SimulationFactoryContext & {
   createShaderModuleChecked: ShaderFactory;
-  destroyDepthRef(depthRef: DepthRef): void;
   getAttractorStrength(attractor: Attractor, simStep: number, ceiling: number): number;
   getCameraUniformData(aspect: number): BufferSource;
   getColorAttachment(
@@ -22,7 +21,6 @@ type PhysicsSimulationDependencies = SimulationFactoryContext & {
     viewport: number[] | null,
   ): GPURenderPassColorAttachment;
   getDepthAttachment(depthRef: DepthRef, viewport: number[] | null): GPURenderPassDepthStencilAttachment;
-  getRenderViewport(viewport: number[] | null): number[] | null;
   postFxDepthView(): GPUTextureView;
   renderGrid(pass: GPURenderPassEncoder, aspect: number, viewIndex: number): void;
   state: AppState;
@@ -161,7 +159,6 @@ export function createPhysicsSimulation(
     getCurrentSceneView: deps.getCurrentSceneView,
     getDefaultAspect: deps.getDefaultAspect,
     getDepthAttachment: deps.getDepthAttachment,
-    getRenderViewport: deps.getRenderViewport,
     getSimStep: () => physicsStep.getSimStep(),
     getXrDepthOverride: deps.getXrDepthOverride,
     markersPerAttractor: deps.markersPerAttractor,
@@ -272,7 +269,6 @@ export function createPhysicsSimulation(
       physicsStats.destroy();
       diagStaging.destroy();
       particleMesh.destroy();
-      deps.destroyDepthRef(depthRef);
     },
     pmDensityU32,
     pmDensityF32,

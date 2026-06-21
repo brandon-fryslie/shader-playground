@@ -228,7 +228,7 @@ export function createReactionSimulation(deps: SimulationFactoryContext): Simula
         depthStencilAttachment: deps.getDepthAttachment(depthRef, viewport),
       });
 
-      const renderViewport = deps.getRenderViewport(viewport);
+      const renderViewport = viewport;
       if (renderViewport) {
         pass.setViewport(renderViewport[0], renderViewport[1], renderViewport[2], renderViewport[3], 0, 1);
       }
@@ -250,7 +250,6 @@ export function createReactionSimulation(deps: SimulationFactoryContext): Simula
       paramsBuffer.destroy();
       cameraBuffer.destroy();
       renderParamsBuffer.destroy();
-      deps.destroyDepthRef(depthRef);
     },
   };
 }

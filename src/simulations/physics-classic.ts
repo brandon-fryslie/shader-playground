@@ -208,7 +208,7 @@ export function createPhysicsClassicSimulation(deps: SimulationFactoryContext): 
         depthStencilAttachment: deps.getDepthAttachment(depthRef, viewport),
       });
 
-      const renderViewport = deps.getRenderViewport(viewport);
+      const renderViewport = viewport;
       if (renderViewport) {
         pass.setViewport(renderViewport[0], renderViewport[1], renderViewport[2], renderViewport[3], 0, 1);
       }
@@ -230,7 +230,6 @@ export function createPhysicsClassicSimulation(deps: SimulationFactoryContext): 
       paramsBuffer.destroy();
       attractorBuffer.destroy();
       cameraBuffer.destroy();
-      deps.destroyDepthRef(depthRef);
     },
   };
 }

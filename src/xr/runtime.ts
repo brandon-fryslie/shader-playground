@@ -14,7 +14,6 @@ export interface XrRuntime {
 interface XrRuntimeDeps {
   cameraStride: number;
   cameraSystem: CameraSystem;
-  canvasFormat(): GPUTextureFormat;
   currentSimStep(): number;
   currentTimeDirection(): number;
   device: GPUDevice;
@@ -49,7 +48,6 @@ interface XrRuntimeDeps {
   setCurrentPhase(phase: string): void;
   setHandTrackingAvailable(active: boolean): void;
   state: AppState;
-  syncRenderConfig(nextFormat: GPUTextureFormat, nextSampleCount: number): void;
   tickFrameStats(time: DOMHighResTimeStamp): { fpsUpdated: boolean; frameDeltaMs: number };
   tickMarkers(dtSeconds: number): void;
   uiRegistry: XrUiRegistry;
@@ -248,7 +246,7 @@ export function createXrRuntime(deps: XrRuntimeDeps): XrRuntime {
         const preferredFormat = xrBinding.getPreferredColorFormat();
         const scaleFactor = xrBinding.nativeProjectionScaleFactor;
         deps.logInfo('xr', 'projection preferences', { preferredFormat, nativeProjectionScaleFactor: scaleFactor });
-        deps.syncRenderConfig(preferredFormat, 1);
+        deps.markPostFxNeedsClear();
 
         const layerConfigs: XRGPUProjectionLayerInit[] = [
           { colorFormat: preferredFormat, depthStencilFormat: 'depth24plus', scaleFactor, textureType: 'texture-array' },
@@ -380,7 +378,7 @@ export function createXrRuntime(deps: XrRuntimeDeps): XrRuntime {
           deps.state.xrEnabled = false;
           xrFrameCount = 0;
           deps.setCurrentPhase('desktop');
-          deps.syncRenderConfig(deps.canvasFormat(), 1);
+          deps.markPostFxNeedsClear();
           deps.resetInputState();
           btn.textContent = 'Enter VR';
           deps.requestDesktopFrame();

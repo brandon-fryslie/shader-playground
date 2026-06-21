@@ -1,7 +1,6 @@
 import '../../styles/main.css';
-import type { SimMode, Simulation, AppState, DepthRef } from '../types';
+import type { SimMode, Simulation, AppState } from '../types';
 import { bindingRegistry } from '../xr-ui/bindings';
-import { GAS_SHADER_SOURCES } from '../gasReservoir';
 import { DEFAULTS as catalogDefaults, PRESETS as catalogPresets, PARAM_DEFS as catalogParamDefs, COLOR_THEMES as catalogColorThemes, DEFAULT_THEME as catalogDefaultTheme, THEME_FADE_MS as catalogThemeFadeMs, DEFAULT_CLEAR_COLOR as catalogDefaultClearColor, SHAPE_IDS as catalogShapeIds, SHAPE_PARAMS as catalogShapeParams, FX_PARAM_DEFS as catalogFxParamDefs, MODE_TAB_LABELS as catalogModeTabLabels } from './catalog';
 import { createAppActions, type AppActions } from './actions';
 import { createGpuContext, type GpuContext, type GpuContextDeps } from './gpu-context';
@@ -13,13 +12,12 @@ import { createSimulationFactories } from '../simulations/factories';
 import { isPhysicsSimulation } from '../simulations/types';
 import { createSimulationRegistry, type SimulationRegistry } from '../simulations/registry';
 import type { SimulationFactoryContext } from '../simulations/shared';
-import { getShaderSources as getCatalogShaderSources, applyShaderEdit as applyCatalogShaderEdit, resetShaderEdit as resetCatalogShaderEdit } from '../gpu/shaders';
-import type { GpuTimingBucket } from '../gpu/timestamps';
+import { getShaderSources, applyShaderEdit as applyCatalogShaderEdit, resetShaderEdit as resetCatalogShaderEdit } from '../gpu/shaders';
 import { createDiagnosticsLogger } from '../diagnostics/logging';
 import { metrics } from '../metrics/bus';
 import { createAttractorSystem, type AttractorSystem, ATTRACTOR_MAX, MARKERS_PER_ATTRACTOR, PHYSICS_BASE_DT } from '../input/attractors';
 import { createPointerSystem, type PointerSystem } from '../input/pointer';
-import { createMobileInput, type MobileInput } from '../input/mobile';
+import { createMobileInput } from '../input/mobile';
 import { createGridRenderer, type GridRenderer } from '../render/grid';
 import { createXrInputSystem, type XrInputSystem } from '../xr/input';
 import { createXrRuntime, type XrRuntime } from '../xr/runtime';
@@ -51,38 +49,7 @@ function modeParams(mode: SimMode): Record<string, number | string | boolean> {
 }
 
 let attractorSystem!: AttractorSystem;
-
-function currentSimStep(): number {
-  return attractorSystem.currentSimStep();
-}
-
-function currentTimeDirection(): number {
-  return attractorSystem.currentTimeDirection();
-}
-
-function attractorStrength(attractor: Parameters<AttractorSystem['attractorStrength']>[0], currentStep: number, ceiling: number): number {
-  return attractorSystem.attractorStrength(attractor, currentStep, ceiling);
-}
-
-function pruneAttractors(currentStep: number): void {
-  attractorSystem.prune(currentStep);
-}
-
-function createAttractor(pointerId: number, pos: number[]): void {
-  attractorSystem.create(pointerId, pos);
-}
-
-function moveAttractor(pointerId: number, pos: number[]): void {
-  attractorSystem.move(pointerId, pos);
-}
-
-function releaseAttractor(pointerId: number): void {
-  attractorSystem.release(pointerId);
-}
-
-function tickMarkers(dt: number): void {
-  attractorSystem.tickMarkers(dt);
-}
+let pointerSystem!: PointerSystem;
 
 const FLUID_GRID_RES = 96; // tessellation resolution for 3D fluid mesh
 // [LAW:one-source-of-truth] Fluid world size is declared once so rendering and interaction use identical bounds.
@@ -98,61 +65,28 @@ const CAMERA_STRIDE = 256; // >= CAMERA_SIZE, multiple of minUniformBufferOffset
 let xrRuntime: XrRuntime | null = null;
 let xrInputSystem!: XrInputSystem;
 
-function ensureHdrTargets(width: number, height: number): void {
-  gpuContext.postFx.ensureHdrTargets(width, height);
-}
-
-function getCurrentSceneView(): GPUTextureView {
-  return gpuContext.postFx.getCurrentSceneView();
-}
-
-function getColorAttachment(
-  simDepthRef: DepthRef,
-  resolveTarget: GPUTextureView,
-  viewport: number[] | null,
-): GPURenderPassColorAttachment {
-  return gpuContext.postFx.getColorAttachment(simDepthRef, resolveTarget, viewport, state.fx.trailPersistence, catalogDefaultClearColor);
-}
-
-function getDepthAttachment(simDepthRef: DepthRef, viewport: number[] | null): GPURenderPassDepthStencilAttachment {
-  return gpuContext.postFx.getDepthAttachment(simDepthRef, viewport, xrRuntime?.getDepthOverride() ?? null);
-}
-
-function getRenderViewport(viewport: number[] | null): number[] | null {
-  return viewport;
-}
-
-function destroyDepthRef(_depthRef: DepthRef) {
-  // Depth and color targets are now shared/global; nothing per-sim to destroy.
-}
-
 function getCameraUniformData(aspect: number) {
   return gpuContext.cameraSystem.getUniformData(aspect, uiOrchestrator.getThemeColors(), state.mouse);
 }
 
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// SECTION 4: WEBGPU INITIALIZATION
-// ═══════════════════════════════════════════════════════════════════════════════
-
 function createGpuContextDeps(): GpuContextDeps {
   return {
     createShaderModuleChecked: createShaderModuleCheckedForDevice,
-    currentSimStep,
-    currentTimeDirection,
+    currentSimStep: attractorSystem.currentSimStep,
+    currentTimeDirection: attractorSystem.currentTimeDirection,
     dropSimulationIfCurrent,
     getCanvasContainer: () => document.getElementById('canvas-container')!,
     getCurrentSimulation: () => simulations[state.mode],
     getDefaultClearColor: () => catalogDefaultClearColor,
     getThemeColors: () => uiOrchestrator.getThemeColors(),
     logError,
-    pruneAttractors,
+    pruneAttractors: attractorSystem.prune,
     refreshThemeColors: (now) => uiOrchestrator.refreshThemeColors(now),
     restoreAfterDeviceLoss,
     runDebugCompute: (sim, encoder) => uiOrchestrator.runDebugCompute(sim, encoder),
     showSimError,
     state,
-    tickMarkers,
+    tickMarkers: attractorSystem.tickMarkers,
     updateAdaptiveChunk: (deltaMs) => uiOrchestrator.updateAdaptiveChunk(deltaMs),
     updateDebugPanel: () => uiOrchestrator.updateDebugPanel(),
   };
@@ -170,51 +104,6 @@ async function restoreAfterDeviceLoss(): Promise<void> {
 function getActivePhysicsSimulation() {
   const sim = simulations['physics'];
   return isPhysicsSimulation(sim) ? sim : null;
-}
-
-function initializeRuntimeServices(): void {
-  attractorSystem = createAttractorSystem({
-    getCurrentPhysicsStep: () => getActivePhysicsSimulation()?.getSimStep() ?? 0,
-    getCurrentTimeDirection: () => getActivePhysicsSimulation()?.getTimeDirection() ?? 1,
-    getThemeColors: () => uiOrchestrator.getThemeColors(),
-    state,
-  });
-  pointerSystem = createPointerSystem({
-    fluidWorldSize: FLUID_WORLD_SIZE,
-    getCanvas: () => gpuContext.canvas,
-    onCreateAttractor: createAttractor,
-    onMoveAttractor: moveAttractor,
-    onReleaseAttractor: releaseAttractor,
-    state,
-  });
-  mobileInput = createMobileInput({
-    actions: appActions,
-    applySimulationInteraction: (pointerId, mx, my, isMove) => pointerSystem.applySimulationInteraction(pointerId, mx, my, isMove),
-    getCanvas: () => gpuContext.canvas,
-    modeTabLabels: catalogModeTabLabels,
-    releasePointerInteraction: (pointerId) => pointerSystem.releasePointerInteraction(pointerId),
-    setSimulationInteractionInactive,
-    state,
-    storageKey,
-  });
-  xrInputSystem = createXrInputSystem({
-    bindings: bindingRegistry,
-    closestPointOnRayToOrigin,
-    createAttractor,
-    intersectRayWithPlane,
-    metrics,
-    moveAttractor,
-    releaseAttractor,
-    setSimulationInteractionInactive,
-    state,
-    worldToFluidUV,
-  });
-}
-
-function syncRenderConfig(_nextFormat: GPUTextureFormat, _nextSampleCount: number) {
-  // [LAW:one-source-of-truth] All sims always render into HDR (rgba16float). Composite output format
-  // is handled per-call by ensureCompositePipeline(); this function no longer needs to rebuild anything.
-  gpuContext.postFx.markNeedsClear();
 }
 
 
@@ -263,6 +152,7 @@ function dropSimulationIfCurrent(mode: SimMode, expected: Simulation): void {
 function createSimulationFactoryContext(): SimulationFactoryContext {
   // [LAW:single-enforcer] Runtime-to-simulation translation happens once at
   // this boundary, producing the one canonical capability shape every factory consumes.
+  const postFx = gpuContext.postFx;
   return {
     attractorMax: ATTRACTOR_MAX,
     baseDt: PHYSICS_BASE_DT,
@@ -270,28 +160,28 @@ function createSimulationFactoryContext(): SimulationFactoryContext {
     cameraStride: CAMERA_STRIDE,
     clearColor: catalogDefaultClearColor,
     createShaderModuleChecked,
-    destroyDepthRef,
     device: gpuContext.device,
     fluidGridResolution: FLUID_GRID_RES,
     fluidWorldSize: FLUID_WORLD_SIZE,
-    getAttractorStrength: attractorStrength,
+    getAttractorStrength: attractorSystem.attractorStrength,
     getCameraUniformData,
-    getColorAttachment,
-    getCurrentSceneView,
+    getColorAttachment: (depthRef, resolveTarget, viewport) =>
+      postFx.getColorAttachment(depthRef, resolveTarget, viewport, state.fx.trailPersistence, catalogDefaultClearColor),
+    getCurrentSceneView: () => postFx.getCurrentSceneView(),
     getDefaultAspect: () => gpuContext.canvas.width / gpuContext.canvas.height,
-    getDepthAttachment,
-    getRenderViewport,
+    getDepthAttachment: (depthRef, viewport) =>
+      postFx.getDepthAttachment(depthRef, viewport, xrRuntime?.getDepthOverride() ?? null),
     getXrDepthOverride: () => xrRuntime?.getDepthOverride() ?? null,
     markersPerAttractor: MARKERS_PER_ATTRACTOR,
-    nullColorView: gpuContext.postFx.getNullColorView(),
-    nullDepthView: gpuContext.postFx.getNullDepthView(),
-    postFxDepthView: () => gpuContext.postFx.getDepthView(),
+    nullColorView: postFx.getNullColorView(),
+    nullDepthView: postFx.getNullDepthView(),
+    postFxDepthView: () => postFx.getDepthView(),
     renderGrid,
     renderSampleCount: gpuContext.renderSampleCount,
     renderTargetFormat: gpuContext.renderTargetFormat,
     shapeIds: catalogShapeIds,
     state,
-    tsWrites,
+    tsWrites: (bucket) => gpuContext.frameRuntime.tsWrites(bucket),
   };
 }
 
@@ -307,55 +197,13 @@ function initializeSimulationRegistry(): void {
 }
 
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// SECTION 6: INPUT POINTERS
-// ═══════════════════════════════════════════════════════════════════════════════
-// UI subsystems (controls, theme, prompt, shader panel, debug panel, XR record
-// button, XR enter button, time-reverse keybindings) all live behind
-// ui-orchestrator.ts; the runtime only routes per-frame hooks through it.
-
-let pointerSystem!: PointerSystem;
-let mobileInput!: MobileInput;
-
-function worldToFluidUV(worldPoint: number[]): number[] | null {
-  return pointerSystem.worldToFluidUV(worldPoint);
-}
-
-function intersectRayWithPlane(origin: number[], dir: number[], planeY: number): number[] | null {
-  return pointerSystem.intersectRayWithPlane(origin, dir, planeY);
-}
-
-function closestPointOnRayToOrigin(origin: number[], dir: number[]): number[] {
-  return pointerSystem.closestPointOnRayToOrigin(origin, dir);
-}
-
-function setSimulationInteractionInactive(): void {
-  pointerSystem.setSimulationInteractionInactive();
-}
-
 const mobileQuery = matchMedia('(max-width: 768px)');
 let isMobile = mobileQuery.matches;
-
-// Maps simulation mode → named shader sources
-function getShaderSources(mode: SimMode): Record<string, string> {
-  if (mode === 'physics') {
-    return { ...getCatalogShaderSources(mode), ...GAS_SHADER_SOURCES };
-  }
-  return getCatalogShaderSources(mode);
-}
-
-async function toggleXR() {
-  await xrRuntime?.toggle();
-}
 
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // SECTION 9: RENDER LOOP & ENTRY POINT
 // ═══════════════════════════════════════════════════════════════════════════════
-
-function tsWrites(bucket: GpuTimingBucket) {
-  return gpuContext.frameRuntime.tsWrites(bucket);
-}
 
 function ensureSimulation() {
   const mode = state.mode;
@@ -371,25 +219,25 @@ function resetCurrentSim() {
   syncSimulationCache(mode);
 }
 
-function updateStats() {
-  gpuContext.frameRuntime.updateStats();
-}
-
-function runBloomChain(encoder: GPUCommandEncoder, timingBucket?: GpuTimingBucket) {
-  gpuContext.frameRuntime.runBloomChain(encoder, timingBucket);
-}
-
-function runComposite(
-  encoder: GPUCommandEncoder,
-  finalView: GPUTextureView,
-  finalFormat: GPUTextureFormat,
-  viewport: number[] | null = null,
-  timingBucket?: GpuTimingBucket
-) {
-  gpuContext.frameRuntime.runComposite(encoder, finalView, finalFormat, viewport, timingBucket);
-}
-
 export async function startAppRuntimeImpl() {
+  // [LAW:no-ambient-temporal-coupling] Input subsystems are hoisted before GPU
+  // boot so their method refs (used by gpu-context deps) bind to live functions,
+  // not to module-level holes filled later.
+  attractorSystem = createAttractorSystem({
+    getCurrentPhysicsStep: () => getActivePhysicsSimulation()?.getSimStep() ?? 0,
+    getCurrentTimeDirection: () => getActivePhysicsSimulation()?.getTimeDirection() ?? 1,
+    getThemeColors: () => uiOrchestrator.getThemeColors(),
+    state,
+  });
+  pointerSystem = createPointerSystem({
+    fluidWorldSize: FLUID_WORLD_SIZE,
+    getCanvas: () => gpuContext.canvas,
+    onCreateAttractor: attractorSystem.create,
+    onMoveAttractor: attractorSystem.move,
+    onReleaseAttractor: attractorSystem.release,
+    state,
+  });
+
   const bootedContext = await createGpuContext(createGpuContextDeps());
   if (!bootedContext) return;
   gpuContext = bootedContext;
@@ -416,7 +264,7 @@ export async function startAppRuntimeImpl() {
     getPhysicsSimulation: getActivePhysicsSimulation,
     getActiveSimulation: () => simulations[state.mode],
     getXrSession: () => xrRuntime?.getSession() ?? null,
-    toggleXr: toggleXR,
+    toggleXr: async () => { await xrRuntime?.toggle(); },
     setXrDebugLogging: (on) => xrInputSystem.setDebugLogging(on),
     createShaderModule: (code) => gpuContext.device.createShaderModule({ code }),
     applyShaderEdit: applyCatalogShaderEdit,
@@ -441,19 +289,40 @@ export async function startAppRuntimeImpl() {
     syncUi: () => uiOrchestrator.syncUiFromState(),
     updatePrompt: () => uiOrchestrator.updatePrompt(),
     updateShaderPanel: () => uiOrchestrator.updateShaderPanel(),
-    updateStats,
+    updateStats: () => gpuContext.frameRuntime.updateStats(),
   });
 
-  initializeRuntimeServices();
+  const mobileInput = createMobileInput({
+    actions: appActions,
+    applySimulationInteraction: (pointerId, mx, my, isMove) => pointerSystem.applySimulationInteraction(pointerId, mx, my, isMove),
+    getCanvas: () => gpuContext.canvas,
+    modeTabLabels: catalogModeTabLabels,
+    releasePointerInteraction: (pointerId) => pointerSystem.releasePointerInteraction(pointerId),
+    setSimulationInteractionInactive: pointerSystem.setSimulationInteractionInactive,
+    state,
+    storageKey,
+  });
+  xrInputSystem = createXrInputSystem({
+    bindings: bindingRegistry,
+    closestPointOnRayToOrigin: pointerSystem.closestPointOnRayToOrigin,
+    createAttractor: attractorSystem.create,
+    intersectRayWithPlane: pointerSystem.intersectRayWithPlane,
+    metrics,
+    moveAttractor: attractorSystem.move,
+    releaseAttractor: attractorSystem.release,
+    setSimulationInteractionInactive: pointerSystem.setSimulationInteractionInactive,
+    state,
+    worldToFluidUV: pointerSystem.worldToFluidUV,
+  });
+
   initializeSimulationRegistry();
   xrRuntime = createXrRuntime({
     cameraStride: CAMERA_STRIDE,
     cameraSystem: gpuContext.cameraSystem,
-    canvasFormat: () => gpuContext.canvasFormat,
-    currentSimStep,
-    currentTimeDirection,
+    currentSimStep: attractorSystem.currentSimStep,
+    currentTimeDirection: attractorSystem.currentTimeDirection,
     device: gpuContext.device,
-    ensureHdrTargets,
+    ensureHdrTargets: gpuContext.postFx.ensureHdrTargets,
     getCameraUniformData,
     getCurrentPhase: () => currentGpuPhase,
     getCurrentSimulation: () => simulations[state.mode],
@@ -468,9 +337,10 @@ export async function startAppRuntimeImpl() {
     logInfo,
     markPostFxNeedsClear: () => gpuContext.postFx.markNeedsClear(),
     onSelectEnd: (source) => xrInputSystem.onSelectEnd(source),
-    postFxRunBloomChain: runBloomChain,
-    postFxRunComposite: runComposite,
-    pruneAttractors,
+    postFxRunBloomChain: (encoder) => gpuContext.frameRuntime.runBloomChain(encoder),
+    postFxRunComposite: (encoder, finalView, finalFormat, viewport) =>
+      gpuContext.frameRuntime.runComposite(encoder, finalView, finalFormat, viewport),
+    pruneAttractors: attractorSystem.prune,
     queuePendingSource: (source) => { xrInputSystem.queuePendingSource(source); },
     refreshThemeColors: (now) => uiOrchestrator.refreshThemeColors(now),
     requestDesktopFrame: () => gpuContext.frameRuntime.requestFrame(),
@@ -479,11 +349,10 @@ export async function startAppRuntimeImpl() {
     setCurrentPhase: (phase) => { currentGpuPhase = phase; },
     setHandTrackingAvailable: () => {},
     state,
-    syncRenderConfig,
     tickFrameStats: (time) => gpuContext.frameRuntime.tickFrameStats(time),
-    tickMarkers,
+    tickMarkers: attractorSystem.tickMarkers,
     uiRegistry: xrInputSystem.getUiRegistry(),
-    updateStats,
+    updateStats: () => gpuContext.frameRuntime.updateStats(),
   });
 
   // Mobile detection — gates touch controls, bottom sheet, and performance defaults
