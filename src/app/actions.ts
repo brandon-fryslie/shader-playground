@@ -15,6 +15,7 @@ export interface AppActions {
 
 interface AppActionsDeps {
   cancelDebugMovement(): void;
+  clearDebugState(): void;
   ensureSimulation(): void;
   modeParams: ModeParamsAccess;
   presets: Record<SimMode, Record<string, Record<string, number | string | boolean>>>;
@@ -63,6 +64,11 @@ export function createAppActions(deps: AppActionsDeps): AppActions {
       saveSoon();
     },
     selectMode(mode) {
+      // [LAW:single-enforcer] Switching modes abandons the outgoing sim's
+      // simStep space; debug targets (skip / breakpoint / manual-step) indexed
+      // against it must be cleared before the new sim takes over, or a queued
+      // skip silently resumes against an unrelated simStep with no Resume UI.
+      deps.clearDebugState();
       deps.state.mode = mode;
       deps.ensureSimulation();
       deps.syncUi();

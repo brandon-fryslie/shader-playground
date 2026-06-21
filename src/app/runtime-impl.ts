@@ -283,6 +283,7 @@ export async function startAppRuntimeImpl() {
   // all originate from this object.
   appActions = createAppActions({
     cancelDebugMovement: () => uiOrchestrator.cancelDebugMovement(),
+    clearDebugState: () => uiOrchestrator.clearDebugState(),
     ensureSimulation,
     modeParams,
     presets: catalogPresets,
