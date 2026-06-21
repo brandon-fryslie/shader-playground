@@ -2,6 +2,28 @@
   "schema": 2,
   "versions": [
     {
+      "version": "pr-41",
+      "ref": "refs/pull/41/merge",
+      "sha": "33ff02799cac529e6452b6c77a0ee5885505c931",
+      "timestamp": "2026-06-21T06:54:22.644Z",
+      "commits": [
+        {
+          "sha": "33ff02799cac529e6452b6c77a0ee5885505c931",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-06-21T00:54:04-06:00",
+          "message": "Merge c0d0b0fe156ced362e6253eae1afc334a6b90232 into 2cb22f3471c470b0af0146f15ab6af0367089eda\n"
+        },
+        {
+          "sha": "c0d0b0fe156ced362e6253eae1afc334a6b90232",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-06-21T00:53:13-06:00",
+          "message": "fix(debug): gray out queue-initiating controls while operation pending (#shader-debug-6oi.10)\n\n±1/±10/±60 step buttons, the Go button, and the skip-target input now\nreflect canonical debugState every frame via updatePanel(): disabled\nwhen skipTarget !== null || manualStepsRemaining > 0, enabled otherwise.\n\nThe wipe in cancelMovement() stays — it's correct (per .5 + .8 notes,\nswitching from manual-step to skip with both queues active would be a\nworse [LAW:no-mode-explosion]). What was missing was visibility: the\nuser had no way to tell that a fresh click silently discarded the prior\nqueue. Disabling the conflicting controls makes the state observable\nand removes the collision class entirely.\n\nArchitecture:\n- hasPendingMovement(): boolean added to DebugPanel — single source of\n  truth for \"operation in flight,\" derived from the two debugState\n  slots that own it. [LAW:one-source-of-truth]\n- updatePanel() reads it each frame and pushes .disabled. Any path that\n  mutates the queue (stepBy, initiateSkip, breakpoint hit, scrub,\n  clearAll, natural completion in runCompute) gets the right UI on the\n  next frame with no per-handler push. [LAW:dataflow-not-control-flow]\n- Disable sync runs ahead of the mode-gated early return, so controls\n  recover correctly when switching back into physics mode.\n- Scrubber stays enabled — it's a continuous control where overwriting\n  the prior target as you drag is the intended UX.\n- hasPendingDebugMovement() exposed via UiOrchestrator surface for\n  shader-debug-6oi.4.1 (pause-button \"Cancel\" relabel) to consume\n  without reaching across the abstraction.\n"
+        }
+      ]
+    },
+    {
       "version": "r117-2cb22f3",
       "ref": "refs/heads/master",
       "sha": "2cb22f3471c470b0af0146f15ab6af0367089eda",
