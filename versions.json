@@ -2,6 +2,28 @@
   "schema": 2,
   "versions": [
     {
+      "version": "pr-20",
+      "ref": "refs/pull/20/merge",
+      "sha": "bda2d753466900a2ebe7c5d2e2a17bd470b666ca",
+      "timestamp": "2026-06-21T02:39:24.670Z",
+      "commits": [
+        {
+          "sha": "bda2d753466900a2ebe7c5d2e2a17bd470b666ca",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-06-20T20:39:11-06:00",
+          "message": "Merge 6a8c00ca30babbafb5d258d97fc32f22b8cbaf2b into e6f676a4f16ba770b3c707410f3f66cfe2cbe045\n"
+        },
+        {
+          "sha": "6a8c00ca30babbafb5d258d97fc32f22b8cbaf2b",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-06-20T20:38:41-06:00",
+          "message": "Collapse duplicate metrics bus into src/metrics/bus.ts\n\nruntime-impl.ts carried a verbatim shadow of src/metrics/bus.ts with its\nown metricsChannels Map and metricsRecord state — two parallel registries\nthat could not see each other's channels [LAW:one-source-of-truth].\nxr/input.ts and ui-orchestrator.ts each declared their own narrow\nMetricChannel/MetricSample/MetricsApi interfaces structurally satisfied\nby the shadow.\n\nBus is now sole owner: exports a Metrics type plus RecordPhase /\nRecordOptions / RecordStatus alongside the existing MetricChannel and\nMetricSample. runtime-impl.ts imports `metrics` and the consumer deps\ntype their slot as Metrics directly [LAW:one-type-per-behavior]; the\nnarrow per-consumer interfaces were view-ports onto one object, not\ndistinct behaviors.\n\nruntime-impl.ts: -138 lines.\n\nCloses shader-runtime-5ui.3.\n"
+        }
+      ]
+    },
+    {
       "version": "r96-e6f676a",
       "ref": "refs/heads/master",
       "sha": "e6f676a4f16ba770b3c707410f3f66cfe2cbe045",
