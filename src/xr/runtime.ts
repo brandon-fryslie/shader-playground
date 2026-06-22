@@ -1,11 +1,6 @@
 import type { AppState, RGBThemeColors, Simulation } from '../types';
 import type { CameraSystem } from '../render/camera';
-import {
-  createXrWidgetRenderer,
-  type XrWidgetRenderer,
-  type XrUiRegistry,
-  type RenderCommand as XrRenderCommand,
-} from '@shader-playground/xr-ui';
+import { type Container, type XrUiSession } from '@shader-playground/xr-ui';
 import { createClipboardLayout } from './layouts/clipboard';
 import { createDebugHudLayout } from './layouts/debug-hud';
 
@@ -28,7 +23,6 @@ interface XrRuntimeDeps {
   getPostFxSceneIndex(): number;
   getPostFxSceneView(index: number): GPUTextureView;
   getThemeColors(): RGBThemeColors;
-  getUiRenderList(): XrRenderCommand[];
   initializeReferenceSpace(refSpace: XRReferenceSpace, gotFloor: boolean): void;
   inputStep(frame: XRFrame): void;
   logError(scope: string, error: unknown, detail?: unknown): void;
@@ -53,7 +47,7 @@ interface XrRuntimeDeps {
   state: AppState;
   tickFrameStats(time: DOMHighResTimeStamp): { fpsUpdated: boolean; frameDeltaMs: number };
   tickMarkers(dtSeconds: number): void;
-  uiRegistry: XrUiRegistry;
+  xrUiSession: XrUiSession;
   updateStats(): void;
 }
 
@@ -61,7 +55,6 @@ export function createXrRuntime(deps: XrRuntimeDeps): XrRuntime {
   let xrSession: XRSession | null = null;
   let xrBinding: XRGPUBinding | null = null;
   let xrLayer: XRProjectionLayer | null = null;
-  let xrWidgetRenderer: XrWidgetRenderer | null = null;
   let xrDepthOverride: GPUTextureView | null = null;
   let xrFrameCount = 0;
 
@@ -109,6 +102,11 @@ export function createXrRuntime(deps: XrRuntimeDeps): XrRuntime {
         deps.setCurrentPhase(`xr:frame:${xrFrameCount}:sim.compute(${deps.state.mode})`);
         sim.compute(encoder);
       }
+
+      // [LAW:one-source-of-truth] Theme palette is fetched once per frame and
+      // shared across eyes — it is a menu-config concern, not per-eye camera
+      // geometry, and the transition state is already settled for this frame.
+      const xrTheme = deps.getThemeColors();
 
       if (isEarlyFrame) deps.logInfo('xr:frame', `pose has ${pose.views.length} views`);
       for (let viewIndex = 0; viewIndex < pose.views.length; viewIndex++) {
@@ -160,19 +158,20 @@ export function createXrRuntime(deps: XrRuntimeDeps): XrRuntime {
         const sceneView = deps.getPostFxSceneView(sceneIdx);
         sim.render(encoder, sceneView, null, viewIndex);
 
-        if (!xrWidgetRenderer) {
-          xrWidgetRenderer = createXrWidgetRenderer(deps.device);
-        }
+        // [LAW:composability] The menu draws itself for this eye through the one
+        // session handle — the app owns no renderer, camera buffer, or render
+        // list. The session stashed this frame's render list during inputStep's
+        // session.frame(); renderEye draws it into the eye's scene target.
         deps.setCurrentPhase(`xr:frame:${xrFrameCount}:xr-widgets(eye=${viewIndex})`);
-        xrWidgetRenderer.draw(
+        deps.xrUiSession.renderEye({
           encoder,
-          sceneView,
-          deps.getPostFxSceneFormat(sceneIdx),
+          targetView: sceneView,
+          targetFormat: deps.getPostFxSceneFormat(sceneIdx),
           viewIndex,
-          { view: eyeView, proj: eyeProj },
-          deps.getThemeColors(),
-          deps.getUiRenderList(),
-        );
+          view: eyeView,
+          proj: eyeProj,
+          theme: xrTheme,
+        });
 
         deps.setCurrentPhase(`xr:frame:${xrFrameCount}:bloom(eye=${viewIndex})`);
         deps.postFxRunBloomChain(encoder);
@@ -311,16 +310,21 @@ export function createXrRuntime(deps: XrRuntimeDeps): XrRuntime {
         deps.state.xrEnabled = true;
         deps.setCurrentPhase('xr:awaiting first frame');
 
-        deps.uiRegistry.layouts.set('clipboard', createClipboardLayout(XR_PANEL_HAND));
-        deps.uiRegistry.activeLayoutId = 'clipboard';
-        // Debug HUD: head-anchored panel with FPS / GPU ms / error count.
-        // Registered as a passive layout — xrUiStep walks it for layout +
-        // render only, never for hit-test. [LAW:dataflow-not-control-flow]
-        // includes the HUD id in hudLayoutIds is the entire wiring.
-        deps.uiRegistry.layouts.set('debug-hud', createDebugHudLayout());
-        if (!deps.uiRegistry.hudLayoutIds.includes('debug-hud')) {
-          deps.uiRegistry.hudLayoutIds.push('debug-hud');
-        }
+        // Build fresh layout trees for this XR activation and hand them to the
+        // session. Rebuilding per entry resets each tree's interaction state
+        // (active tab, expanded focus-view); the session-owned bindings persist.
+        // [LAW:decomposition] which layouts exist is app policy (these two are
+        // app-specific consumers); hosting + driving them is the session's job.
+        // The debug HUD is passive — listed in hudLayoutIds, it is laid out and
+        // rendered every frame but never hit-tested. [LAW:dataflow-not-control-flow]
+        const xrLayouts = new Map<string, Container & { kind: 'panel' }>();
+        xrLayouts.set('clipboard', createClipboardLayout(XR_PANEL_HAND));
+        xrLayouts.set('debug-hud', createDebugHudLayout());
+        deps.xrUiSession.setLayouts({
+          layouts: xrLayouts,
+          activeLayoutId: 'clipboard',
+          hudLayoutIds: ['debug-hud'],
+        });
 
         xrSession.addEventListener('visibilitychange', () => {
           deps.logInfo('xr', 'visibilitychange', {

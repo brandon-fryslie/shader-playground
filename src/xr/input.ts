@@ -1,16 +1,7 @@
 import type { AppState } from '../types';
 import { dot3, sub3 } from '../math/vec3';
 import type { Metrics } from '../metrics/bus';
-import {
-  xrUiStep,
-  applySideEffects as xrUiApplyEffects,
-  makeIdlePrev as xrUiMakeIdlePrev,
-  uiHandClaimed,
-  type BindingRegistry,
-  type XrUiPrev,
-  type XrUiRegistry,
-  type RenderCommand as XrRenderCommand,
-} from '@shader-playground/xr-ui';
+import { type XrUiSession } from '@shader-playground/xr-ui';
 import {
   createAvpInput,
   type AvpInput,
@@ -59,12 +50,8 @@ export interface XrSnapEvent {
 
 export interface XrInputSystem {
   clearReferenceSpace(): void;
-  getClaimed(): Record<XrHand, boolean>;
   getHandFrames(): Record<XrHand, InputFrame>;
-  getPrev(): XrUiPrev;
   getRefSpace(): XRReferenceSpace | null;
-  getRenderList(): XrRenderCommand[];
-  getUiRegistry(): XrUiRegistry;
   initializeReferenceSpace(refSpace: XRReferenceSpace, gotFloor: boolean): void;
   inputStep(frame: XRFrame): void;
   onSelectEnd(source: XRInputSource): void;
@@ -74,7 +61,10 @@ export interface XrInputSystem {
 }
 
 interface XrInputSystemDeps {
-  bindings: BindingRegistry;
+  // The menu session owns the registry, interaction state, render list, and
+  // renderer; this app driver forwards the input-frame to it and reads back the
+  // per-hand claim to arbitrate its own gestures. [LAW:one-source-of-truth]
+  xrUiSession: XrUiSession;
   closestPointOnRayToOrigin(origin: number[], dir: number[]): number[];
   createAttractor(pointerId: number, pos: number[]): void;
   intersectRayWithPlane(origin: number[], dir: number[], planeY: number): number[] | null;
@@ -120,14 +110,8 @@ export function createXrInputSystem(deps: XrInputSystemDeps): XrInputSystem {
   const xrPalmUp: Record<XrHand, boolean> = { left: false, right: false };
   const xrTuning = { gainMultiplier: 1.0 };
 
-  const xrUiRegistry: XrUiRegistry = {
-    bindings: deps.bindings,
-    layouts: new Map(),
-    activeLayoutId: null,
-    hudLayoutIds: [],
-  };
-  let xrUiPrev: XrUiPrev = xrUiMakeIdlePrev();
-  let xrUiRenderList: XrRenderCommand[] = [];
+  // The app's read-back of which hands the menu claimed this frame, used to
+  // arbitrate sim gestures. The interaction state itself lives in the session.
   const xrUiClaimed: Record<XrHand, boolean> = { left: false, right: false };
   const xrViewOffset = { x: 0, y: 0, z: -5 };
   let xrViewOffsetY = 0;
@@ -354,23 +338,11 @@ export function createXrInputSystem(deps: XrInputSystemDeps): XrInputSystem {
       xrRefSpace = null;
       xrBaseRefSpace = null;
     },
-    getClaimed() {
-      return { ...xrUiClaimed };
-    },
     getHandFrames() {
       return xrHandFrames;
     },
-    getPrev() {
-      return xrUiPrev;
-    },
     getRefSpace() {
       return xrRefSpace;
-    },
-    getRenderList() {
-      return xrUiRenderList;
-    },
-    getUiRegistry() {
-      return xrUiRegistry;
     },
     initializeReferenceSpace(refSpace, gotFloor) {
       // [LAW:one-source-of-truth] XR reference-space mutation and view-offset
@@ -397,14 +369,15 @@ export function createXrInputSystem(deps: XrInputSystemDeps): XrInputSystem {
       xrHeadPose = input.headPose;
       const ctx: InputContext = { hands: xrHandFrames, headPose: xrHeadPose };
 
-      // The menu consumes the same input frame and runs first; it reads the gain
-      // from the prior frame's mapping, exactly as before the extraction.
-      const uiResult = xrUiStep(xrUiRegistry, xrHandFrames, xrUiPrev, ctx, xrTuning, 16);
-      xrUiApplyEffects(uiResult.sideEffects, xrUiRegistry);
-      xrUiPrev = uiResult.next;
-      xrUiRenderList = uiResult.renderList;
-      xrUiClaimed.left = uiHandClaimed(uiResult.next.states.left);
-      xrUiClaimed.right = uiHandClaimed(uiResult.next.states.right);
+      // The menu consumes the same input frame and steps first; it reads the gain
+      // from the prior frame's mapping, exactly as before the extraction. The
+      // session owns the step, side-effect application, render list, and renderer
+      // [LAW:composability]; the app only forwards input + tuning and reads back
+      // which hands the menu claimed. The render list is drawn per eye later in
+      // the frame via session.renderEye (see xr/runtime.ts).
+      const { claimed } = deps.xrUiSession.frame({ input: ctx, tuning: xrTuning });
+      xrUiClaimed.left = claimed.left;
+      xrUiClaimed.right = claimed.right;
 
       emitGestureMetrics(gestures);
       xrMapGestures(gestures, now);
@@ -429,8 +402,7 @@ export function createXrInputSystem(deps: XrInputSystemDeps): XrInputSystem {
       xrPalmUp.left = false;
       xrPalmUp.right = false;
       xrTuning.gainMultiplier = 1.0;
-      xrUiPrev = xrUiMakeIdlePrev();
-      xrUiRenderList = [];
+      deps.xrUiSession.reset();
       xrUiClaimed.left = false;
       xrUiClaimed.right = false;
       deps.setSimulationInteractionInactive();
