@@ -2,6 +2,28 @@
   "schema": 2,
   "versions": [
     {
+      "version": "pr-50",
+      "ref": "refs/pull/50/merge",
+      "sha": "14f790a33e3532faac57161718ad74fc92b3bd6b",
+      "timestamp": "2026-06-22T11:13:22.074Z",
+      "commits": [
+        {
+          "sha": "14f790a33e3532faac57161718ad74fc92b3bd6b",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-06-22T05:13:06-06:00",
+          "message": "Merge 1b6e9d6790f7728fffcb5e9be4897fd10479e540 into 340de56a6d1f1f9c8e7ea424eeeed55940436c17\n"
+        },
+        {
+          "sha": "1b6e9d6790f7728fffcb5e9be4897fd10479e540",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-06-22T05:12:17-06:00",
+          "message": "refactor(xr-ui): build the menu session façade — one handle, one per-frame call (#shader-xr-ui-t6i.7)\n\ncreateXrUiSession is now the menu package's primary barrel entry. It owns the\nBindingRegistry, the XrUiPrev interaction state, this frame's render list, and\nthe GPU widget renderer (with its camera buffer) — everything a consumer should\nnever sequence by hand. [LAW:composability]\n\nThe session reads NO WebXR: frame() takes a plain InputContext (from\navp-gestures) and the live tuning; renderEye() takes the consumer's encoder,\nper-eye scene target/format, and the view/proj matrices it already computed.\n[LAW:effects-at-boundaries]\n\nTwo phases, one owner: stereo rendering forces the per-frame work apart. frame()\nruns the CPU step (xrUiStep → applySideEffects), stashes the render list, and\nreturns { claimed } so the app can arbitrate its own gestures against which\nhands the menu took. renderEye() draws that stash into one eye, interleaved with\nthe app's per-eye scene render. The app's XR rAF loop is the single owner of\nthat order. [LAW:no-ambient-temporal-coupling] The granular pieces stay exported\nas the advanced escape hatch (devtools consumes them). [LAW:no-mode-explosion]\n\nRewire the app onto the one session:\n- runtime-impl.ts constructs the session once at boot; the bindings register\n  into it via the construction callback (moved out of startup), and it is\n  threaded to the XR input driver (frame) and the XR runtime (renderEye +\n  setLayouts).\n- xr/input.ts forwards the input-frame + tuning to session.frame and reads back\n  the claim; it no longer holds the registry/prev/render list or calls\n  xrUiStep/applySideEffects/uiHandClaimed.\n- xr/runtime.ts draws the menu via session.renderEye and installs fresh layouts\n  per XR activation via session.setLayouts; it no longer owns the renderer.\n- startup.ts reads the session's diagnostic surface for the devtools probe.\n\nVerification (no headset): root tsc + both packages standalone tsc green;\nxr-ui dist build + verify-no-raw-import green; npm run check (architecture +\nshader-sync + vite build) green; verify:gestures 7/7; verify:gpu-layout PASS.\nOn-device behavior parity deferred to .5.\n"
+        }
+      ]
+    },
+    {
       "version": "r126-340de56",
       "ref": "refs/heads/master",
       "sha": "340de56a6d1f1f9c8e7ea424eeeed55940436c17",
