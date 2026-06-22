@@ -1,0 +1,19 @@
+{
+  // Published-dist build. The in-repo app consumes ./src directly (root tsconfig,
+  // noEmit + Vite bundles); this config exists only to emit the standalone dist so
+  // the package is self-contained — its own ambient WebXR types, no bundler.
+  "extends": "../../tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "allowImportingTsExtensions": false,
+    "declaration": true,
+    "removeComments": true,
+    "outDir": "./dist",
+    "rootDir": "./src",
+    // Root tsconfig sets types:["vite/client"]; this package needs no @types at all
+    // — its only external types are the hand-authored ambient webxr.d.ts. Clearing
+    // the array stops the dist build depending on the app's vite. [LAW:locality-or-seam]
+    "types": []
+  },
+  "include": ["src"]
+}
