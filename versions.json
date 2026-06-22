@@ -2,6 +2,28 @@
   "schema": 2,
   "versions": [
     {
+      "version": "pr-52",
+      "ref": "refs/pull/52/merge",
+      "sha": "b1c494402fb84366faef961bc504a822cb58b5b3",
+      "timestamp": "2026-06-22T11:52:29.701Z",
+      "commits": [
+        {
+          "sha": "b1c494402fb84366faef961bc504a822cb58b5b3",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-06-22T05:52:06-06:00",
+          "message": "Merge 0bb5d4700911d0c0e685c53174da01e2be817fd9 into b0d20813865c20033b97cf39350c932b18808bd7\n"
+        },
+        {
+          "sha": "0bb5d4700911d0c0e685c53174da01e2be817fd9",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-06-22T05:50:56-06:00",
+          "message": "build(xr-ui): give avp-gestures a publishable dist build with carried ambient WebXR types (#shader-xr-ui-t6i.8)\n\nMirror xr-ui's dist story for avp-gestures so both packages are genuinely\npublishable libraries, completing the epic's two-reusable-packages thesis.\n\n- tsconfig.build.json: emit dist (.js + declarations), types:[] (the package\n  needs no @types — its only external types are its own ambient webxr.d.ts).\n- scripts/carry-webxr-types.mjs: the non-obvious step. tsc neither copies a\n  source .d.ts into outDir nor re-emits a LOCAL triple-slash directive into the\n  emitted declarations (verified against tsc, with and without removeComments),\n  so the emitted adapter.d.ts/input.d.ts name XRFrame/XRInputSource/... as bare\n  globals with nothing pulling the declaration in. The step copies\n  src/webxr.d.ts -> dist/webxr.d.ts and injects the reference at the top of\n  dist/index.d.ts (the published types entry a consumer loads first), making the\n  WebXR interfaces resolve for a consumer with no @types/webxr.\n- package.json: publishConfig swaps exports to ./dist on publish (dev stays\n  ./src); files:[\"dist\"] is the allowlist that actually ships dist — without it\n  npm honors .gitignore and publishes a package with no dist at all.\n- verify:avp-dist (scripts/verify-consumer.mjs): the real acceptance a standalone\n  tsc cannot give — an out-of-workspace consumer imports the published-form\n  package and a direct XRFrame reference; both resolve only through the carried\n  webxr.d.ts. A negative control removes that file and requires the compile to\n  fail, so the gate proves the carry is load-bearing.\n- README: document the build/publish story symmetric with xr-ui's.\n\nVerified: verify:avp-dist green (positive + negative control), npm run check\ngreen (app still resolves avp-gestures via ./src dev exports), verify:gestures\n7/7, verify:gpu-layout PASS, npm pack ships only dist/ (incl. webxr.d.ts).\n"
+        }
+      ]
+    },
+    {
       "version": "r128-b0d2081",
       "ref": "refs/heads/master",
       "sha": "b0d20813865c20033b97cf39350c932b18808bd7",
