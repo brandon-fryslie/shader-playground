@@ -2,6 +2,28 @@
   "schema": 2,
   "versions": [
     {
+      "version": "pr-44",
+      "ref": "refs/pull/44/merge",
+      "sha": "206caf454289fc61bf46f34119150f40c170a9ab",
+      "timestamp": "2026-06-22T04:44:58.656Z",
+      "commits": [
+        {
+          "sha": "206caf454289fc61bf46f34119150f40c170a9ab",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-06-21T22:44:42-06:00",
+          "message": "Merge c72b046aa376381af2b4b7c28c0c5313b231b205 into 141c9a237a3ad51e24ca79241c448620fe8c54a9\n"
+        },
+        {
+          "sha": "c72b046aa376381af2b4b7c28c0c5313b231b205",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-06-21T22:44:03-06:00",
+          "message": "refactor(xr-ui): make src/xr-ui self-contained for standalone extraction\n\nThree changes that collapse the eventual xr-ui extraction from a\ndetangle-then-move into a clean move-and-package:\n\n- Co-locate xr-widgets.wgsl into src/xr-ui/ (was src/shaders/). The shader\n  was the only thing crossing the package boundary outward; with it inside,\n  src/xr-ui/ imports nothing outside itself. The ?raw Vite loader contract\n  is now documented at the import site as the build assumption a consuming\n  package must provide.\n\n- Remove the module-scope `bindingRegistry` singleton. The composition root\n  (startAppRuntimeImpl) constructs one BindingRegistry and threads it to the\n  XR input system and app startup, which already accepted it as a parameter.\n  An extracted package ships the class (an API), not ambient global state.\n  [LAW:no-shared-mutable-globals]\n\n- Correct the stale dependency comment in bindings.ts: it claimed a\n  src/types.ts dependency that does not exist (the module imports nothing),\n  which would mislead extraction planning into severing a coupling that\n  isn't there. [FRAMING:representation]\n\nDeliberately NOT touching the renderer KIND-code / WGSL-branch duplication:\nit is irreducible across the TS/WGSL language boundary (a shader cannot\nimport a TS const), the author documented a defer with a >9-kinds trigger\nnot yet met, and both files move into the package together so it never\nblocked extraction.\n"
+        }
+      ]
+    },
+    {
       "version": "r120-141c9a2",
       "ref": "refs/heads/master",
       "sha": "141c9a237a3ad51e24ca79241c448620fe8c54a9",
