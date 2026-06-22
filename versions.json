@@ -2,6 +2,28 @@
   "schema": 2,
   "versions": [
     {
+      "version": "pr-45",
+      "ref": "refs/pull/45/merge",
+      "sha": "1dd2b6e54229a4708946ecd3f214ba8641117a27",
+      "timestamp": "2026-06-22T08:35:07.083Z",
+      "commits": [
+        {
+          "sha": "1dd2b6e54229a4708946ecd3f214ba8641117a27",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-06-22T02:34:48-06:00",
+          "message": "Merge 55b6cc799d9a7bb154969a8a555a50a70b06b0e8 into 49c53986cf6a355a280e877f59351bfe3e1165a7\n"
+        },
+        {
+          "sha": "55b6cc799d9a7bb154969a8a555a50a70b06b0e8",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-06-22T02:34:10-06:00",
+          "message": "refactor(xr-ui): scaffold npm workspace; relocate menu foundation into packages (#shader-xr-ui-t6i.1)\n\nStand up the monorepo workspace and both package skeletons, relocating the\nXR menu foundation into the menu package. Pure relocation + wiring — no\nbehavior change; the six foundation files move with zero body edits.\n\n- Root declares an npm `workspaces` field covering packages/*.\n- packages/avp-gestures/: empty-but-buildable skeleton (input-frame type +\n  recognizer land in sibling tickets). Depends on nothing.\n- packages/xr-ui/: depends on @shader-playground/avp-gestures; the six\n  foundation files (anchors, widgets, bindings, layout, step, renderer) and\n  the widget shader move into it. Keeps the ?raw shader import for now —\n  ticket .2 inlines it. A curated barrel (src/index.ts) is the package\n  contract: it exposes anchors' Hand/HandFrame as canonical and keeps step's\n  duplicates internal. [LAW:one-source-of-truth]\n- The two AVP-app-specific layouts (clipboard, debug-hud) move out of the\n  package into the app at src/xr/layouts/ and retarget to the barrel.\n- Every app consumer imports from @shader-playground/xr-ui instead of the\n  old relative path; the bare specifier makes the package boundary\n  compile-enforced by module resolution. [LAW:one-way-deps]\n- tsconfig includes packages/*/src so the skeletons are type-checked in the\n  build; the dead 'xr-ui' layer entry is dropped from check-architecture.\n\nAcceptance: npm install resolves the workspace; npm run check (architecture\n+ tsc + vite) is clean with zero errors/warnings; no source imports the old\nsrc/xr-ui/ path; app + XR behavior identical.\n"
+        }
+      ]
+    },
+    {
       "version": "r121-49c5398",
       "ref": "refs/heads/master",
       "sha": "49c53986cf6a355a280e877f59351bfe3e1165a7",
