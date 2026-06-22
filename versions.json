@@ -2,6 +2,28 @@
   "schema": 2,
   "versions": [
     {
+      "version": "pr-49",
+      "ref": "refs/pull/49/merge",
+      "sha": "fa4fadaccace7f7ccd6b40aa159bb7d045f6b67d",
+      "timestamp": "2026-06-22T10:45:19.195Z",
+      "commits": [
+        {
+          "sha": "fa4fadaccace7f7ccd6b40aa159bb7d045f6b67d",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-06-22T04:44:59-06:00",
+          "message": "Merge 41ac147633a248bd74e52af507e1a47742a280a5 into 0fcbe1957c924052ea67388df12d9640df9556ea\n"
+        },
+        {
+          "sha": "41ac147633a248bd74e52af507e1a47742a280a5",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-06-22T04:44:07-06:00",
+          "message": "refactor(xr-ui): implement avp-gestures — WebXR adapter + pure recognizer; rewire app onto it (#shader-xr-ui-t6i.6)\n\nThe shared library now produces input + gestures from the raw WebXR frame in\ntwo layers, and the app maps gestures to actions instead of housing the\nderivation and FSM itself.\n\navp-gestures (the headline value):\n- recognizer.ts: the PURE gesture recognizer — recognizeGestures(hands, state,\n  now) => {gestures, state}. No WebXR, no clock (now is an input), no metrics.\n  [LAW:effects-at-boundaries][LAW:no-ambient-temporal-coupling] It is the gesture\n  FSM ported verbatim (pinch start/hold/end, two-hand pinch, ring-pinch, palm\n  up/down with hysteresis, wrist-flick), emitting only intent-neutral gestures.\n- adapter.ts: the impure boundary — the ONLY WebXR reads in the library. Ports\n  the visionOS derivation (ray, joints, palm normal, advisory ray, grip, pinch\n  state, gaze ray frozen at pinch-start, head pose). No WebXR type escapes into\n  the substrate; tracking loss surfaces as null. It owns the full pinch lifecycle\n  (select{start,end} -> assign hand -> freeze gaze -> free on release).\n- input.ts: createAvpInput() composes adapter then recognizer, holding FSM state,\n  returning AvpFrameResult {input, gestures}. [LAW:dataflow-not-control-flow]\n- types.ts: canonical + substrate types in a leaf module (no barrel cycle).\n  KEY GAP resolved via option (b): HandInputFrame extends InputFrame with grip +\n  wrist JointSample for the recognizer; InputFrame stays the narrow menu contract.\n  The full 25-joint record is adapter-internal — only the adapter reads every\n  joint (to derive palmNormal/grip/advisory ray). [LAW:decomposition]\n- webxr.d.ts: the standard WebXR types move here (the package closest to the raw\n  frame owns them) so it type-checks standalone. [LAW:one-source-of-truth] The\n  app's webxr-gpu.d.ts keeps only the WebGPU bindings + app-only types + small\n  interface augmentations. A triple-slash reference carries the ambient globals to\n  consumers' compiles (the pattern renderer.ts uses for @webgpu/types).\n- recognizer.test.ts: 8 Deno unit tests over synthetic input-frame sequences —\n  pinch hold-threshold + durations, gaze-required pinch-start, two-hand ordering,\n  ring-pinch edges, palm hysteresis, wrist-flick arming/refractory, purity. Wired\n  as `npm run verify:gestures` (a local gate like verify:gpu-layout; CI has no Deno).\n\napp (src/xr/input.ts, -279 lines): derives input + gestures ONCE per frame from\ncreateAvpInput [LAW:one-source-of-truth], feeds the same input frame to the menu,\nthen maps gestures to camera/attractor actions and arbitrates against menu\nhand-claims. Mapping (ring-pinch -> precision gain) + arbitration stay in the app\n[LAW:decomposition]. The 1-frame gain lag, gesture order, and metrics channels are\npreserved; xr.snap drops flickSpeed/grip (recognizer-internal) and is rebuilt from\nthe public input frame + app mapping state.\n\nVerification (no headset): npm run check green; standalone tsc for both packages;\nxr-ui dist build + verify-no-raw-import green; verify:gestures 8/8; verify:gpu-layout\nPASS. On-device stereo verification is folded into shader-xr-ui-t6i.5.\n"
+        }
+      ]
+    },
+    {
       "version": "r125-0fcbe19",
       "ref": "refs/heads/master",
       "sha": "0fcbe1957c924052ea67388df12d9640df9556ea",
