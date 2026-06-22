@@ -2,6 +2,28 @@
   "schema": 2,
   "versions": [
     {
+      "version": "pr-47",
+      "ref": "refs/pull/47/merge",
+      "sha": "26d8865128d3f761dc919dd9589a5be337e86872",
+      "timestamp": "2026-06-22T09:10:31.152Z",
+      "commits": [
+        {
+          "sha": "26d8865128d3f761dc919dd9589a5be337e86872",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-06-22T03:10:12-06:00",
+          "message": "Merge d14ef7cfb8b61659a8f481190639c732fdd3e145 into 73129630716267b9c6f4f0eb3cdfe597b26e9a8f\n"
+        },
+        {
+          "sha": "d14ef7cfb8b61659a8f481190639c732fdd3e145",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-06-22T03:09:35-06:00",
+          "message": "refactor(xr-ui): renderer owns its camera buffer, takes per-eye matrices + theme (#shader-xr-ui-t6i.4)\n\nThe widget renderer required the host to share its own 208-byte/256-stride\nthemed camera uniform — this app's layout — so the package knew the app's\nuniform shape, the least-reusable seam.\n\nNow the renderer owns a minimal per-eye camera buffer in its own layout\n(view + proj + theme palette = the only fields xr-widgets.wgsl reads) and\nreceives that data structured through the seam:\n  - draw() takes per-eye XrWidgetCamera {view, proj} (geometry, per eye) and\n    a shared XrWidgetTheme {primary, secondary, accent} (palette).\n  - the renderer packs both into its own buffer; the host owes data, not bytes.\n\nConfirmed against xr-widgets.wgsl that the shader reads view/proj/primary/\nsecondary/accent and never `eye` — the unread `eye` field is dropped from the\nCamera struct (176-byte uniform). Theme colors are kept (read by the shader),\ntravelling as data not a buffer field. [LAW:no-silent-failure]\n\nApp side: src/xr/runtime.ts hands the renderer the same per-eye matrices it\nalready computes for setXrOverride and the theme colors from getThemeColors,\nso widget matrices == scene matrices == override. The XR runtime no longer\nneeds cameraStride/getCameraUniformData. Visual output identical (only unread\nfields dropped); npm run check clean.\n\n[LAW:locality-or-seam] the seam carries matrices+palette, not a byte-compatible\nbuffer. [LAW:decomposition] the renderer owns its GPU resources.\n"
+        }
+      ]
+    },
+    {
       "version": "r123-7312963",
       "ref": "refs/heads/master",
       "sha": "73129630716267b9c6f4f0eb3cdfe597b26e9a8f",
