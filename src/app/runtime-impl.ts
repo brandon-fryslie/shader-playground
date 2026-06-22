@@ -1,6 +1,6 @@
 import '../../styles/main.css';
 import type { SimMode, Simulation, AppState } from '../types';
-import { bindingRegistry } from '../xr-ui/bindings';
+import { BindingRegistry } from '../xr-ui/bindings';
 import { DEFAULTS as catalogDefaults, PRESETS as catalogPresets, PARAM_DEFS as catalogParamDefs, COLOR_THEMES as catalogColorThemes, DEFAULT_THEME as catalogDefaultTheme, THEME_FADE_MS as catalogThemeFadeMs, DEFAULT_CLEAR_COLOR as catalogDefaultClearColor, SHAPE_IDS as catalogShapeIds, SHAPE_PARAMS as catalogShapeParams, FX_PARAM_DEFS as catalogFxParamDefs, MODE_TAB_LABELS as catalogModeTabLabels } from './catalog';
 import { createAppActions, type AppActions } from './actions';
 import { createGpuContext, type GpuContext, type GpuContextDeps } from './gpu-context';
@@ -225,6 +225,11 @@ function resetCurrentSim() {
 }
 
 export async function startAppRuntimeImpl() {
+  // [LAW:no-shared-mutable-globals] The XR binding registry is owned by this
+  // composition root and threaded to every consumer (XR input, app startup),
+  // never read from module scope. xr-ui ships the class, not a global instance.
+  const bindingRegistry = new BindingRegistry();
+
   // [LAW:no-ambient-temporal-coupling] Input subsystems are hoisted before GPU
   // boot so their method refs (used by gpu-context deps) bind to live functions,
   // not to module-level holes filled later.
