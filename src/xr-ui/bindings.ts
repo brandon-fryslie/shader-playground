@@ -13,9 +13,10 @@
 // EnumBinding/ActionBinding type — closures capture per-instance differences.
 // Do NOT subclass per state field (PhysicsGBinding, BoidsSpeedBinding, ...).
 //
-// [LAW:one-way-deps] This module depends only on src/types.ts. Project-
-// specific data (PARAM_DEFS, PRESETS, COLOR_THEMES) live in main.ts and the
-// registration code stays there — bindings.ts never imports main.ts.
+// [LAW:one-way-deps] This module imports nothing — it is pure type and class
+// definitions. Project-specific bindings (physics/boids/theme fields) are
+// registered by app code (src/app/bindings.ts) against a registry instance the
+// composition root owns; bindings.ts never reaches back into the app.
 
 export type Binding =
   | ContinuousBinding
@@ -81,4 +82,6 @@ export class BindingRegistry {
   }
 }
 
-export const bindingRegistry = new BindingRegistry();
+// [LAW:no-shared-mutable-globals] No module-scope singleton. The composition
+// root constructs one BindingRegistry and threads it to every consumer, so an
+// extracted package ships an API (a class), not ambient global state.

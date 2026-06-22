@@ -13,7 +13,11 @@
 
 import type { RenderCommand, SubZoneRenderState } from './step';
 import type { Widget } from './widgets';
-import SHADER_XR_WIDGETS from '../shaders/xr-widgets.wgsl?raw';
+// [LAW:one-way-deps] The widget shader is co-located inside the package so
+// src/xr-ui/ is self-contained and depends on nothing outside itself — the
+// directory can be lifted into a standalone package as-is. (?raw is the Vite
+// loader contract the consuming build must provide.)
+import SHADER_XR_WIDGETS from './xr-widgets.wgsl?raw';
 
 const MAX_INSTANCES = 64;
 // 64 bytes per instance — matches xr-widgets.wgsl Instance struct.
