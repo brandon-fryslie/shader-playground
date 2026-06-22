@@ -11,6 +11,15 @@
 // [LAW:one-way-deps] Renderer imports RenderCommand from step.ts; step.ts
 // never imports the renderer.
 
+import {
+  CAMERA_FLOATS,
+  CAMERA_SIZE,
+  CAMERA_STRIDE,
+  EYE_COUNT,
+  packCameraUniform,
+  type XrWidgetCamera,
+  type XrWidgetTheme,
+} from './camera-uniform';
 import type { RenderCommand, SubZoneRenderState } from './step';
 import type { Widget } from './widgets';
 // [LAW:one-way-deps] The widget shader is co-located inside the package so
@@ -26,20 +35,6 @@ const MAX_INSTANCES = 64;
 //   16: halfExtentY + kind + flags + value
 //   16: labelStripIndex + hasLabel + alpha + subZoneState (u32)
 const INSTANCE_STRIDE_BYTES = 64;
-
-// The renderer owns its per-eye camera uniform — it does NOT borrow a host
-// buffer in the host's layout. Layout matches xr-widgets.wgsl `Camera` and
-// holds only what that shader reads:
-//   floats  0..15  view  (mat4)
-//   floats 16..31  proj  (mat4)
-//   floats 32..34  primary  (35 pad)
-//   floats 36..38  secondary (39 pad)
-//   floats 40..42  accent   (43 pad)
-// = 176 bytes. Per-eye slices are 256-aligned (minUniformBufferOffsetAlignment).
-const CAMERA_FLOATS = 44;
-const CAMERA_SIZE = CAMERA_FLOATS * 4;          // 176
-const CAMERA_STRIDE = 256;
-const EYE_COUNT = 2;                            // Apple Vision Pro stereo
 
 // Label atlas. One row of pixels per widget; widgets ask for a strip the
 // first time they need a label and the renderer re-rasterizes on text change.
@@ -66,21 +61,10 @@ const KIND: Record<Widget['kind'], number> = {
   'category-tile':8,
 };
 
-// Per-eye geometry the host supplies each draw. Column-major mat4 (16 floats
-// each), the same convention WebXR's XRView matrices use. Distinct per eye.
-export interface XrWidgetCamera {
-  view: Float32Array;
-  proj: Float32Array;
-}
-
-// The menu's theme palette. Shared across both eyes; rgb triplets. A separate
-// concern from camera geometry [LAW:decomposition] — the host owes both, but as
-// two values, not one fused buffer.
-export interface XrWidgetTheme {
-  primary: ArrayLike<number>;
-  secondary: ArrayLike<number>;
-  accent: ArrayLike<number>;
-}
+// Camera + theme types and the byte layout live in camera-uniform.ts (the
+// single source of truth, GPU-test-pinned). Re-exported so the package barrel
+// and consumers import them from the renderer's public surface unchanged.
+export type { XrWidgetCamera, XrWidgetTheme } from './camera-uniform';
 
 export interface XrWidgetRenderer {
   draw(
@@ -287,23 +271,15 @@ export function createXrWidgetRenderer(device: GPUDevice): XrWidgetRenderer {
     return (sideCode(s.hoverSide) << 16) | (sideCode(s.pressSide) << 18);
   }
 
-  // Pack one eye's view+proj+palette into the renderer's own layout. The host
-  // hands structured data; this is the sole place that knows the byte layout.
-  // [LAW:single-enforcer]
-  function packCamera(camera: XrWidgetCamera, theme: XrWidgetTheme): Float32Array {
-    cameraScratch.set(camera.view, 0);
-    cameraScratch.set(camera.proj, 16);
-    cameraScratch.set(theme.primary, 32);
-    cameraScratch.set(theme.secondary, 36);
-    cameraScratch.set(theme.accent, 40);
-    return cameraScratch;
-  }
-
   return {
     draw(encoder, sceneView, sceneFormat, viewIndex, camera, theme, commands) {
       // [LAW:dataflow-not-control-flow] Always upload camera + instance buffer
       // and run the pass; an empty commands array results in n=0 → no draw call.
-      device.queue.writeBuffer(cameraBuffer, viewIndex * CAMERA_STRIDE, packCamera(camera, theme) as Float32Array<ArrayBuffer>);
+      device.queue.writeBuffer(
+        cameraBuffer,
+        viewIndex * CAMERA_STRIDE,
+        packCameraUniform(cameraScratch, camera, theme) as Float32Array<ArrayBuffer>,
+      );
       const n = writeInstances(commands);
       if (n > 0) {
         device.queue.writeBuffer(instanceBuffer, 0, stagingBacking, 0, n * INSTANCE_STRIDE_BYTES);
