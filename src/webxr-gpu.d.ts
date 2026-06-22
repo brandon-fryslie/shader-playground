@@ -1,7 +1,14 @@
-// WebXR + WebGPU integration types
-// TypeScript's DOM lib has incomplete/missing WebXR types, so we declare them here.
+// WebXR + WebGPU integration types owned by the APP.
+//
+// The standard WebXR hand/frame/pose types now live in avp-gestures
+// (packages/avp-gestures/src/webxr.d.ts) — the package closest to the raw frame
+// owns them so it type-checks standalone. [LAW:one-source-of-truth] This file
+// keeps only what avp-gestures does not need: the WebGPU-binding types the
+// renderer uses, the session/rendering types, and small AUGMENTATIONS that add
+// the extra members the app reads onto interfaces avp-gestures declares (those
+// `interface` re-openings merge; they never re-declare the whole shape).
 
-// ── Core WebXR types ──
+// ── App-only WebXR session/rendering types ──
 
 type XRSessionMode = 'inline' | 'immersive-vr' | 'immersive-ar';
 type XREye = 'none' | 'left' | 'right';
@@ -23,88 +30,17 @@ interface XRSystem {
   requestSession(mode: XRSessionMode, init?: XRSessionInit): Promise<XRSession>;
 }
 
-interface XRSession extends EventTarget {
-  readonly enabledFeatures?: readonly string[];
-  readonly inputSources: readonly XRInputSource[];
-  requestReferenceSpace(type: string): Promise<XRReferenceSpace>;
-  requestAnimationFrame(callback: XRFrameRequestCallback): number;
-  updateRenderState(init?: XRRenderStateInit): void;
-  end(): Promise<void>;
-}
-
 type XRFrameRequestCallback = (time: DOMHighResTimeStamp, frame: XRFrame) => void;
-
-interface XRFrame {
-  getViewerPose(referenceSpace: XRReferenceSpace): XRViewerPose | null;
-  getPose(space: XRSpace, baseSpace: XRSpace): XRPose | null;
-  getJointPose(joint: XRJointSpace, baseSpace: XRSpace): XRJointPose | null;
-  readonly session: XRSession;
-}
-
-interface XRSpace extends EventTarget {}
-
-interface XRReferenceSpace extends XRSpace {
-  getOffsetReferenceSpace(originOffset: XRRigidTransform): XRReferenceSpace;
-}
-
-interface XRPose {
-  readonly transform: XRRigidTransform;
-}
-
-interface XRInputSource {
-  readonly handedness: 'none' | 'left' | 'right';
-  readonly targetRayMode: 'gaze' | 'tracked-pointer' | 'screen';
-  readonly targetRaySpace: XRSpace;
-  readonly gripSpace?: XRSpace;
-  readonly hand?: XRHand | null;
-}
-
-// ── Hand tracking ──
-// Standard WebXR hand joint names (25 total). Names match the spec exactly.
-type XRHandJoint =
-  | 'wrist'
-  | 'thumb-metacarpal' | 'thumb-phalanx-proximal' | 'thumb-phalanx-distal' | 'thumb-tip'
-  | 'index-finger-metacarpal' | 'index-finger-phalanx-proximal' | 'index-finger-phalanx-intermediate' | 'index-finger-phalanx-distal' | 'index-finger-tip'
-  | 'middle-finger-metacarpal' | 'middle-finger-phalanx-proximal' | 'middle-finger-phalanx-intermediate' | 'middle-finger-phalanx-distal' | 'middle-finger-tip'
-  | 'ring-finger-metacarpal' | 'ring-finger-phalanx-proximal' | 'ring-finger-phalanx-intermediate' | 'ring-finger-phalanx-distal' | 'ring-finger-tip'
-  | 'pinky-finger-metacarpal' | 'pinky-finger-phalanx-proximal' | 'pinky-finger-phalanx-intermediate' | 'pinky-finger-phalanx-distal' | 'pinky-finger-tip';
-
-interface XRJointSpace extends XRSpace {
-  readonly jointName: XRHandJoint;
-}
-
-interface XRJointPose extends XRPose {
-  readonly radius: number;
-}
-
-// XRHand is iterable like a Map<XRHandJoint, XRJointSpace>. We only need `.get` here.
-interface XRHand {
-  readonly size: number;
-  get(key: XRHandJoint): XRJointSpace | undefined;
-  [Symbol.iterator](): IterableIterator<[XRHandJoint, XRJointSpace]>;
-}
 
 interface XRInputSourceEvent extends Event {
   readonly frame: XRFrame;
   readonly inputSource: XRInputSource;
 }
 
-interface XRViewerPose {
-  readonly views: readonly XRView[];
-  readonly transform: XRRigidTransform;
-}
-
 interface XRView {
   readonly eye: XREye;
   readonly projectionMatrix: Float32Array;
   readonly transform: XRRigidTransform;
-}
-
-interface XRRigidTransform {
-  readonly position: DOMPointReadOnly;
-  readonly orientation: DOMPointReadOnly;
-  readonly matrix: Float32Array;
-  readonly inverse: XRRigidTransform;
 }
 
 interface XRViewport {
@@ -119,6 +55,30 @@ interface XRWebGLLayer extends XRLayer {}
 
 interface Navigator {
   readonly xr?: XRSystem;
+}
+
+// ── Augmentations of the WebXR interfaces avp-gestures owns ──
+// These re-open the base interfaces (declared in avp-gestures/src/webxr.d.ts)
+// and add the members only the app's session setup / renderer reads.
+
+interface XRSession {
+  readonly enabledFeatures?: readonly string[];
+  requestReferenceSpace(type: string): Promise<XRReferenceSpace>;
+  requestAnimationFrame(callback: XRFrameRequestCallback): number;
+  updateRenderState(init?: XRRenderStateInit): void;
+  end(): Promise<void>;
+}
+
+interface XRReferenceSpace {
+  getOffsetReferenceSpace(originOffset: XRRigidTransform): XRReferenceSpace;
+}
+
+interface XRViewerPose {
+  readonly views: readonly XRView[];
+}
+
+interface XRRigidTransform {
+  readonly inverse: XRRigidTransform;
 }
 
 // ── WebXR + WebGPU binding types ──

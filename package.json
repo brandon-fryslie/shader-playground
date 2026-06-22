@@ -13,6 +13,7 @@
     "check:shader-sync": "npm run codegen:check -w @shader-playground/xr-ui",
     "check": "npm run check:architecture && npm run check:shader-sync && npm run build",
     "verify:gpu-layout": "deno run --unstable-webgpu --allow-read packages/xr-ui/test/camera-uniform.gpu.test.ts",
+    "verify:gestures": "deno test --no-check packages/avp-gestures/test/recognizer.test.ts",
     "preview": "vite preview"
   },
   "devDependencies": {
