@@ -60,6 +60,8 @@ export type {
 } from './step';
 export { xrUiStep, applySideEffects, makeIdlePrev, uiHandClaimed } from './step';
 
-// Renderer: the GPU factory that draws the laid-out menu.
-export type { XrWidgetRenderer } from './renderer';
+// Renderer: the GPU factory that draws the laid-out menu. It owns its camera
+// buffer; the host supplies per-eye matrices + theme palette as data, never a
+// shared buffer in its own layout. [LAW:locality-or-seam]
+export type { XrWidgetRenderer, XrWidgetCamera, XrWidgetTheme } from './renderer';
 export { createXrWidgetRenderer } from './renderer';

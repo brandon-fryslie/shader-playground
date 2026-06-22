@@ -15,10 +15,13 @@
 //   3 dial           8 category-tile
 //   4 toggle
 
+// Per-eye uniform the renderer owns and fills. Holds only what this shader
+// reads: the eye's view+proj (geometry, distinct per eye) and the menu's
+// theme palette (shared across eyes). The renderer owns this byte layout; no
+// consumer shares a buffer in its own shape. [LAW:locality-or-seam]
 struct Camera {
   view: mat4x4<f32>,
   proj: mat4x4<f32>,
-  eye: vec3<f32>,    _p0: f32,
   primary: vec3<f32>,   _p1: f32,
   secondary: vec3<f32>, _p2: f32,
   accent: vec3<f32>,    _p3: f32,

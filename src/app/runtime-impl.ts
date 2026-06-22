@@ -329,19 +329,18 @@ export async function startAppRuntimeImpl() {
 
   initializeSimulationRegistry();
   xrRuntime = createXrRuntime({
-    cameraStride: CAMERA_STRIDE,
     cameraSystem: gpuContext.cameraSystem,
     currentSimStep: attractorSystem.currentSimStep,
     currentTimeDirection: attractorSystem.currentTimeDirection,
     device: gpuContext.device,
     ensureHdrTargets: gpuContext.postFx.ensureHdrTargets,
-    getCameraUniformData,
     getCurrentPhase: () => currentGpuPhase,
     getCurrentSimulation: () => simulations[state.mode],
     getPostFxSceneFormat: (index) => gpuContext.postFx.getSceneFormat(index),
     getPostFxSceneIndex: () => gpuContext.postFx.getSceneIndex(),
     getPostFxSceneView: (index) => gpuContext.postFx.getSceneView(index),
     getRefSpace: () => xrInputSystem.getRefSpace(),
+    getThemeColors: () => uiOrchestrator.getThemeColors(),
     getUiRenderList: () => xrInputSystem.getRenderList(),
     initializeReferenceSpace: (refSpace, gotFloor) => xrInputSystem.initializeReferenceSpace(refSpace, gotFloor),
     inputStep: (frame) => xrInputSystem.inputStep(frame),
