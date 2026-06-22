@@ -10,7 +10,8 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "check:architecture": "node scripts/check-architecture.mjs && node scripts/check-main-size.mjs",
-    "check": "npm run check:architecture && npm run build",
+    "check:shader-sync": "npm run codegen:check -w @shader-playground/xr-ui",
+    "check": "npm run check:architecture && npm run check:shader-sync && npm run build",
     "verify:gpu-layout": "deno run --unstable-webgpu --allow-read packages/xr-ui/test/camera-uniform.gpu.test.ts",
     "preview": "vite preview"
   },

@@ -1,0 +1,18 @@
+{
+  // Published-dist build. The in-repo app consumes ./src directly (root tsconfig,
+  // noEmit + Vite bundles); this config exists only to emit the standalone dist so
+  // the package is self-contained — no bundler raw-import loader, its own GPU types.
+  "extends": "../../tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "allowImportingTsExtensions": false,
+    "declaration": true,
+    "removeComments": true,
+    "outDir": "./dist",
+    "rootDir": "./src",
+    // Root tsconfig sets types:["vite/client"], which suppresses auto @types. The
+    // dist must resolve WebGPU types without the app's env.d.ts. [LAW:locality-or-seam]
+    "types": ["@webgpu/types"]
+  },
+  "include": ["src"]
+}

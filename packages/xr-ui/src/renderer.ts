@@ -1,3 +1,4 @@
+/// <reference types="@webgpu/types" />
 // XR widget GPU renderer.
 // Owns the pipeline, instance buffer, bind group, and label atlas for
 // xr-widgets.wgsl. One draw call per eye per frame. CPU work is data-driven:
@@ -23,10 +24,11 @@ import {
 import type { RenderCommand, SubZoneRenderState } from './step';
 import type { Widget } from './widgets';
 // [LAW:one-way-deps] The widget shader is co-located inside the package so
-// src/xr-ui/ is self-contained and depends on nothing outside itself — the
-// directory can be lifted into a standalone package as-is. (?raw is the Vite
-// loader contract the consuming build must provide.)
-import SHADER_XR_WIDGETS from './xr-widgets.wgsl?raw';
+// xr-ui is self-contained and depends on nothing outside itself.
+// [LAW:one-source-of-truth] xr-widgets.wgsl is authoritative; xr-widgets.wgsl.gen.ts
+// is a regenerated string artifact (codegen). Importing it normally — not via a
+// `?raw` bundler query — keeps the published dist free of any loader contract.
+import SHADER_XR_WIDGETS from './xr-widgets.wgsl.gen';
 
 const MAX_INSTANCES = 64;
 // 64 bytes per instance — matches xr-widgets.wgsl Instance struct.
