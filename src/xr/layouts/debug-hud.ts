@@ -14,11 +14,11 @@
 // [LAW:dataflow-not-control-flow] visibility=always: the gate evaluates to
 // `true` once and the alpha tween in step.ts ramps to 1; HUDs never need a
 // "hide me" branch in the renderer.
-// [LAW:one-way-deps] Imports only foundation types. xr-ui/* never imports
-// back from layouts/*.
+// [LAW:one-way-deps] App-specific consumer; imports only the xr-ui package
+// barrel. The package never imports back from the app.
 
-import type { Container, Widget } from '../widgets';
-import { HIG_DEFAULTS } from '../widgets';
+import type { Container, Widget } from '@shader-playground/xr-ui';
+import { HIG_DEFAULTS } from '@shader-playground/xr-ui';
 
 // Curated list. Each id matches a ContinuousBinding registered in
 // app/bindings.ts. Order is the visual stacking order in the column.

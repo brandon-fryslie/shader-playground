@@ -1,5 +1,5 @@
 import type { AppState, ModeParamsMap, ParamSection, SimMode, Simulation, ThemeColors } from '../types';
-import type { BindingRegistry } from '../xr-ui/bindings';
+import type { BindingRegistry } from '@shader-playground/xr-ui';
 import type { GpuContext } from './gpu-context';
 import type { AppActions } from './actions';
 import type { UiOrchestrator } from './ui-orchestrator';
@@ -9,9 +9,14 @@ import type { XrInputSystem } from '../xr/input';
 import { loadState as hydrateState } from '../persistence/local-storage';
 import { registerAppBindings, type FxBindingDef, type MetricsAccess } from './bindings';
 import { installDevtools } from '../diagnostics/devtools';
-import { evaluateAnchor } from '../xr-ui/anchors';
-import { hitTestWidgets, layout as xrUiLayout } from '../xr-ui/layout';
-import { applySideEffects as xrUiApplyEffects, makeIdlePrev as xrUiMakeIdlePrev, xrUiStep } from '../xr-ui/step';
+import {
+  evaluateAnchor,
+  hitTestWidgets,
+  layout as xrUiLayout,
+  applySideEffects as xrUiApplyEffects,
+  makeIdlePrev as xrUiMakeIdlePrev,
+  xrUiStep,
+} from '@shader-playground/xr-ui';
 
 type ModeParamsReader = (mode: SimMode) => Record<string, number | string | boolean>;
 

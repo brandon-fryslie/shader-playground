@@ -1,5 +1,5 @@
 import type { AppState, FxParams, ParamSection, SimMode, ThemeColors } from '../types';
-import type { BindingRegistry } from '../xr-ui/bindings';
+import type { BindingRegistry } from '@shader-playground/xr-ui';
 import type { AppActions } from './actions';
 
 type ModeParamsAccess = (mode: SimMode) => Record<string, number | string | boolean>;
