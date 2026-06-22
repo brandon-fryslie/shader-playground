@@ -11,6 +11,15 @@
 // [LAW:one-way-deps] Renderer imports RenderCommand from step.ts; step.ts
 // never imports the renderer.
 
+import {
+  CAMERA_FLOATS,
+  CAMERA_SIZE,
+  CAMERA_STRIDE,
+  EYE_COUNT,
+  packCameraUniform,
+  type XrWidgetCamera,
+  type XrWidgetTheme,
+} from './camera-uniform';
 import type { RenderCommand, SubZoneRenderState } from './step';
 import type { Widget } from './widgets';
 // [LAW:one-way-deps] The widget shader is co-located inside the package so
@@ -26,8 +35,6 @@ const MAX_INSTANCES = 64;
 //   16: halfExtentY + kind + flags + value
 //   16: labelStripIndex + hasLabel + alpha + subZoneState (u32)
 const INSTANCE_STRIDE_BYTES = 64;
-const CAMERA_SIZE = 208;
-const CAMERA_STRIDE = 256;
 
 // Label atlas. One row of pixels per widget; widgets ask for a strip the
 // first time they need a label and the renderer re-rasterizes on text change.
@@ -54,16 +61,25 @@ const KIND: Record<Widget['kind'], number> = {
   'category-tile':8,
 };
 
+// Camera + theme types and the byte layout live in camera-uniform.ts (the
+// single source of truth, GPU-test-pinned). Re-exported so the package barrel
+// and consumers import them from the renderer's public surface unchanged.
+export type { XrWidgetCamera, XrWidgetTheme } from './camera-uniform';
+
 export interface XrWidgetRenderer {
-  draw(encoder: GPUCommandEncoder, sceneView: GPUTextureView, sceneFormat: GPUTextureFormat, viewIndex: number, commands: RenderCommand[]): void;
+  draw(
+    encoder: GPUCommandEncoder,
+    sceneView: GPUTextureView,
+    sceneFormat: GPUTextureFormat,
+    viewIndex: number,
+    camera: XrWidgetCamera,
+    theme: XrWidgetTheme,
+    commands: RenderCommand[],
+  ): void;
   destroy(): void;
 }
 
-export function createXrWidgetRenderer(
-  device: GPUDevice,
-  cameraBuffer: GPUBuffer,
-  uploadCameraData: (viewIndex: number) => Float32Array,
-): XrWidgetRenderer {
+export function createXrWidgetRenderer(device: GPUDevice): XrWidgetRenderer {
   const module = device.createShaderModule({ code: SHADER_XR_WIDGETS, label: 'xr-widgets' });
 
   const bgl = device.createBindGroupLayout({
@@ -83,6 +99,16 @@ export function createXrWidgetRenderer(
     size: INSTANCE_STRIDE_BYTES * MAX_INSTANCES,
     usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
   });
+
+  // [LAW:decomposition] The renderer owns its GPU camera resource; the host owes
+  // data (matrices + palette), not a buffer. One 256-aligned slice per eye.
+  const cameraBuffer = device.createBuffer({
+    label: 'xr-widgets-camera',
+    size: CAMERA_STRIDE * EYE_COUNT,
+    usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+  });
+  // Reused scratch for packing one eye's uniform. Pad floats (35/39/43) stay 0.
+  const cameraScratch = new Float32Array(CAMERA_FLOATS);
 
   const stagingBacking = new ArrayBuffer(INSTANCE_STRIDE_BYTES * MAX_INSTANCES);
   const stagingF = new Float32Array(stagingBacking);
@@ -141,7 +167,7 @@ export function createXrWidgetRenderer(
 
   // ── BIND GROUPS / PIPELINE ───────────────────────────────────────────────
   const bindGroups: GPUBindGroup[] = [];
-  for (let vi = 0; vi < 2; vi++) {
+  for (let vi = 0; vi < EYE_COUNT; vi++) {
     bindGroups.push(device.createBindGroup({
       label: `xr-widgets-bg-eye${vi}`,
       layout: bgl,
@@ -246,10 +272,14 @@ export function createXrWidgetRenderer(
   }
 
   return {
-    draw(encoder, sceneView, sceneFormat, viewIndex, commands) {
+    draw(encoder, sceneView, sceneFormat, viewIndex, camera, theme, commands) {
       // [LAW:dataflow-not-control-flow] Always upload camera + instance buffer
       // and run the pass; an empty commands array results in n=0 → no draw call.
-      device.queue.writeBuffer(cameraBuffer, viewIndex * CAMERA_STRIDE, uploadCameraData(viewIndex) as Float32Array<ArrayBuffer>);
+      device.queue.writeBuffer(
+        cameraBuffer,
+        viewIndex * CAMERA_STRIDE,
+        packCameraUniform(cameraScratch, camera, theme) as Float32Array<ArrayBuffer>,
+      );
       const n = writeInstances(commands);
       if (n > 0) {
         device.queue.writeBuffer(instanceBuffer, 0, stagingBacking, 0, n * INSTANCE_STRIDE_BYTES);
@@ -271,6 +301,7 @@ export function createXrWidgetRenderer(
     },
     destroy() {
       instanceBuffer.destroy();
+      cameraBuffer.destroy();
       atlasTex.destroy();
     },
   };

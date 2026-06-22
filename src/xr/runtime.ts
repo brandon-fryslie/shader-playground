@@ -1,4 +1,4 @@
-import type { AppState, Simulation } from '../types';
+import type { AppState, RGBThemeColors, Simulation } from '../types';
 import type { CameraSystem } from '../render/camera';
 import {
   createXrWidgetRenderer,
@@ -16,19 +16,18 @@ export interface XrRuntime {
 }
 
 interface XrRuntimeDeps {
-  cameraStride: number;
   cameraSystem: CameraSystem;
   currentSimStep(): number;
   currentTimeDirection(): number;
   device: GPUDevice;
   ensureHdrTargets(width: number, height: number): void;
-  getCameraUniformData(aspect: number): Float32Array<ArrayBuffer>;
   getCurrentPhase(): string;
   getRefSpace(): XRReferenceSpace | null;
   getCurrentSimulation(): Simulation | undefined;
   getPostFxSceneFormat(index: number): GPUTextureFormat;
   getPostFxSceneIndex(): number;
   getPostFxSceneView(index: number): GPUTextureView;
+  getThemeColors(): RGBThemeColors;
   getUiRenderList(): XrRenderCommand[];
   initializeReferenceSpace(refSpace: XRReferenceSpace, gotFloor: boolean): void;
   inputStep(frame: XRFrame): void;
@@ -63,7 +62,6 @@ export function createXrRuntime(deps: XrRuntimeDeps): XrRuntime {
   let xrBinding: XRGPUBinding | null = null;
   let xrLayer: XRProjectionLayer | null = null;
   let xrWidgetRenderer: XrWidgetRenderer | null = null;
-  let xrWidgetCameraBuffer: GPUBuffer | null = null;
   let xrDepthOverride: GPUTextureView | null = null;
   let xrFrameCount = 0;
 
@@ -141,10 +139,15 @@ export function createXrRuntime(deps: XrRuntimeDeps): XrRuntime {
         const depthTex = subImage.depthStencilTexture;
         xrDepthOverride = (depthTex && isTextureArray) ? depthTex.createView(viewDesc) : null;
 
+        // [LAW:one-source-of-truth] one pair of per-eye matrices feeds both the
+        // scene camera override and the widget renderer, so the menu renders in
+        // the exact eye space as the simulation.
+        const eyeView = new Float32Array(view.transform.inverse.matrix);
+        const eyeProj = new Float32Array(view.projectionMatrix);
         const pos = view.transform.position;
         deps.cameraSystem.setXrOverride({
-          viewMatrix: new Float32Array(view.transform.inverse.matrix),
-          projMatrix: new Float32Array(view.projectionMatrix),
+          viewMatrix: eyeView,
+          projMatrix: eyeProj,
           eye: [pos.x, pos.y, pos.z],
         });
 
@@ -158,18 +161,18 @@ export function createXrRuntime(deps: XrRuntimeDeps): XrRuntime {
         sim.render(encoder, sceneView, null, viewIndex);
 
         if (!xrWidgetRenderer) {
-          xrWidgetCameraBuffer = deps.device.createBuffer({
-            label: 'xr-widgets-camera',
-            size: deps.cameraStride * 2,
-            usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-          });
-          xrWidgetRenderer = createXrWidgetRenderer(deps.device, xrWidgetCameraBuffer, () => {
-            const aspect = width / height;
-            return deps.getCameraUniformData(aspect);
-          });
+          xrWidgetRenderer = createXrWidgetRenderer(deps.device);
         }
         deps.setCurrentPhase(`xr:frame:${xrFrameCount}:xr-widgets(eye=${viewIndex})`);
-        xrWidgetRenderer.draw(encoder, sceneView, deps.getPostFxSceneFormat(sceneIdx), viewIndex, deps.getUiRenderList());
+        xrWidgetRenderer.draw(
+          encoder,
+          sceneView,
+          deps.getPostFxSceneFormat(sceneIdx),
+          viewIndex,
+          { view: eyeView, proj: eyeProj },
+          deps.getThemeColors(),
+          deps.getUiRenderList(),
+        );
 
         deps.setCurrentPhase(`xr:frame:${xrFrameCount}:bloom(eye=${viewIndex})`);
         deps.postFxRunBloomChain(encoder);
