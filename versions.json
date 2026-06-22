@@ -2,6 +2,28 @@
   "schema": 2,
   "versions": [
     {
+      "version": "pr-53",
+      "ref": "refs/pull/53/merge",
+      "sha": "87c43902ce44e83c45e7eca96a97a48b91efd9fe",
+      "timestamp": "2026-06-22T12:06:20.827Z",
+      "commits": [
+        {
+          "sha": "87c43902ce44e83c45e7eca96a97a48b91efd9fe",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-06-22T06:06:00-06:00",
+          "message": "Merge 84239635aba73b0659743eb96fe859f0f9f214fd into 9356a4f2ee575df064063efe7227e41a17e27980\n"
+        },
+        {
+          "sha": "84239635aba73b0659743eb96fe859f0f9f214fd",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-06-22T06:05:20-06:00",
+          "message": "build(xr-ui): publish dist (files allowlist) + prove consumer resolves @webgpu/types (#shader-xr-ui-t6i.9)\n\nxr-ui had the latent publishing defect avp-gestures fixed in #52: with no\n`files` allowlist, the gitignored dist/ was silently excluded from `npm pack`\n(which honors .gitignore), so publishConfig swapped exports to ./dist on\npublish while the tarball carried only src/ — a published package whose\nexports point at files that do not exist. [FRAMING:representation]\n\nFix, three coordinated moves:\n- files:[\"dist\"] — the allowlist overrides .gitignore; `npm pack` now ships\n  only dist/ + package.json + README (was src/ incl. .wgsl/.gen.ts/tests).\n- @webgpu/types as a peerDependency + a post-emit inject of\n  `/// <reference types=\"@webgpu/types\" />` into dist/index.d.ts. Verified\n  empirically (not assumed): tsc does NOT emit that directive for types\n  supplied via tsconfig `types:[...]` (treated as ambient environment), and\n  @webgpu/types installs outside @types so a consumer never auto-includes it —\n  so the dist named GPUDevice as a bare global resolving nowhere downstream.\n  We never carry @webgpu/types into dist: it is real upstream, owned by the\n  consumer (a WebGPU app). [LAW:one-source-of-truth]\n- verify:xr-ui-dist — an out-of-workspace consumer type-checks the published\n  form and exercises a GPU type from xr-ui's surface, with TWO negative\n  controls proving each part load-bearing: remove the peer → fail; strip the\n  injected reference → fail. [LAW:verifiable-goals] [LAW:no-silent-failure]\n\nDev exports stay ./src; `npm run check` (architecture + shader-sync + app\nbuild) unchanged and green.\n"
+        }
+      ]
+    },
+    {
       "version": "r129-9356a4f",
       "ref": "refs/heads/master",
       "sha": "9356a4f2ee575df064063efe7227e41a17e27980",
