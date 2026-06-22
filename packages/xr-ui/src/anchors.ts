@@ -19,34 +19,20 @@
 // They translate "data is unavailable" into "return null"; they are not
 // defensive guards around hidden bugs and they never substitute a default pose.
 //
-// [LAW:one-way-deps] This module imports nothing from main.ts. The HandFrame
-// interface is a minimal structural shape; main.ts's XrHandFrame is structurally
-// compatible and can be passed without conversion.
+// [LAW:one-way-deps] This module imports nothing from the app. The spatial and
+// input-frame primitives are owned by avp-gestures — anchors evaluates against
+// avp-gestures' per-frame InputContext, and the app's hand frames satisfy
+// InputFrame structurally and are passed without conversion.
 
-export type Hand = 'left' | 'right';
+// [LAW:one-source-of-truth] The spatial primitives and the per-hand input-frame
+// live in avp-gestures; re-exported here so the barrel and menu-internal modules
+// import them from one place.
+export type { Hand, Pose, JointPose, InputFrame } from '@shader-playground/avp-gestures';
+import type { Hand, Pose, JointPose, InputContext } from '@shader-playground/avp-gestures';
 
-export interface Pose {
-  position: [number, number, number];
-  orientation: [number, number, number, number]; // xyzw quaternion
-}
-
-export interface JointPose {
-  position: number[];      // length 3
-  orientation: number[];   // length 4 (xyzw)
-}
-
-// Minimum hand-frame contract. main.ts's XrHandFrame satisfies this structurally.
-// Only the fields actually read by evaluateAnchor are required — adding wrist-
-// orientation-only or palm-only consumers later does not force a wider contract.
-export interface HandFrame {
-  joints: { wrist: JointPose | null } | null;
-  palmNormal: number[] | null;
-}
-
-export interface AnchorContext {
-  hands: Record<Hand, HandFrame>;
-  headPose: Pose | null;
-}
+// The menu evaluates anchors against avp-gestures' per-frame InputContext. It is
+// the SAME type, named for the menu's role; not a second declaration.
+export type AnchorContext = InputContext;
 
 export type Anchor =
   | { kind: 'world';    pose: Pose }
