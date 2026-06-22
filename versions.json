@@ -2,6 +2,28 @@
   "schema": 2,
   "versions": [
     {
+      "version": "pr-46",
+      "ref": "refs/pull/46/merge",
+      "sha": "21945944a6f6c8e8028af57a7b4d27c1b8683a4a",
+      "timestamp": "2026-06-22T08:53:56.304Z",
+      "commits": [
+        {
+          "sha": "21945944a6f6c8e8028af57a7b4d27c1b8683a4a",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-06-22T02:53:36-06:00",
+          "message": "Merge de5b5af6e4287c21881bad924f02bc8ec1879aba into c27b0966a2652447689e34b938a3f4d4fbf5902f\n"
+        },
+        {
+          "sha": "de5b5af6e4287c21881bad924f02bc8ec1879aba",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-06-22T02:52:56-06:00",
+          "message": "refactor(xr-ui): own input-frame + gesture types in avp-gestures; collapse the three hand-frame declarations (#shader-xr-ui-t6i.3)\n\navp-gestures now owns the canonical Apple Vision Pro types: Hand, Ray, Pose,\nJointPose, the per-hand InputFrame, the per-frame InputContext, the intent-neutral\nXrGesture vocabulary, and the AvpFrameResult bundle. [LAW:one-source-of-truth]\n\nThe hand-frame shape was declared three times (anchors.ts narrow, step.ts wide,\nthe app's XrHandFrame widest) — structurally compatible today but free to drift.\nCollapsed to one source:\n- anchors.ts / step.ts import the primitives from avp-gestures; AnchorContext is\n  now an alias of InputContext; the xr-ui barrel re-exposes one canonical set.\n- the app's XrHandFrame `extends InputFrame`, so its overlapping fields ARE the\n  canonical ones while it keeps the adapter-only fields (source, grip, full joints).\n\n[LAW:one-way-deps] forces the spatial primitives down into avp-gestures (it depends\non nothing), so xr-ui and the app import up — never the reverse.\n\nGesture vocabulary moved into avp-gestures and the app imports it. The one\nintent-named member, fine-modifier-on/off, is renamed to its motion ring-pinch-on/off\n(a thumb-to-ring-finger contact); the app's recognizer state keeps the intent name\nfineModifier where meaning belongs. [FRAMING:representation] No other gesture changed.\n\nType-only relocation + consistent discriminant rename across the sole producer and\nconsumer; XR behavior unchanged. npm run check clean (tsc + vite build + arch check).\n"
+        }
+      ]
+    },
+    {
       "version": "r122-c27b096",
       "ref": "refs/heads/master",
       "sha": "c27b0966a2652447689e34b938a3f4d4fbf5902f",
