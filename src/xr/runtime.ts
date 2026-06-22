@@ -1,9 +1,13 @@
 import type { AppState, Simulation } from '../types';
 import type { CameraSystem } from '../render/camera';
-import { createXrWidgetRenderer, type XrWidgetRenderer } from '../xr-ui/renderer';
-import type { XrUiRegistry, RenderCommand as XrRenderCommand } from '../xr-ui/step';
-import { createClipboardLayout } from '../xr-ui/layouts/clipboard';
-import { createDebugHudLayout } from '../xr-ui/layouts/debug-hud';
+import {
+  createXrWidgetRenderer,
+  type XrWidgetRenderer,
+  type XrUiRegistry,
+  type RenderCommand as XrRenderCommand,
+} from '@shader-playground/xr-ui';
+import { createClipboardLayout } from './layouts/clipboard';
+import { createDebugHudLayout } from './layouts/debug-hud';
 
 export interface XrRuntime {
   getDepthOverride(): GPUTextureView | null;

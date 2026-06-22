@@ -1,6 +1,6 @@
 import '../../styles/main.css';
 import type { SimMode, Simulation, AppState } from '../types';
-import { BindingRegistry } from '../xr-ui/bindings';
+import { BindingRegistry } from '@shader-playground/xr-ui';
 import { DEFAULTS as catalogDefaults, PRESETS as catalogPresets, PARAM_DEFS as catalogParamDefs, COLOR_THEMES as catalogColorThemes, DEFAULT_THEME as catalogDefaultTheme, THEME_FADE_MS as catalogThemeFadeMs, DEFAULT_CLEAR_COLOR as catalogDefaultClearColor, SHAPE_IDS as catalogShapeIds, SHAPE_PARAMS as catalogShapeParams, FX_PARAM_DEFS as catalogFxParamDefs, MODE_TAB_LABELS as catalogModeTabLabels } from './catalog';
 import { createAppActions, type AppActions } from './actions';
 import { createGpuContext, type GpuContext, type GpuContextDeps } from './gpu-context';

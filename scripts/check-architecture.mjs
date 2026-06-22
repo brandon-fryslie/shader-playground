@@ -19,7 +19,6 @@ const layers = new Map([
   ['persistence', 4],
   ['diagnostics', 5],
   ['math', 6],
-  ['xr-ui', 6],
   ['types.ts', 6],
 ]);
 

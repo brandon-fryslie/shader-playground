@@ -1,16 +1,16 @@
 import type { AppState } from '../types';
 import { cross3, dot3, normalize3, sub3 } from '../math/vec3';
 import type { Metrics } from '../metrics/bus';
-import type { BindingRegistry } from '../xr-ui/bindings';
 import {
   xrUiStep,
   applySideEffects as xrUiApplyEffects,
   makeIdlePrev as xrUiMakeIdlePrev,
   uiHandClaimed,
+  type BindingRegistry,
   type XrUiPrev,
   type XrUiRegistry,
   type RenderCommand as XrRenderCommand,
-} from '../xr-ui/step';
+} from '@shader-playground/xr-ui';
 
 export type XrHand = 'left' | 'right';
 interface XrRay { origin: number[]; dir: number[] }

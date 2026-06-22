@@ -28,12 +28,11 @@
 // category-tile widget whose `targetTabId` names the destination — back
 // navigation is the same mechanism with `targetTabId: 'root'`. There is
 // no second back-button widget kind and no action-binding-with-side-channel.
-// [LAW:one-way-deps] This module imports only the xr-ui foundation types;
-// nothing in xr-ui/* imports back from layouts/*.
+// [LAW:one-way-deps] This is an app-specific consumer that imports only the
+// xr-ui package barrel; nothing in the package imports back from the app.
 
-import type { Hand } from '../anchors';
-import type { Container, Node, Widget } from '../widgets';
-import { HIG_DEFAULTS } from '../widgets';
+import type { Hand, Container, Node, Widget } from '@shader-playground/xr-ui';
+import { HIG_DEFAULTS } from '@shader-playground/xr-ui';
 
 // 60° wrist tilt around X — the panel cants toward the user's gaze when
 // the wrist is held in a natural reading pose. Tuned in headset; tweak
