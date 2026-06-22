@@ -2,6 +2,28 @@
   "schema": 2,
   "versions": [
     {
+      "version": "pr-48",
+      "ref": "refs/pull/48/merge",
+      "sha": "f6b0c10bc4dff23da858dfc584d581f55e4a2f55",
+      "timestamp": "2026-06-22T10:04:19.457Z",
+      "commits": [
+        {
+          "sha": "f6b0c10bc4dff23da858dfc584d581f55e4a2f55",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-06-22T04:04:01-06:00",
+          "message": "Merge b4d44c45c320980429b3d111943b08c2d83af3e3 into a3393d4befcecc8152f884eaff3980c73b5eec8c\n"
+        },
+        {
+          "sha": "b4d44c45c320980429b3d111943b08c2d83af3e3",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-06-22T04:03:04-06:00",
+          "message": "refactor(xr-ui): inline widget shader via codegen so dist needs no raw-import loader (#shader-xr-ui-t6i.2)\n\nrenderer.ts imported xr-widgets.wgsl via a Vite `?raw` query, forcing every\nconsumer build to provide that loader. Drop the bundler contract: a build-boundary\ncodegen reads the shader (still the single source of truth) and emits a normal TS\nstring module the renderer imports plainly — no `?raw` anywhere, source or dist.\n\n- scripts/gen-shader.mjs: reads xr-widgets.wgsl -> xr-widgets.wgsl.gen.ts via\n  JSON.stringify (byte-exact round-trip). --check mode fails loudly on drift, the\n  explicit synchronization a committed derived artifact owes its source of truth.\n  [LAW:effects-at-boundaries][LAW:one-source-of-truth][LAW:no-silent-failure]\n- renderer.ts: import './xr-widgets.wgsl.gen' (no ?raw); add @webgpu/types devDep\n  + /// reference so the package type-checks standalone (root types:[\"vite/client\"]\n  otherwise suppresses it).\n- tsconfig.build.json + build script emit a dist; verify-no-raw-import.mjs asserts\n  no import specifier carries ?raw or a raw .wgsl. [LAW:verifiable-goals]\n- root check runs codegen:check so shader drift is caught in the gate.\n\nThe in-repo app keeps consuming ./src (publishConfig swaps exports to dist on\npublish); app build + XR rendering unchanged. The .4 GPU layout test still reads\nthe real xr-widgets.wgsl unchanged.\n\nVerified: npm run check (app build + sync), package dist build + no-raw verify,\nverify:gpu-layout PASS, and an edit->regen round-trip propagating with loud drift.\n"
+        }
+      ]
+    },
+    {
       "version": "r124-a3393d4",
       "ref": "refs/heads/master",
       "sha": "a3393d4befcecc8152f884eaff3980c73b5eec8c",
