@@ -11,24 +11,22 @@ import {
   type XrUiRegistry,
   type RenderCommand as XrRenderCommand,
 } from '@shader-playground/xr-ui';
+import type { Hand, Ray, InputFrame, XrGesture } from '@shader-playground/avp-gestures';
 
-export type XrHand = 'left' | 'right';
-interface XrRay { origin: number[]; dir: number[] }
+// [LAW:one-source-of-truth] The hand, ray, and per-hand input-frame types are
+// owned by avp-gestures. XrHand/XrRay are local names for the canonical types;
+// XrHandFrame is the adapter's richer view — the canonical InputFrame plus the
+// WebXR-bookkeeping and full-joint/grip fields only this adapter needs — so its
+// overlapping fields ARE the canonical ones and cannot drift.
+export type XrHand = Hand;
+type XrRay = Ray;
 
-interface XrHandFrame {
+interface XrHandFrame extends InputFrame {
   hand: XrHand;
   tracked: boolean;
   source: XRInputSource | null;
-  pinch: {
-    active: boolean;
-    startTime: number;
-    origin: number[];
-    current: number[];
-  };
-  gazeRay: XrRay | null;
-  currentRay: XrRay | null;
-  ray: XrRay | null;
-  palmNormal: number[] | null;
+  // Widen InputFrame's wrist-only joints to the full tracked hand the recognizer
+  // and palm/grip derivations read. XrJoints is assignable to InputFrame.joints.
   joints: XrJoints | null;
   grip: XrGripState | null;
 }
@@ -74,18 +72,6 @@ function makeIdleHandFrame(hand: XrHand): XrHandFrame {
     grip: null,
   };
 }
-
-type XrGesture =
-  | { kind: 'pinch-start'; hand: XrHand; gazeRay: XrRay }
-  | { kind: 'pinch-hold'; hand: XrHand; dur: number }
-  | { kind: 'pinch-end'; hand: XrHand; dur: number }
-  | { kind: 'two-hand-pinch-start' }
-  | { kind: 'two-hand-pinch-end' }
-  | { kind: 'fine-modifier-on'; hand: XrHand }
-  | { kind: 'fine-modifier-off'; hand: XrHand }
-  | { kind: 'palm-up'; hand: XrHand }
-  | { kind: 'palm-down'; hand: XrHand }
-  | { kind: 'wrist-flick'; hand: XrHand; axis: 'roll' | 'pitch' | 'yaw'; sign: 1 | -1 };
 
 type XrInteraction =
   | { kind: 'idle' }
@@ -422,8 +408,8 @@ export function createXrInputSystem(deps: XrInputSystemDeps): XrInputSystem {
       const prev = xrPrevGestureSnap[hand];
       if (hf.grip) {
         const active = hf.grip.thumbRing === true;
-        if (active && !prev.fineModifier) gestures.push({ kind: 'fine-modifier-on', hand });
-        else if (!active && prev.fineModifier) gestures.push({ kind: 'fine-modifier-off', hand });
+        if (active && !prev.fineModifier) gestures.push({ kind: 'ring-pinch-on', hand });
+        else if (!active && prev.fineModifier) gestures.push({ kind: 'ring-pinch-off', hand });
         prev.fineModifier = active;
       }
 
@@ -551,8 +537,8 @@ export function createXrInputSystem(deps: XrInputSystemDeps): XrInputSystem {
           break;
         case 'pinch-hold':
           break;
-        case 'fine-modifier-on':
-        case 'fine-modifier-off':
+        case 'ring-pinch-on':
+        case 'ring-pinch-off':
           // Events stay in the stream for metrics / logging; xrTuning.gainMultiplier
           // is derived from the per-hand snapshot in xrDetectGestures(), not here.
           break;

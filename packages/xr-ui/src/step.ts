@@ -22,7 +22,7 @@
 // [LAW:no-defensive-null-guards] Missing layout / missing anchor are DATA
 // (return idle); we never substitute a default UI or swallow the absence.
 
-import type { AnchorContext, Pose } from './anchors';
+import type { AnchorContext, Pose, Hand, InputFrame } from './anchors';
 import { quatConj, quatMul, quatRotateVec } from './anchors';
 import type { Container, Node, Widget, Vec2, ContinuousInteraction, VisibilityGate } from './widgets';
 import { isWidget } from './widgets';
@@ -50,18 +50,6 @@ const PALM_FACING_ENTER_DEFAULT = 0.7;
 const PALM_FACING_EXIT = 0.4;
 const HAND_RAISED_ENTER_Y_DEFAULT = 1.0;
 const HAND_RAISED_EXIT_Y_BAND = 0.1;
-
-export type Hand = 'left' | 'right';
-
-// Minimal hand-frame contract. main.ts's XrHandFrame satisfies this structurally.
-export interface HandFrame {
-  pinch: { active: boolean; origin: number[]; current: number[]; startTime: number };
-  gazeRay:    { origin: number[]; dir: number[] } | null;
-  currentRay: { origin: number[]; dir: number[] } | null;
-  ray:        { origin: number[]; dir: number[] } | null;
-  joints: { wrist: { position: number[]; orientation: number[] } | null } | null;
-  palmNormal: number[] | null;
-}
 
 export type InteractionState =
   | { kind: 'idle' }
@@ -230,7 +218,7 @@ const HANDS: Hand[] = ['left', 'right'];
 
 export function xrUiStep(
   registry: XrUiRegistry,
-  hands: Record<Hand, HandFrame>,
+  hands: Record<Hand, InputFrame>,
   prev: XrUiPrev,
   ctx: AnchorContext,
   tuning: XrUiTuning,
@@ -843,7 +831,7 @@ function beginInteraction(
   subZoneId: string | undefined,
   pose: Pose,
   bindings: BindingRegistry,
-  hf: HandFrame,
+  hf: InputFrame,
   root: Container & { kind: 'panel' },
   activeLayoutId: string,
   gainAtStart: number,
@@ -930,7 +918,7 @@ function beginInteraction(
 
 function computeDragValue(
   state: Extract<InteractionState, { kind: 'dragging' }>,
-  hf: HandFrame,
+  hf: InputFrame,
   binding: Extract<Binding, { kind: 'continuous' }>,
   gain: number,
 ): number {

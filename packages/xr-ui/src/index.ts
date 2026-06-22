@@ -1,11 +1,12 @@
 // Public surface of the xr-ui menu foundation. This barrel IS the package
 // contract: consumers import only from here, never from internal modules.
-// [FRAMING:representation] anchors and step both declare Hand/HandFrame; the
-// barrel exposes anchors' as the single canonical pair and keeps step's
-// duplicates internal. [LAW:one-source-of-truth]
+// [LAW:one-source-of-truth] The spatial and input-frame primitives (Hand, Pose,
+// JointPose, the per-hand input-frame) are owned by avp-gestures; anchors
+// re-exports them so this barrel exposes one canonical set. AnchorContext is the
+// menu's alias for avp-gestures' InputContext.
 
 // Anchors: spatial placement of menu panels + quaternion helpers.
-export type { Anchor, Pose, JointPose, AnchorContext, HandFrame, Hand } from './anchors';
+export type { Anchor, Pose, JointPose, AnchorContext, Hand } from './anchors';
 export { evaluateAnchor, composePose, quatConj, quatMul, quatRotateVec } from './anchors';
 
 // Widgets: the widget/container tree and its shared defaults.
