@@ -177,6 +177,44 @@ picture.
 
 ---
 
+## Build & publish
+
+`npm run build -w @shader-playground/avp-gestures` runs `tsc -p
+tsconfig.build.json` (emits `dist/` with `.js` + declarations) →
+`scripts/carry-webxr-types.mjs`.
+
+- `exports` stays `./src` for in-repo dev (Vite compiles the TS); `publishConfig`
+  swaps `exports` to `./dist` on publish, and `files: ["dist"]` is the allowlist
+  that ships the built artifact (`dist/` is gitignored, so without it npm would
+  publish a package with no dist).
+- **The ambient-types carry is the one non-obvious step.** The package's WebXR
+  types live in `src/webxr.d.ts` as an ambient global-script `.d.ts`, pulled in
+  by a `/// <reference path="./webxr.d.ts" />` in `adapter.ts`/`input.ts`. `tsc`
+  does **not** copy a source `.d.ts` into `outDir`, and it does **not** re-emit a
+  *local* triple-slash directive into the emitted declarations — so the emitted
+  `adapter.d.ts`/`input.d.ts` name `XRFrame`/`XRInputSource`/… as bare globals
+  with nothing pulling the declaration in. `carry-webxr-types.mjs` closes both
+  gaps: it copies `src/webxr.d.ts` → `dist/webxr.d.ts` and injects the reference
+  at the top of `dist/index.d.ts` (the published `types` entry a consumer loads
+  first), so loading the package makes the WebXR interfaces global. Without this,
+  a consumer with no `@types/webxr` cannot resolve the globals the dist names.
+
+**Publish acceptance (no headset):**
+
+```
+npm run verify:avp-dist   # build, then type-check an out-of-workspace consumer
+```
+
+This is the proof a standalone `tsc` of the package cannot give: it imports the
+package in its published form (`exports` → `dist`) from a throwaway project
+outside the workspace, with no `@types/webxr` and no WebXR in the TS DOM lib, and
+requires both the import and a direct `XRFrame` reference to type-check — they
+resolve only through the carried `dist/webxr.d.ts`. A negative control removes
+that file and requires the same compile to fail, so the gate proves the carry is
+load-bearing rather than passing by accident.
+
+---
+
 ## Testing
 
 ```

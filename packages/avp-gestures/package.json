@@ -5,5 +5,17 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts"
+  },
+  "files": ["dist"],
+  "publishConfig": {
+    "exports": {
+      ".": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      }
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json && node scripts/carry-webxr-types.mjs"
   }
 }
