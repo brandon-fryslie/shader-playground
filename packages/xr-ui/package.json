@@ -6,6 +6,7 @@
   "exports": {
     ".": "./src/index.ts"
   },
+  "files": ["dist"],
   "publishConfig": {
     "exports": {
       ".": {
@@ -17,10 +18,13 @@
   "scripts": {
     "codegen": "node scripts/gen-shader.mjs",
     "codegen:check": "node scripts/gen-shader.mjs --check",
-    "build": "npm run codegen && tsc -p tsconfig.build.json && node scripts/verify-no-raw-import.mjs"
+    "build": "npm run codegen && tsc -p tsconfig.build.json && node scripts/inject-webgpu-types-ref.mjs && node scripts/verify-no-raw-import.mjs"
   },
   "dependencies": {
     "@shader-playground/avp-gestures": "*"
+  },
+  "peerDependencies": {
+    "@webgpu/types": "^0.1.69"
   },
   "devDependencies": {
     "@webgpu/types": "^0.1.69"

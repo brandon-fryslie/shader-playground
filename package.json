@@ -15,6 +15,7 @@
     "verify:gpu-layout": "deno run --unstable-webgpu --allow-read packages/xr-ui/test/camera-uniform.gpu.test.ts",
     "verify:gestures": "deno test --no-check packages/avp-gestures/test/recognizer.test.ts",
     "verify:avp-dist": "npm run build -w @shader-playground/avp-gestures && node packages/avp-gestures/scripts/verify-consumer.mjs",
+    "verify:xr-ui-dist": "npm run build -w @shader-playground/avp-gestures && npm run build -w @shader-playground/xr-ui && node packages/xr-ui/scripts/verify-consumer.mjs",
     "preview": "vite preview"
   },
   "devDependencies": {
