@@ -65,3 +65,17 @@ export { xrUiStep, applySideEffects, makeIdlePrev, uiHandClaimed } from './step'
 // shared buffer in its own layout. [LAW:locality-or-seam]
 export type { XrWidgetRenderer, XrWidgetCamera, XrWidgetTheme } from './renderer';
 export { createXrWidgetRenderer } from './renderer';
+
+// Session: the PRIMARY entry point. One handle wraps the registry, interaction
+// state, render list, and renderer so a consumer constructs once and drives the
+// whole menu through frame() + renderEye(), reading no WebXR. Everything above
+// stays exported as the advanced escape hatch. [LAW:composability]
+export type {
+  XrUiSession,
+  XrUiSessionConfig,
+  XrUiLayoutConfig,
+  XrUiEyeTarget,
+  XrUiFrameArgs,
+  XrUiFrameResult,
+} from './session';
+export { createXrUiSession } from './session';

@@ -1,6 +1,7 @@
 import '../../styles/main.css';
 import type { SimMode, Simulation, AppState } from '../types';
-import { BindingRegistry } from '@shader-playground/xr-ui';
+import { createXrUiSession, type XrUiSession } from '@shader-playground/xr-ui';
+import { registerAppBindings } from './bindings';
 import { DEFAULTS as catalogDefaults, PRESETS as catalogPresets, PARAM_DEFS as catalogParamDefs, COLOR_THEMES as catalogColorThemes, DEFAULT_THEME as catalogDefaultTheme, THEME_FADE_MS as catalogThemeFadeMs, DEFAULT_CLEAR_COLOR as catalogDefaultClearColor, SHAPE_IDS as catalogShapeIds, SHAPE_PARAMS as catalogShapeParams, FX_PARAM_DEFS as catalogFxParamDefs, MODE_TAB_LABELS as catalogModeTabLabels } from './catalog';
 import { createAppActions, type AppActions } from './actions';
 import { createGpuContext, type GpuContext, type GpuContextDeps } from './gpu-context';
@@ -225,11 +226,6 @@ function resetCurrentSim() {
 }
 
 export async function startAppRuntimeImpl() {
-  // [LAW:no-shared-mutable-globals] The XR binding registry is owned by this
-  // composition root and threaded to every consumer (XR input, app startup),
-  // never read from module scope. xr-ui ships the class, not a global instance.
-  const bindingRegistry = new BindingRegistry();
-
   // [LAW:no-ambient-temporal-coupling] Input subsystems are hoisted before GPU
   // boot so their method refs (used by gpu-context deps) bind to live functions,
   // not to module-level holes filled later.
@@ -314,8 +310,41 @@ export async function startAppRuntimeImpl() {
     state,
     storageKey,
   });
+
+  // [LAW:one-source-of-truth] Read-only window onto the runtime diagnostic
+  // counters, shared by the binding readouts and the debug HUD. Built here so the
+  // session's binding-registration callback (below) and the startup deps draw
+  // from one definition.
+  const metricsAccess = {
+    fps:        () => gpuContext.frameRuntime.getGpuStats().currentFps,
+    gpuMs:      () => gpuContext.frameRuntime.getGpuStats().gpuFrameMs,
+    errorCount: () => diagnosticsLogger.getErrorCount(),
+  };
+
+  // [LAW:composability] The whole XR menu lives behind one session handle. It
+  // owns the binding registry, interaction state, render list, and widget
+  // renderer; this composition root constructs it once and threads it to the XR
+  // input driver (per-frame step) and the XR runtime (per-eye render + layouts).
+  // [LAW:effects-at-boundaries] the session reads no WebXR — the app derives the
+  // input-frame and per-eye matrices and hands them in.
+  const xrUiSession: XrUiSession = createXrUiSession({
+    device: gpuContext.device,
+    registerBindings: (registry) => registerAppBindings({
+      actions: appActions,
+      fxParamDefs: catalogFxParamDefs,
+      metrics: metricsAccess,
+      modeParams,
+      modeTabLabels: catalogModeTabLabels,
+      paramDefs: catalogParamDefs,
+      presets: catalogPresets,
+      registry,
+      state,
+      themes: catalogColorThemes,
+    }),
+  });
+
   xrInputSystem = createXrInputSystem({
-    bindings: bindingRegistry,
+    xrUiSession,
     closestPointOnRayToOrigin: pointerSystem.closestPointOnRayToOrigin,
     createAttractor: attractorSystem.create,
     intersectRayWithPlane: pointerSystem.intersectRayWithPlane,
@@ -341,7 +370,7 @@ export async function startAppRuntimeImpl() {
     getPostFxSceneView: (index) => gpuContext.postFx.getSceneView(index),
     getRefSpace: () => xrInputSystem.getRefSpace(),
     getThemeColors: () => uiOrchestrator.getThemeColors(),
-    getUiRenderList: () => xrInputSystem.getRenderList(),
+    xrUiSession,
     initializeReferenceSpace: (refSpace, gotFloor) => xrInputSystem.initializeReferenceSpace(refSpace, gotFloor),
     inputStep: (frame) => xrInputSystem.inputStep(frame),
     logError,
@@ -362,7 +391,6 @@ export async function startAppRuntimeImpl() {
     state,
     tickFrameStats: (time) => gpuContext.frameRuntime.tickFrameStats(time),
     tickMarkers: attractorSystem.tickMarkers,
-    uiRegistry: xrInputSystem.getUiRegistry(),
     updateStats: () => gpuContext.frameRuntime.updateStats(),
   });
 
@@ -383,13 +411,9 @@ export async function startAppRuntimeImpl() {
 
   runAppStartup({
     appActions,
-    bindingRegistry,
+    xrUiSession,
     catalog: {
       defaults: catalogDefaults,
-      fxParamDefs: catalogFxParamDefs,
-      modeTabLabels: catalogModeTabLabels,
-      paramDefs: catalogParamDefs,
-      presets: catalogPresets,
       themes: catalogColorThemes,
     },
     ensureSimulation,
@@ -397,11 +421,6 @@ export async function startAppRuntimeImpl() {
     gpuContext,
     initGrid,
     isMobile,
-    metrics: {
-      fps:        () => gpuContext.frameRuntime.getGpuStats().currentFps,
-      gpuMs:      () => gpuContext.frameRuntime.getGpuStats().gpuFrameMs,
-      errorCount: () => diagnosticsLogger.getErrorCount(),
-    },
     mobileInput,
     modeParams,
     pointerSystem,

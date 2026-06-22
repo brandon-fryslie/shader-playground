@@ -1,5 +1,5 @@
-import type { AppState, ModeParamsMap, ParamSection, SimMode, Simulation, ThemeColors } from '../types';
-import type { BindingRegistry } from '@shader-playground/xr-ui';
+import type { AppState, ModeParamsMap, SimMode, Simulation, ThemeColors } from '../types';
+import type { XrUiSession } from '@shader-playground/xr-ui';
 import type { GpuContext } from './gpu-context';
 import type { AppActions } from './actions';
 import type { UiOrchestrator } from './ui-orchestrator';
@@ -7,7 +7,6 @@ import type { PointerSystem } from '../input/pointer';
 import type { MobileInput } from '../input/mobile';
 import type { XrInputSystem } from '../xr/input';
 import { loadState as hydrateState } from '../persistence/local-storage';
-import { registerAppBindings, type FxBindingDef, type MetricsAccess } from './bindings';
 import { installDevtools } from '../diagnostics/devtools';
 import {
   evaluateAnchor,
@@ -22,23 +21,21 @@ type ModeParamsReader = (mode: SimMode) => Record<string, number | string | bool
 
 export interface AppStartupCatalog {
   defaults: ModeParamsMap;
-  fxParamDefs: FxBindingDef[];
-  modeTabLabels: Record<SimMode, string>;
-  paramDefs: Record<SimMode, ParamSection[]>;
-  presets: Record<SimMode, Record<string, Record<string, number | string | boolean>>>;
   themes: Record<string, ThemeColors>;
 }
 
 export interface AppStartupDeps {
   appActions: AppActions;
-  bindingRegistry: BindingRegistry;
+  // The XR menu session: the app's bindings are registered into it at
+  // construction (composition root); startup reads its diagnostic surface for
+  // the devtools probe. [LAW:composability]
+  xrUiSession: XrUiSession;
   catalog: AppStartupCatalog;
   ensureSimulation(): void;
   getCurrentSimulation(): Simulation | undefined;
   gpuContext: GpuContext;
   initGrid(): void;
   isMobile: boolean;
-  metrics: MetricsAccess;
   mobileInput: MobileInput;
   modeParams: ModeParamsReader;
   pointerSystem: PointerSystem;
@@ -64,19 +61,6 @@ export function runAppStartup(deps: AppStartupDeps): void {
   if (deps.isMobile) deps.mobileInput.applyMobileDefaults();
   deps.uiOrchestrator.syncThemeTransition(deps.state.colorTheme);
 
-  registerAppBindings({
-    actions: deps.appActions,
-    fxParamDefs: deps.catalog.fxParamDefs,
-    metrics: deps.metrics,
-    modeParams: deps.modeParams,
-    modeTabLabels: deps.catalog.modeTabLabels,
-    paramDefs: deps.catalog.paramDefs,
-    presets: deps.catalog.presets,
-    registry: deps.bindingRegistry,
-    state: deps.state,
-    themes: deps.catalog.themes,
-  });
-
   deps.uiOrchestrator.init();
 
   if (deps.isMobile) {
@@ -97,18 +81,21 @@ export function runAppStartup(deps: AppStartupDeps): void {
     state: deps.state,
     getCurrentSimulation: deps.getCurrentSimulation,
     getGpuStats: () => deps.gpuContext.frameRuntime.getGpuStats(),
-    bindings: deps.bindingRegistry,
+    bindings: deps.xrUiSession.bindings,
     anchors: { evaluateAnchor, handFrames: deps.xrInputSystem.getHandFrames() },
+    // The granular interaction surface is read from the session's escape hatch.
+    // [LAW:no-mode-explosion] devtools is the advanced consumer the escape hatch
+    // exists for; the happy path drives everything through the session.
     xrUi: {
       layout: xrUiLayout,
       hitTestWidgets,
       step: xrUiStep,
       applyEffects: xrUiApplyEffects,
-      registry: deps.xrInputSystem.getUiRegistry(),
+      registry: deps.xrUiSession.registry,
       makeIdlePrev: xrUiMakeIdlePrev,
-      getRenderList: () => deps.xrInputSystem.getRenderList(),
-      getPrev: () => deps.xrInputSystem.getPrev(),
-      getClaimed: () => deps.xrInputSystem.getClaimed(),
+      getRenderList: () => deps.xrUiSession.getRenderList(),
+      getPrev: () => deps.xrUiSession.getPrev(),
+      getClaimed: () => deps.xrUiSession.getClaimed(),
     },
   });
 }
