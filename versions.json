@@ -4,15 +4,22 @@
     {
       "version": "pr-47",
       "ref": "refs/pull/47/merge",
-      "sha": "26d8865128d3f761dc919dd9589a5be337e86872",
-      "timestamp": "2026-06-22T09:10:31.152Z",
+      "sha": "84cfbeb018ed2285b960fe4bbf7db6e06600986a",
+      "timestamp": "2026-06-22T09:27:29.774Z",
       "commits": [
         {
-          "sha": "26d8865128d3f761dc919dd9589a5be337e86872",
+          "sha": "84cfbeb018ed2285b960fe4bbf7db6e06600986a",
           "author_name": "Brandon Fryslie",
           "author_email": "530235+brandon-fryslie@users.noreply.github.com",
-          "timestamp": "2026-06-22T03:10:12-06:00",
-          "message": "Merge d14ef7cfb8b61659a8f481190639c732fdd3e145 into 73129630716267b9c6f4f0eb3cdfe597b26e9a8f\n"
+          "timestamp": "2026-06-22T09:27:13Z",
+          "message": "Merge 521e8195f9a180209eb133a6dd995b9bb519229a into 73129630716267b9c6f4f0eb3cdfe597b26e9a8f\n"
+        },
+        {
+          "sha": "521e8195f9a180209eb133a6dd995b9bb519229a",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-06-22T03:26:49-06:00",
+          "message": "test(xr-ui): pin the widget camera-uniform byte layout with a GPU readback test\n\nThe camera uniform layout is written twice — the WGSL `Camera` struct (offsets\nthe shader reads) and the renderer's packing (offsets it writes) — with nothing\nenforcing agreement. tsc and the build can't catch a divergence: the WGSL is an\nopaque string and the offsets are numbers. A mismatch is a silent alignment bug\nthat renders plausible-but-wrong on the Vision Pro and fails loudly nowhere.\n\nExtract the layout + packing into camera-uniform.ts as the single owned,\nGPU/DOM-free source of truth [LAW:one-source-of-truth][LAW:effects-at-boundaries];\nthe renderer imports it and owns only the buffer. Add a Deno WebGPU test that\ncompiles the REAL xr-widgets.wgsl, packs via the REAL packCameraUniform, renders\nknown widgets and reads back pixels: a button fills with camera.accent (→ blue),\na slider thumb is camera.primary (→ red). Distinct primary/secondary/accent\ncolors pin all three color offsets; the widgets only land on-screen if view+proj\nare at the right offsets, so the same pixels pin the matrices too.\n\nWGSL uniform-address-space offsets are spec-defined, not implementation-defined,\nso wgpu (Deno→Metal) computes the same offsets Safari/visionOS will — this\nvalidates the on-device layout contract without the headset. Asserts behavior,\nnot hand-derived arithmetic [LAW:behavior-not-structure]. Mutation-verified: an\nin-bounds primary/accent swap fails with \"expected blue, got rgb(255,0,0)\".\n\nRun via `npm run verify:gpu-layout` (needs Deno+WebGPU; not wired into the\nPages-deploy CI which has neither).\n"
         },
         {
           "sha": "d14ef7cfb8b61659a8f481190639c732fdd3e145",
