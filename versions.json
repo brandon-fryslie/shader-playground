@@ -2,6 +2,28 @@
   "schema": 2,
   "versions": [
     {
+      "version": "pr-54",
+      "ref": "refs/pull/54/merge",
+      "sha": "12e35650ccb23a231b8f1a9ad53f3d310c1ee1b7",
+      "timestamp": "2026-09-08T07:01:54.831Z",
+      "commits": [
+        {
+          "sha": "12e35650ccb23a231b8f1a9ad53f3d310c1ee1b7",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-09-08T01:01:37-06:00",
+          "message": "Merge 011f5051c9514ad4f1a13ca6345cb9093c2977b6 into b45038bb152daf5d7b339a6e19542f2fa2ac6edf\n"
+        },
+        {
+          "sha": "011f5051c9514ad4f1a13ca6345cb9093c2977b6",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-09-08T00:58:23-06:00",
+          "message": "code-review: converge the workflow on the installer's template\n\ninstall.sh renders this file; the deployed copy had drifted. A stale workflow\nfails silently - the run stays green while the review it was meant to do does\nnot happen.\n"
+        }
+      ]
+    },
+    {
       "version": "r130-b45038b",
       "ref": "refs/heads/master",
       "sha": "b45038bb152daf5d7b339a6e19542f2fa2ac6edf",
