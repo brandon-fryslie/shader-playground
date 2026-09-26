@@ -2,6 +2,28 @@
   "schema": 2,
   "versions": [
     {
+      "version": "pr-55",
+      "ref": "refs/pull/55/merge",
+      "sha": "a794fe52aa47e23164f6a2f6216f927c156f33b0",
+      "timestamp": "2026-09-26T22:38:19.954Z",
+      "commits": [
+        {
+          "sha": "a794fe52aa47e23164f6a2f6216f927c156f33b0",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-09-26T16:38:02-06:00",
+          "message": "Merge fc342d59dbbe238ce466eb14c00749f5bee8d527 into b45038bb152daf5d7b339a6e19542f2fa2ac6edf\n"
+        },
+        {
+          "sha": "fc342d59dbbe238ce466eb14c00749f5bee8d527",
+          "author_name": "Brandon Fryslie",
+          "author_email": "530235+brandon-fryslie@users.noreply.github.com",
+          "timestamp": "2026-09-26T16:37:32-06:00",
+          "message": "Switch package manager to pnpm\n"
+        }
+      ]
+    },
+    {
       "version": "pr-54",
       "ref": "refs/pull/54/merge",
       "sha": "12e35650ccb23a231b8f1a9ad53f3d310c1ee1b7",
