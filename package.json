@@ -10,17 +10,22 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "check:architecture": "node scripts/check-architecture.mjs && node scripts/check-main-size.mjs",
-    "check:shader-sync": "npm run codegen:check -w @shader-playground/xr-ui",
-    "check": "npm run check:architecture && npm run check:shader-sync && npm run build",
+    "check:shader-sync": "pnpm --filter @shader-playground/xr-ui run codegen:check",
+    "check": "pnpm run check:architecture && pnpm run check:shader-sync && pnpm run build",
     "verify:gpu-layout": "deno run --unstable-webgpu --allow-read packages/xr-ui/test/camera-uniform.gpu.test.ts",
     "verify:gestures": "deno test --no-check packages/avp-gestures/test/recognizer.test.ts",
-    "verify:avp-dist": "npm run build -w @shader-playground/avp-gestures && node packages/avp-gestures/scripts/verify-consumer.mjs",
-    "verify:xr-ui-dist": "npm run build -w @shader-playground/avp-gestures && npm run build -w @shader-playground/xr-ui && node packages/xr-ui/scripts/verify-consumer.mjs",
+    "verify:avp-dist": "pnpm --filter @shader-playground/avp-gestures run build && node packages/avp-gestures/scripts/verify-consumer.mjs",
+    "verify:xr-ui-dist": "pnpm --filter @shader-playground/avp-gestures run build && pnpm --filter @shader-playground/xr-ui run build && node packages/xr-ui/scripts/verify-consumer.mjs",
     "preview": "vite preview"
+  },
+  "dependencies": {
+    "@shader-playground/avp-gestures": "workspace:*",
+    "@shader-playground/xr-ui": "workspace:*"
   },
   "devDependencies": {
     "@webgpu/types": "^0.1.69",
     "typescript": "~5.9.3",
     "vite": "^8.0.1"
-  }
+  },
+  "packageManager": "pnpm@10.28.2"
 }

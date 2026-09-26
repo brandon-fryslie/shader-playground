@@ -66,7 +66,7 @@ The library is split at the world boundary, and the split is the design:
   `makeRecognizerState()`. A deterministic function of `(frames, state, now)`
   that carries its own finite-state-machine state explicitly and returns
   `{ gestures, state }`. Because it reads no WebXR and no clock, it is
-  unit-tested with synthetic frames and no device (`npm run verify:gestures`).
+  unit-tested with synthetic frames and no device (`pnpm run verify:gestures`).
 
 `createAvpInput()` is the convenience that wires the two together and holds the
 recognizer state for you. Reach for the layers directly only when you need to
@@ -179,7 +179,7 @@ picture.
 
 ## Build & publish
 
-`npm run build -w @shader-playground/avp-gestures` runs `tsc -p
+`pnpm --filter @shader-playground/avp-gestures run build` runs `tsc -p
 tsconfig.build.json` (emits `dist/` with `.js` + declarations) →
 `scripts/carry-webxr-types.mjs`.
 
@@ -202,7 +202,7 @@ tsconfig.build.json` (emits `dist/` with `.js` + declarations) →
 **Publish acceptance (no headset):**
 
 ```
-npm run verify:avp-dist   # build, then type-check an out-of-workspace consumer
+pnpm run verify:avp-dist   # build, then type-check an out-of-workspace consumer
 ```
 
 This is the proof a standalone `tsc` of the package cannot give: it imports the
@@ -218,7 +218,7 @@ load-bearing rather than passing by accident.
 ## Testing
 
 ```
-npm run verify:gestures   # Deno unit tests over the pure recognizer (no headset)
+pnpm run verify:gestures   # Deno unit tests over the pure recognizer (no headset)
 ```
 
 The recognizer's headset-free testability is the payoff of the pure/impure

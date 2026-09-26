@@ -101,7 +101,7 @@ fi
 DEV_SERVER_PID=""
 start_dev_server() {
   cd "$PROJECT_ROOT"
-  npm run dev -- --port "$APP_PORT" >/dev/null 2>&1 &
+  pnpm run dev -- --port "$APP_PORT" >/dev/null 2>&1 &
   DEV_SERVER_PID=$!
   cd - >/dev/null
 

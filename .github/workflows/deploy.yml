@@ -35,21 +35,19 @@ jobs:
           fi
           echo "slot=${slot}" >> "$GITHUB_OUTPUT"
 
+      - uses: pnpm/action-setup@v4
+
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-          cache: npm
+          cache: pnpm
 
-      # npm ci requires the lockfile to be in sync with node_modules for the current
-      # platform. Vite 8 uses rolldown which has platform-native bindings — the lockfile
-      # generated on macOS arm64 doesn't include the Linux x64 native packages CI needs.
-      # npm install resolves correctly for the runner's platform without failing on this.
-      - run: npm install
+      - run: pnpm install --frozen-lockfile
 
       - name: Build with explicit base URL
         env:
           VITE_BASE: /${{ github.event.repository.name }}/${{ steps.version.outputs.slot }}/
-        run: npm run build
+        run: pnpm run build
 
       - uses: brandon-fryslie/gh-pages-multiplexer@v1
         with:

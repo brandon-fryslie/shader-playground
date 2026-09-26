@@ -22,16 +22,16 @@ All simulations use WebGPU compute shaders. Rendering uses instanced draw calls 
 ## Running Locally
 
 ```bash
-npm install
-npm run dev
+pnpm install
+pnpm run dev
 ```
 
 Opens at `http://localhost:5173` with hot reload.
 
 **Production build:**
 ```bash
-npm run build   # type-checks with tsc, then bundles
-npm run preview # serves dist/
+pnpm run build   # type-checks with tsc, then bundles
+pnpm run preview # serves dist/
 ```
 
 ---
@@ -47,12 +47,12 @@ openssl req -x509 -newkey rsa:2048 -keyout key.pem -out cert.pem -days 365 -node
 Then start the dev server — it auto-detects the cert files and serves HTTPS:
 
 ```bash
-npm run dev   # serves on https://0.0.0.0:4443
+pnpm run dev   # serves on https://0.0.0.0:4443
 ```
 
 Open `https://<your-mac-ip>:4443` in Safari on Vision Pro, accept the cert warning, and tap **Enter VR**.
 
-Alternatively, `server.py` serves a production build with no-cache headers (useful if you've already run `npm run build`):
+Alternatively, `server.py` serves a production build with no-cache headers (useful if you've already run `pnpm run build`):
 
 ```bash
 python3 server.py
@@ -158,4 +158,4 @@ Each simulation implements:
 
 Simulations are lazy-initialized on first tab switch and reuse GPU buffers until destroyed. Boids and N-body use ping-pong (A/B) storage buffers; fluid uses staged copy-back.
 
-Run `npm run check` to enforce the bootstrap-size and dependency-direction guardrails before the production build.
+Run `pnpm run check` to enforce the bootstrap-size and dependency-direction guardrails before the production build.
