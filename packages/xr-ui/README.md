@@ -161,13 +161,13 @@ raw-import loader:
 - `scripts/gen-shader.mjs` emits `src/xr-widgets.wgsl.gen.ts` (committed,
   byte-exact via `JSON.stringify`); `renderer.ts` imports it normally — **no
   `?raw` anywhere**.
-- `npm run build -w @shader-playground/xr-ui` runs codegen → `tsc -p
+- `pnpm --filter @shader-playground/xr-ui run build` runs codegen → `tsc -p
   tsconfig.build.json` (emits `dist/`, declarations) →
   `scripts/verify-no-raw-import.mjs` (fails if any `dist` specifier carries
   `?raw` or a raw `.wgsl`).
 - `exports` stays `./src` for in-repo dev; `publishConfig` swaps `exports` to
   `./dist` on publish.
-- The root `npm run check` runs `codegen:check`, so shader drift fails loudly.
+- The root `pnpm run check` runs `codegen:check`, so shader drift fails loudly.
 
 **Types:** `@webgpu/types` is a devDependency and a `/// <reference>` in the
 renderer/session, so the package type-checks standalone.
@@ -175,14 +175,14 @@ renderer/session, so the package type-checks standalone.
 **Layout-regression gate (no headset):**
 
 ```
-npm run verify:gpu-layout   # Deno + WebGPU readback test
+pnpm run verify:gpu-layout   # Deno + WebGPU readback test
 ```
 
 It compiles the real `xr-widgets.wgsl`, packs via the real `packCameraUniform`,
 and asserts the shader reads `view`/`proj`/`primary`/`secondary`/`accent` from
 the correct byte offsets. WGSL uniform offsets are spec-defined, so this
 validates the on-device layout contract without a device. It needs Deno+WebGPU
-and is intentionally **not** wired into `npm run check` (the Pages-deploy CI has
+and is intentionally **not** wired into `pnpm run check` (the Pages-deploy CI has
 no Deno).
 
 ---

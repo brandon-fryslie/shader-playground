@@ -4,15 +4,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Commands
 
-- `npm run dev` — Start Vite dev server with HTTPS on `0.0.0.0:4443` (hot reload)
-- `npm run build` — Type-check with `tsc` then production build to `dist/`
-- `npm run preview` — Serve production build locally
+- `pnpm run dev` — Start Vite dev server with HTTPS on `0.0.0.0:4443` (hot reload)
+- `pnpm run build` — Type-check with `tsc` then production build to `dist/`
+- `pnpm run preview` — Serve production build locally
 
 For Vision Pro testing, generate a self-signed cert first:
 ```
 openssl req -x509 -newkey rsa:2048 -keyout key.pem -out cert.pem -days 365 -nodes -subj "/CN=shader-playground"
 ```
-Then `npm run dev` auto-detects the cert and serves HTTPS.
+Then `pnpm run dev` auto-detects the cert and serves HTTPS.
 
 ## Deployment
 
@@ -21,7 +21,7 @@ GitHub Pages, multiplexed by version slot via `.github/workflows/deploy.yml`:
 - **master commits**: `https://brandon-fryslie.github.io/shader-playground/r<count>-<short-sha>/`
 - **tags `v*`**: `https://brandon-fryslie.github.io/shader-playground/<tag>/`
 
-The Vision Pro user tests against PR previews — they do **not** run `npm run dev` locally for review. After pushing to a PR branch, the deploy completes in ~1–2 minutes; verify with `gh run list --workflow deploy.yml --limit 1`. The user reloads the PR preview URL; no local dev server involved.
+The Vision Pro user tests against PR previews — they do **not** run `pnpm run dev` locally for review. After pushing to a PR branch, the deploy completes in ~1–2 minutes; verify with `gh run list --workflow deploy.yml --limit 1`. The user reloads the PR preview URL; no local dev server involved.
 
 ## Architecture
 

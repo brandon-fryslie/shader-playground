@@ -4,9 +4,9 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
 
 ## Commands
 
-- `npm run dev` — Start Vite dev server with HTTPS on `0.0.0.0:4443` (hot reload)
-- `npm run build` — Type-check with `tsc` then production build to `dist/`
-- `npm run preview` — Serve production build locally
+- `pnpm run dev` — Start Vite dev server with HTTPS on `0.0.0.0:4443` (hot reload)
+- `pnpm run build` — Type-check with `tsc` then production build to `dist/`
+- `pnpm run preview` — Serve production build locally
 
 ## Workflow
 
@@ -16,7 +16,7 @@ For Vision Pro testing, generate a self-signed cert first:
 ```
 openssl req -x509 -newkey rsa:2048 -keyout key.pem -out cert.pem -days 365 -nodes -subj "/CN=shader-playground"
 ```
-Then `npm run dev` auto-detects the cert and serves HTTPS.
+Then `pnpm run dev` auto-detects the cert and serves HTTPS.
 
 ## Architecture
 
@@ -54,7 +54,7 @@ WebGPU compute shader playground with 6 simulation modes (boids, N-body physics,
 
 **Shader edits:** `src/gpu/shaders.ts` is the single source of truth for original and edited WGSL. Simulations request sources by shader id. Edits take effect on simulation reset.
 
-**Architecture checks:** `npm run check` runs dependency-direction and `src/main.ts` size guards, then the production build.
+**Architecture checks:** `pnpm run check` runs dependency-direction and `src/main.ts` size guards, then the production build.
 
 ### WebXR on Vision Pro
 

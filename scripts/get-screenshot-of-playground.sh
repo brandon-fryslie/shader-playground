@@ -142,7 +142,7 @@ fi
 
 if [[ -z "$APP_URL" ]]; then
   echo "${RED}Error:${RESET} No matching shader playground server found." >&2
-  echo "Start one with ${BOLD}npm run dev${RESET} or ${BOLD}npm run preview${RESET}, or pass --url." >&2
+  echo "Start one with ${BOLD}pnpm run dev${RESET} or ${BOLD}pnpm run preview${RESET}, or pass --url." >&2
   exit 1
 fi
 

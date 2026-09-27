@@ -30,7 +30,9 @@ const REPO = path.resolve(PKG, '..', '..');
 const DIST = path.join(PKG, 'dist');
 const GESTURES = path.join(REPO, 'packages', 'avp-gestures');
 const TSC = path.join(REPO, 'node_modules', 'typescript', 'bin', 'tsc');
-const WEBGPU_TYPES = path.join(REPO, 'node_modules', '@webgpu', 'types');
+// pnpm links node_modules/@webgpu/types to its store copy; resolve so cpSync copies files, not the link.
+const WEBGPU_TYPES_LINK = path.join(REPO, 'node_modules', '@webgpu', 'types');
+const WEBGPU_TYPES = fs.existsSync(WEBGPU_TYPES_LINK) ? fs.realpathSync(WEBGPU_TYPES_LINK) : WEBGPU_TYPES_LINK;
 const PKG_NAME = '@shader-playground/xr-ui';
 const REFERENCE = '/// <reference types="@webgpu/types" />';
 
